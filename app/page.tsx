@@ -40,9 +40,105 @@ interface BridgeEvent {
   time: string;
 }
 
-interface BridgePayload {
+interface TerminalRegistrationView {
+  terminalId: string;
+  computerId: string;
+  computerName: string;
+  accountNumber: string;
+  brokerName: string;
+  serverName: string;
+  priority: number;
+  vpsId: string;
+  tags: string[];
+  capabilities: string[];
+  notes: string;
+  registeredAt: string;
+  updatedAt: string;
+}
+
+interface AccountRouteView {
+  accountNumber: string;
+  preferredTerminalIds: string[];
+  failoverStrategy: "priority" | "stability";
+  minStabilityScore: number;
+  createdAt: string;
+  updatedAt: string;
+  resolvedAt?: string;
+  selectedTerminalId?: string;
+  selectedReason?: string;
+  candidates?: Array<{
+    terminalId: string;
+    status: string;
+    stabilityScore: number;
+    latencyMs: number;
+    priority: number;
+    computerId: string;
+  }>;
+}
+
+interface VpsView {
+  vpsId: string;
+  label: string;
+  provider: string;
+  region: string;
+  ipAddress: string;
+  status: "online" | "offline" | "degraded" | "unknown";
+  notes: string;
+  registeredAt: string;
+  updatedAt: string;
+}
+
+interface CommandAckView {
+  commandId: string;
+  terminalId: string;
+  status: string;
+  ticket?: string;
+  brokerMessage?: string;
+  executedPrice?: number | null;
+  executedVolumeLots?: number | null;
+  latencyMs: number;
+  receivedAt: string;
+}
+
+interface CommandSummaryView {
+  total: number;
+  queued: number;
+  leased: number;
+  acknowledged: number;
+  expired: number;
+  dead: number;
+  recentAcks: CommandAckView[];
+}
+
+interface BridgeCommandView {
+  commandId: string;
+  terminalId: string;
+  type: string;
+  payload: unknown;
+  createdAt: string;
+  expiresAt: string;
+  status: string;
+  attempt: number;
+  leasedAt: string;
+  leasedUntil: string;
+  lastDispatchedAt: string;
+  lastAckAt: string;
+  ack: CommandAckView | null;
+  error: string;
+}
+
+interface TerminalOperationsPayload {
+  ok: boolean;
   terminals: BridgeTerminal[];
   events: BridgeEvent[];
+  registrations?: TerminalRegistrationView[];
+  routing?: AccountRouteView[];
+  vps?: VpsView[];
+  commands?: {
+    summary: CommandSummaryView;
+    commands: BridgeCommandView[];
+    recentAcks: CommandAckView[];
+  };
 }
 
 const bridgeUrl = process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? "http://localhost:8787";
@@ -52,8 +148,26 @@ export default function Dashboard() {
   const [ngaTime, setNgaTime] = useState<string>('');
   const [terminals, setTerminals] = useState<BridgeTerminal[]>([]);
   const [events, setEvents] = useState<BridgeEvent[]>([]);
+  const [registrations, setRegistrations] = useState<TerminalRegistrationView[]>([]);
+  const [routes, setRoutes] = useState<AccountRouteView[]>([]);
+  const [vps, setVps] = useState<VpsView[]>([]);
+  const [commands, setCommands] = useState<BridgeCommandView[]>([]);
+  const [recentAcks, setRecentAcks] = useState<CommandAckView[]>([]);
+  const [commandSummary, setCommandSummary] = useState<CommandSummaryView | null>(null);
   const [bridgeOnline, setBridgeOnline] = useState(false);
   const [lastBridgeError, setLastBridgeError] = useState<string>('');
+  const [enqueueState, setEnqueueState] = useState<{ status: "idle" | "submitting" | "ok" | "error"; message: string }>({
+    status: "idle",
+    message: "",
+  });
+  const [enqueueForm, setEnqueueForm] = useState({
+    terminalId: "",
+    symbol: "XAUUSD",
+    side: "buy" as "buy" | "sell",
+    volumeLots: "0.01",
+    stopLoss: "0",
+    takeProfit: "0",
+  });
 
   useEffect(() => {
     const updateTime = () => {
@@ -77,15 +191,21 @@ export default function Dashboard() {
 
     const loadBridgeState = async () => {
       try {
-        const response = await fetch(`${bridgeUrl}/terminals`, { cache: "no-store" });
+        const response = await fetch(`/api/mt5/terminal-operations`, { cache: "no-store" });
         if (!response.ok) {
           throw new Error(`Bridge returned HTTP ${response.status}`);
         }
 
-        const payload = (await response.json()) as BridgePayload;
+        const payload = (await response.json()) as TerminalOperationsPayload;
         if (!cancelled) {
           setTerminals(payload.terminals ?? []);
           setEvents(payload.events ?? []);
+          setRegistrations(payload.registrations ?? []);
+          setRoutes(payload.routing ?? []);
+          setVps(payload.vps ?? []);
+          setCommands(payload.commands?.commands ?? []);
+          setRecentAcks(payload.commands?.recentAcks ?? []);
+          setCommandSummary(payload.commands?.summary ?? null);
           setBridgeOnline(true);
           setLastBridgeError('');
         }
@@ -123,6 +243,59 @@ export default function Dashboard() {
       time: "",
     }];
   }, [bridgeOnline, events, lastBridgeError]);
+
+  const selectedEnqueueTerminalId = enqueueForm.terminalId || connectedTerminals[0]?.terminalId || "";
+
+  const enqueuePlaceOrder = async () => {
+    setEnqueueState({ status: "submitting", message: "" });
+    try {
+      const terminalId = selectedEnqueueTerminalId.trim();
+      if (!terminalId) {
+        throw new Error("Select a terminal.");
+      }
+
+      const volumeLots = Number(enqueueForm.volumeLots);
+      const stopLoss = Number(enqueueForm.stopLoss);
+      const takeProfit = Number(enqueueForm.takeProfit);
+      if (!Number.isFinite(volumeLots) || volumeLots <= 0) {
+        throw new Error("Volume must be a positive number.");
+      }
+      if (!Number.isFinite(stopLoss) || !Number.isFinite(takeProfit)) {
+        throw new Error("SL/TP must be numeric values.");
+      }
+
+      const commandId = `${terminalId}-${crypto.randomUUID()}`;
+      const createdAt = new Date().toISOString();
+      const expiresAt = new Date(Date.now() + 60_000).toISOString();
+
+      const response = await fetch("/api/mt5/commands/enqueue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          commandId,
+          terminalId,
+          type: "place_order",
+          createdAt,
+          expiresAt,
+          payload: {
+            symbol: enqueueForm.symbol.trim(),
+            side: enqueueForm.side,
+            orderKind: "market",
+            volumeLots,
+            stopLoss,
+            takeProfit,
+          },
+        }),
+      });
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(message || `Enqueue failed with HTTP ${response.status}`);
+      }
+      setEnqueueState({ status: "ok", message: "Command enqueued." });
+    } catch (error) {
+      setEnqueueState({ status: "error", message: error instanceof Error ? error.message : "Failed to enqueue command." });
+    }
+  };
 
   return (
     <div className="flex h-screen overflow-hidden bg-white text-slate-900 font-sans">
@@ -295,9 +468,173 @@ export default function Dashboard() {
                   </ScrollArea>
                 </TabsContent>
                 <TabsContent value="orders" className="m-0 border-none p-0 outline-none h-full absolute inset-0">
-                  <div className="h-full flex items-center justify-center px-6 text-center text-sm text-slate-500">
-                    Live order routing is intentionally disabled until the risk gate, command queue, and execution acknowledgment loop are complete.
-                  </div>
+                  <ScrollArea className="h-full">
+                    <div className="p-4 space-y-4">
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <Card className="border-slate-200 shadow-none">
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-xs text-slate-500 font-normal uppercase tracking-wider">Queued</CardTitle>
+                          </CardHeader>
+                          <CardContent className="text-2xl font-mono text-slate-950">
+                            {commandSummary?.queued ?? 0}
+                          </CardContent>
+                        </Card>
+                        <Card className="border-slate-200 shadow-none">
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-xs text-slate-500 font-normal uppercase tracking-wider">In Flight</CardTitle>
+                          </CardHeader>
+                          <CardContent className="text-2xl font-mono text-slate-950">
+                            {commandSummary?.leased ?? 0}
+                          </CardContent>
+                        </Card>
+                        <Card className="border-slate-200 shadow-none">
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-xs text-slate-500 font-normal uppercase tracking-wider">Acknowledged</CardTitle>
+                          </CardHeader>
+                          <CardContent className="text-2xl font-mono text-slate-950">
+                            {commandSummary?.acknowledged ?? 0}
+                          </CardContent>
+                        </Card>
+                      </div>
+
+                      <div className="rounded-lg border border-slate-200 bg-white p-4 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div className="text-sm font-semibold text-slate-950">Enqueue Demo Order</div>
+                          <div className={cn(
+                            "text-xs font-mono",
+                            enqueueState.status === "ok" && "text-teal-700",
+                            enqueueState.status === "error" && "text-rose-700",
+                            enqueueState.status === "submitting" && "text-slate-500",
+                          )}>
+                            {enqueueState.message}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-6 gap-2 text-sm">
+                          <select
+                            className="md:col-span-2 h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                            value={selectedEnqueueTerminalId}
+                            onChange={(e) => setEnqueueForm((current) => ({ ...current, terminalId: e.target.value }))}
+                          >
+                            <option value="">Select terminal</option>
+                            {connectedTerminals.map((terminal) => (
+                              <option key={terminal.terminalId} value={terminal.terminalId}>{terminal.terminalId}</option>
+                            ))}
+                          </select>
+                          <input
+                            className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                            value={enqueueForm.symbol}
+                            onChange={(e) => setEnqueueForm((current) => ({ ...current, symbol: e.target.value }))}
+                          />
+                          <select
+                            className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                            value={enqueueForm.side}
+                            onChange={(e) => setEnqueueForm((current) => ({ ...current, side: e.target.value as "buy" | "sell" }))}
+                          >
+                            <option value="buy">buy</option>
+                            <option value="sell">sell</option>
+                          </select>
+                          <input
+                            className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                            value={enqueueForm.volumeLots}
+                            onChange={(e) => setEnqueueForm((current) => ({ ...current, volumeLots: e.target.value }))}
+                          />
+                          <button
+                            type="button"
+                            className={cn(
+                              "h-9 rounded-md border px-3 text-xs font-semibold",
+                              enqueueState.status === "submitting"
+                                ? "border-slate-200 bg-slate-100 text-slate-400"
+                                : "border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100",
+                            )}
+                            disabled={enqueueState.status === "submitting"}
+                            onClick={enqueuePlaceOrder}
+                          >
+                            Enqueue
+                          </button>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="w-16 text-slate-500 font-mono">SL</span>
+                            <input
+                              className="h-9 flex-1 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                              value={enqueueForm.stopLoss}
+                              onChange={(e) => setEnqueueForm((current) => ({ ...current, stopLoss: e.target.value }))}
+                            />
+                          </div>
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="w-16 text-slate-500 font-mono">TP</span>
+                            <input
+                              className="h-9 flex-1 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                              value={enqueueForm.takeProfit}
+                              onChange={(e) => setEnqueueForm((current) => ({ ...current, takeProfit: e.target.value }))}
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
+                          <div className="px-4 py-3 border-b border-slate-200 text-sm font-semibold text-slate-950">Recent Acknowledgements</div>
+                          <Table>
+                            <TableHeader className="bg-slate-50 sticky top-0 backdrop-blur-sm z-10">
+                              <TableRow className="border-slate-200 hover:bg-transparent">
+                                <TableHead className="text-xs font-mono text-slate-500">Time</TableHead>
+                                <TableHead className="text-xs font-mono text-slate-500">Terminal</TableHead>
+                                <TableHead className="text-xs font-mono text-slate-500">Status</TableHead>
+                                <TableHead className="text-xs font-mono text-slate-500">Ticket</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {recentAcks.length === 0 ? (
+                                <TableRow className="border-slate-100 hover:bg-transparent">
+                                  <TableCell colSpan={4} className="h-28 text-center text-sm text-slate-500">
+                                    No acknowledgements yet.
+                                  </TableCell>
+                                </TableRow>
+                              ) : recentAcks.slice(0, 15).map((ack) => (
+                                <TableRow key={ack.commandId} className="border-slate-100 hover:bg-slate-50">
+                                  <TableCell className="font-mono text-xs text-slate-700">{formatTime(ack.receivedAt)}</TableCell>
+                                  <TableCell className="font-mono text-xs text-slate-700">{ack.terminalId}</TableCell>
+                                  <TableCell className="font-mono text-xs text-slate-700">{ack.status}</TableCell>
+                                  <TableCell className="font-mono text-xs text-slate-700">{ack.ticket ?? ""}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </div>
+
+                        <div className="rounded-lg border border-slate-200 bg-white overflow-hidden">
+                          <div className="px-4 py-3 border-b border-slate-200 text-sm font-semibold text-slate-950">Command Queue</div>
+                          <Table>
+                            <TableHeader className="bg-slate-50 sticky top-0 backdrop-blur-sm z-10">
+                              <TableRow className="border-slate-200 hover:bg-transparent">
+                                <TableHead className="text-xs font-mono text-slate-500">Created</TableHead>
+                                <TableHead className="text-xs font-mono text-slate-500">Terminal</TableHead>
+                                <TableHead className="text-xs font-mono text-slate-500">Type</TableHead>
+                                <TableHead className="text-xs font-mono text-slate-500">Status</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {commands.length === 0 ? (
+                                <TableRow className="border-slate-100 hover:bg-transparent">
+                                  <TableCell colSpan={4} className="h-28 text-center text-sm text-slate-500">
+                                    No commands enqueued yet.
+                                  </TableCell>
+                                </TableRow>
+                              ) : commands.slice(0, 20).map((command) => (
+                                <TableRow key={command.commandId} className="border-slate-100 hover:bg-slate-50">
+                                  <TableCell className="font-mono text-xs text-slate-700">{formatTime(command.createdAt)}</TableCell>
+                                  <TableCell className="font-mono text-xs text-slate-700">{command.terminalId}</TableCell>
+                                  <TableCell className="font-mono text-xs text-slate-700">{command.type}</TableCell>
+                                  <TableCell className="font-mono text-xs text-slate-700">{command.status} / {command.attempt}</TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      </div>
+                    </div>
+                  </ScrollArea>
                 </TabsContent>
               </CardContent>
             </Tabs>
@@ -338,7 +675,9 @@ export default function Dashboard() {
                       )}
                       <div className="flex flex-col">
                         <span className="text-sm font-medium text-slate-950">{terminal.terminalId}</span>
-                        <span className="text-xs text-slate-500">{terminal.brokerName || "Unknown broker"}{terminal.computerName ? ` / ${terminal.computerName}` : ""}</span>
+                        <span className="text-xs text-slate-500">
+                          {terminal.brokerName || "Unknown broker"}{terminal.computerName ? ` / ${terminal.computerName}` : ""}{terminal.accountNumber ? ` / ${terminal.accountNumber}` : ""}
+                        </span>
                       </div>
                     </div>
                     <div className="flex flex-col items-end">
@@ -367,6 +706,10 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="p-0">
+              <div className="px-4 py-2 text-[11px] text-slate-500 border-b border-slate-100 bg-slate-50 flex justify-between">
+                <span>Registrations {registrations.length} / Routing {routes.length} / VPS {vps.length}</span>
+                <span>Commands {commandSummary?.total ?? 0}</span>
+              </div>
               <ScrollArea className="h-[200px]">
                 <div className="flex flex-col">
                   {dashboardEvents.map((event, idx) => (

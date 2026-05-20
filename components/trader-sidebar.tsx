@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Bell,
   Bot,
@@ -619,6 +620,8 @@ const defaultPreferences: SidebarPreferences = {
 export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: TraderSidebarProps) {
   const [mounted, setMounted] = useState(false);
   const [preferences, setPreferences] = useState<SidebarPreferences>(defaultPreferences);
+  const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     let nextPreferences = defaultPreferences;
@@ -633,10 +636,11 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
     }
 
     queueMicrotask(() => {
-      setPreferences(nextPreferences);
+      const inferredActivePage = pageIdForPathname(pathname);
+      setPreferences({ ...nextPreferences, activePage: inferredActivePage ?? nextPreferences.activePage });
       setMounted(true);
     });
-  }, []);
+  }, [pathname]);
 
   useEffect(() => {
     if (mounted) {
@@ -669,6 +673,10 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
   const selectPage = (pageId: string) => {
     setPreference({ activePage: pageId });
     onMobileOpenChange(false);
+    const href = hrefForPageId(pageId);
+    if (href) {
+      router.push(href);
+    }
   };
 
   return (
@@ -990,4 +998,32 @@ function slug(value: string): string {
     .replace(/&/g, "and")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function hrefForPageId(pageId: string): string | null {
+  if (pageId === "trading-operations") return "/";
+  if (pageId === "executive-overview") return "/";
+  if (pageId === "infrastructure-overview") return "/mt5-infrastructure";
+  if (pageId === "connected-terminals") return "/mt5-infrastructure/terminal-operations/connected-terminals";
+  if (pageId === "terminal-registration") return "/mt5-infrastructure/terminal-operations/terminal-registration";
+  if (pageId === "terminal-heartbeat") return "/mt5-infrastructure/terminal-operations/terminal-heartbeat";
+  if (pageId === "terminal-health-monitoring") return "/mt5-infrastructure/terminal-operations/terminal-health-monitoring";
+  if (pageId === "mt5-synchronization") return "/mt5-infrastructure/terminal-operations/mt5-synchronization";
+  if (pageId === "mt5-execution-bridge") return "/mt5-infrastructure/terminal-operations/mt5-execution-bridge";
+  if (pageId === "live-latency-monitoring") return "/mt5-infrastructure/terminal-operations/live-latency-monitoring";
+  if (pageId === "multi-computer-support") return "/mt5-infrastructure/terminal-operations/multi-computer-support";
+  if (pageId === "account-routing") return "/mt5-infrastructure/terminal-operations/account-routing";
+  if (pageId === "vps-management") return "/mt5-infrastructure/terminal-operations/vps-management";
+  if (pageId === "ea-deployment") return "/mt5-infrastructure/terminal-operations/ea-deployment";
+  return null;
+}
+
+function pageIdForPathname(pathname: string): string | null {
+  if (pathname === "/") return "executive-overview";
+  if (pathname === "/mt5-infrastructure") return "infrastructure-overview";
+  const match = pathname.match(/^\/mt5-infrastructure\/terminal-operations\/([^/]+)$/);
+  if (match?.[1]) {
+    return match[1];
+  }
+  return null;
 }
