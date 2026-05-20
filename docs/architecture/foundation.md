@@ -15,7 +15,23 @@ The dashboard treats missing service data as disconnected, not online. Broker de
 - `packages/shared-types`: TypeScript contracts shared by dashboard, services, and bridge code.
 - `packages/risk-core`: deterministic prop-firm checks and lot sizing.
 - `packages/mt5-protocol`: MT5 command and acknowledgment envelopes.
-- `services/mt5-terminal-manager`: heartbeat registry skeleton.
+- `services/mt5-terminal-manager`: heartbeat registry, terminal registration, account routing, and failover selection.
+
+## Architecture Domains
+
+The backend has a typed service foundation for every requested Cacsms Trader domain:
+
+- Web Dashboard: `services/web-dashboard-service`
+- Market Intelligence Engine: `services/market-intelligence-engine`
+- Computer Vision Chart Engine: `services/computer-vision-service`
+- Strategy Engine: `services/strategy-engine-service`
+- Risk & Prop Firm Engine: `services/risk-engine-service`
+- Execution Engine: `services/execution-engine-service`
+- Trade Monitoring Engine: `services/trade-monitor-service`
+- Economic Data Engine: `services/economic-data-service`
+- Multi-Terminal MT5 Manager: `services/mt5-terminal-manager`
+
+Coverage is declared programmatically in `services/architecture-registry`, which reports zero missing capabilities for the high-level architecture list.
 
 ## Safety Rule
 

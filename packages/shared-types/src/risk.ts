@@ -39,6 +39,8 @@ export type RiskDecisionCode =
   | "news_blackout"
   | "reward_risk_too_low"
   | "lot_size_too_high"
+  | "max_open_exposure"
+  | "correlation_protection"
   | "allowed";
 
 export interface RiskDecision {
