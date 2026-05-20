@@ -12,9 +12,13 @@ input int HeartbeatSeconds = 5;
 input int WebRequestTimeoutMs = 5000;
 
 datetime lastHeartbeat = 0;
+datetime eaStartedAt = 0;
+long heartbeatSequence = 0;
+int lastWebRequestLatencyMs = 0;
 
 int OnInit()
 {
+   eaStartedAt = TimeLocal();
    EventSetTimer(HeartbeatSeconds);
    Print("Cacsms Trader EA initialized for terminal: ", TerminalId);
    return INIT_SUCCEEDED;
@@ -39,10 +43,12 @@ void OnTimer()
 void SendHeartbeat()
 {
    lastHeartbeat = TimeCurrent();
+   heartbeatSequence++;
 
    string heartbeat = StringFormat(
-      "{\"terminalId\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"version\":\"0.1.0\"}",
+      "{\"terminalId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"0.2.0\"}",
       EscapeJson(TerminalId),
+      EscapeJson(TerminalInfoString(TERMINAL_NAME)),
       AccountInfoInteger(ACCOUNT_LOGIN),
       EscapeJson(AccountInfoString(ACCOUNT_COMPANY)),
       EscapeJson(AccountInfoString(ACCOUNT_SERVER)),
@@ -53,7 +59,12 @@ void SendHeartbeat()
       OrdersTotal(),
       TimeToString(lastHeartbeat, TIME_DATE | TIME_SECONDS),
       TimeToString(lastHeartbeat, TIME_DATE | TIME_SECONDS),
-      TimeToString(lastHeartbeat, TIME_DATE | TIME_SECONDS)
+      TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
+      TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS),
+      HeartbeatSeconds,
+      heartbeatSequence,
+      lastWebRequestLatencyMs,
+      TimeToString(eaStartedAt, TIME_DATE | TIME_SECONDS)
    );
 
    string headers = "Content-Type: application/json\r\nX-Cacsms-Secret: " + BridgeSecret + "\r\n";
@@ -65,6 +76,7 @@ void SendHeartbeat()
    ArrayResize(data, ArraySize(data) - 1);
 
    ResetLastError();
+   uint startedMs = GetTickCount();
    int statusCode = WebRequest(
       "POST",
       BridgeUrl + "/heartbeat",
@@ -74,14 +86,15 @@ void SendHeartbeat()
       result,
       resultHeaders
    );
+   lastWebRequestLatencyMs = (int)(GetTickCount() - startedMs);
 
    if(statusCode == 200)
    {
-      Print("Cacsms heartbeat accepted by bridge.");
+      Print("Cacsms heartbeat accepted by bridge. Sequence: ", heartbeatSequence, " Latency: ", lastWebRequestLatencyMs, "ms");
       return;
    }
 
-   Print("Cacsms heartbeat failed. HTTP status: ", statusCode, " MT5 error: ", GetLastError());
+   Print("Cacsms heartbeat failed. Sequence: ", heartbeatSequence, " HTTP status: ", statusCode, " MT5 error: ", GetLastError(), " Latency: ", lastWebRequestLatencyMs, "ms");
 }
 
 string EscapeJson(string value)

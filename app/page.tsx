@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { Activity, AlertTriangle, BarChart2, BrainCircuit, CheckCircle2, Clock, Gauge, LayoutDashboard, Network, Radio, Route, Server, Settings2, ShieldAlert, Target, TerminalSquare, Zap } from 'lucide-react';
+import { Activity, AlertTriangle, BarChart2, CheckCircle2, Clock, Gauge, Menu, Network, Radio, Server, ShieldAlert, Target, TerminalSquare } from 'lucide-react';
+import { TraderSidebar } from "@/components/trader-sidebar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -11,6 +12,7 @@ import { cn } from "@/lib/utils";
 
 interface BridgeTerminal {
   terminalId: string;
+  computerName?: string;
   accountNumber: string;
   brokerName: string;
   serverName: string;
@@ -19,9 +21,15 @@ interface BridgeTerminal {
   margin: number;
   freeMargin: number;
   openOrders: number;
-  status: "connected" | "disconnected";
+  status: "connected" | "degraded" | "disconnected";
   heartbeatAgeMs: number;
   latencyMs: number;
+  averageLatencyMs?: number;
+  jitterMs?: number;
+  stabilityScore?: number;
+  missedSequenceCount?: number;
+  sequence?: number;
+  heartbeatIntervalSeconds?: number;
   receivedAt: string;
   mt5ServerTime: string;
 }
@@ -39,19 +47,8 @@ interface BridgePayload {
 
 const bridgeUrl = process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? "http://localhost:8787";
 
-const sidebarSections = [
-  { label: "Dashboard", icon: LayoutDashboard, active: true },
-  { label: "Demo Accounts", icon: TerminalSquare },
-  { label: "Risk Gate", icon: ShieldAlert },
-  { label: "Market Scanner", icon: Radio },
-  { label: "Strategies", icon: BrainCircuit },
-  { label: "Order Router", icon: Route },
-  { label: "Terminals", icon: Network },
-  { label: "Analytics", icon: BarChart2 },
-  { label: "Settings", icon: Settings2 },
-];
-
 export default function Dashboard() {
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [ngaTime, setNgaTime] = useState<string>('');
   const [terminals, setTerminals] = useState<BridgeTerminal[]>([]);
   const [events, setEvents] = useState<BridgeEvent[]>([]);
@@ -129,62 +126,23 @@ export default function Dashboard() {
 
   return (
     <div className="flex h-screen overflow-hidden bg-white text-slate-900 font-sans">
-      <aside className="hidden lg:flex w-72 shrink-0 flex-col border-r border-slate-200 bg-white">
-        <div className="flex items-center gap-3 px-5 py-5 border-b border-slate-200">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-700 text-white shadow-sm shadow-indigo-900/20">
-            <Zap className="h-5 w-5" />
-          </div>
-          <div className="min-w-0">
-            <h1 className="text-lg font-semibold tracking-tight text-slate-950">Cacsms Trader</h1>
-            <p className="truncate text-xs font-medium text-slate-500">Autonomous Forex System</p>
-          </div>
-        </div>
-
-        <nav className="flex-1 px-3 py-4">
-          <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Functions</div>
-          <div className="space-y-1">
-            {sidebarSections.map((item) => {
-              const Icon = item.icon;
-
-              return (
-                <button
-                  key={item.label}
-                  type="button"
-                  className={cn(
-                    "flex h-10 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-medium transition-colors",
-                    item.active
-                      ? "bg-indigo-50 text-indigo-800 ring-1 ring-inset ring-indigo-100"
-                      : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
-                  )}
-                >
-                  <Icon className={cn("h-4 w-4", item.active ? "text-indigo-700" : "text-slate-400")} />
-                  <span>{item.label}</span>
-                </button>
-              );
-            })}
-          </div>
-        </nav>
-
-        <div className="border-t border-slate-200 p-4">
-          <div className={cn(
-            "flex items-center gap-3 rounded-lg border px-3 py-3",
-            bridgeOnline ? "border-teal-200 bg-teal-50 text-teal-800" : "border-rose-200 bg-rose-50 text-rose-700"
-          )}>
-            <div className={cn("h-2.5 w-2.5 rounded-full", bridgeOnline ? "bg-teal-500" : "bg-rose-500")} />
-            <div>
-              <div className="text-xs font-semibold">{bridgeOnline ? "Bridge Online" : "Bridge Offline"}</div>
-              <div className="text-[11px] opacity-75">MT5 connection status</div>
-            </div>
-          </div>
-        </div>
-      </aside>
+      <TraderSidebar
+        bridgeOnline={bridgeOnline}
+        mobileOpen={mobileSidebarOpen}
+        onMobileOpenChange={setMobileSidebarOpen}
+      />
 
       <div className="flex min-w-0 flex-1 flex-col bg-white">
       <header className="flex items-center justify-between px-4 py-3 md:px-6 border-b border-slate-200 bg-white shrink-0">
         <div className="flex items-center gap-4">
-          <div className="flex bg-indigo-50 p-2 rounded-lg border border-indigo-100 lg:hidden">
-            <Zap className="h-5 w-5 text-indigo-700" />
-          </div>
+          <button
+            type="button"
+            aria-label="Open navigation"
+            className="grid h-10 w-10 place-items-center rounded-lg border border-indigo-100 bg-indigo-50 text-indigo-700 lg:hidden"
+            onClick={() => setMobileSidebarOpen(true)}
+          >
+            <Menu className="h-5 w-5" />
+          </button>
           <div>
             <h2 className="text-xl font-semibold tracking-tight text-slate-950">Trading Operations</h2>
             <p className="text-xs text-indigo-700 font-mono">Broker Demo Account Readiness</p>
@@ -295,7 +253,8 @@ export default function Dashboard() {
                         <TableRow className="border-slate-200 hover:bg-transparent">
                           <TableHead className="text-xs font-mono text-slate-500">Terminal</TableHead>
                           <TableHead className="text-xs font-mono text-slate-500">Broker</TableHead>
-                          <TableHead className="text-xs font-mono text-slate-500 text-right">Balance</TableHead>
+                          <TableHead className="text-xs font-mono text-slate-500">Status</TableHead>
+                          <TableHead className="text-xs font-mono text-slate-500 text-right">Latency</TableHead>
                           <TableHead className="text-xs font-mono text-slate-500 text-right">Equity</TableHead>
                           <TableHead className="text-xs font-mono text-slate-500 text-right">Free Margin</TableHead>
                         </TableRow>
@@ -303,7 +262,7 @@ export default function Dashboard() {
                       <TableBody>
                         {terminals.length === 0 ? (
                           <TableRow className="border-slate-100 hover:bg-transparent">
-                            <TableCell colSpan={5} className="h-40 text-center text-sm text-slate-500">
+                            <TableCell colSpan={6} className="h-40 text-center text-sm text-slate-500">
                               Waiting for a broker demo account heartbeat from MT5.
                             </TableCell>
                           </TableRow>
@@ -316,7 +275,17 @@ export default function Dashboard() {
                                 <span className="text-xs text-slate-500">{terminal.serverName} / {terminal.accountNumber}</span>
                               </div>
                             </TableCell>
-                            <TableCell className="text-right font-mono text-xs text-slate-700">{formatMoney(terminal.balance)}</TableCell>
+                            <TableCell>
+                              <span className={cn(
+                                "inline-flex rounded-md border px-2 py-1 text-[11px] font-semibold capitalize",
+                                terminal.status === "connected" && "border-teal-200 bg-teal-50 text-teal-700",
+                                terminal.status === "degraded" && "border-amber-200 bg-amber-50 text-amber-700",
+                                terminal.status === "disconnected" && "border-rose-200 bg-rose-50 text-rose-700",
+                              )}>
+                                {terminal.status}
+                              </span>
+                            </TableCell>
+                            <TableCell className="text-right font-mono text-xs text-slate-700">{terminal.latencyMs}ms</TableCell>
                             <TableCell className="text-right font-mono text-xs text-slate-700">{formatMoney(terminal.equity)}</TableCell>
                             <TableCell className="text-right font-mono text-xs text-slate-700">{formatMoney(terminal.freeMargin)}</TableCell>
                           </TableRow>
@@ -365,18 +334,25 @@ export default function Dashboard() {
                       {terminal.status === 'connected' ? (
                         <CheckCircle2 className="w-5 h-5 text-teal-600" />
                       ) : (
-                        <AlertTriangle className="w-5 h-5 text-rose-600" />
+                        <AlertTriangle className={cn("w-5 h-5", terminal.status === "degraded" ? "text-amber-600" : "text-rose-600")} />
                       )}
                       <div className="flex flex-col">
                         <span className="text-sm font-medium text-slate-950">{terminal.terminalId}</span>
-                        <span className="text-xs text-slate-500">{terminal.brokerName || "Unknown broker"}</span>
+                        <span className="text-xs text-slate-500">{terminal.brokerName || "Unknown broker"}{terminal.computerName ? ` / ${terminal.computerName}` : ""}</span>
                       </div>
                     </div>
                     <div className="flex flex-col items-end">
-                      <span className={cn("text-xs font-mono", terminal.status === 'connected' ? "text-teal-600" : "text-rose-600")}>
-                        {terminal.status === 'connected' ? `${Math.round(terminal.heartbeatAgeMs)}ms heartbeat age` : 'DISCONNECTED'}
+                      <span className={cn(
+                        "text-xs font-mono",
+                        terminal.status === "connected" && "text-teal-600",
+                        terminal.status === "degraded" && "text-amber-600",
+                        terminal.status === "disconnected" && "text-rose-600",
+                      )}>
+                        {terminal.status === "disconnected" ? "DISCONNECTED" : `${Math.round(terminal.heartbeatAgeMs)}ms age / ${terminal.latencyMs}ms latency`}
                       </span>
-                      <span className="text-xs font-mono text-slate-500">{formatMoney(terminal.balance)}</span>
+                      <span className="text-xs font-mono text-slate-500">
+                        Stability {terminal.stabilityScore ?? 0}% / Seq {terminal.sequence ?? 0}
+                      </span>
                     </div>
                   </div>
                 ))}
