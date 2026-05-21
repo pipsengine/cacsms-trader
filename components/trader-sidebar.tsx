@@ -85,7 +85,6 @@ const navigationModules: NavigationModule[] = [
       "Trade execution status",
       "Execution latency overview",
       "Server infrastructure health",
-      "Infrastructure alerts",
     ], "metric"),
     group("AI & Market Intelligence", [
       "AI market confidence index",
@@ -93,7 +92,6 @@ const navigationModules: NavigationModule[] = [
       "Market sentiment overview",
       "Institutional liquidity overview",
       "Smart money activity tracker",
-      "AI anomaly detection",
     ], "engine"),
     group("Clocks & Sessions", [
       "Nigeria live clock",
@@ -230,11 +228,6 @@ const navigationModules: NavigationModule[] = [
       "Duplicate trade prevention",
       "High-frequency execution monitor",
     ], "metric"),
-    group("MT5 Bridge", [
-      "MT5 execution bridge",
-      "EA communication engine",
-      "Institutional trade journal",
-    ], "integration"),
   ]),
   navModule("Institutional Strategy Intelligence", BrainCircuit, strategyNavigationItems()),
   navModule("AI & Autonomous Intelligence Core", Bot, [
@@ -461,7 +454,6 @@ const navigationModules: NavigationModule[] = [
       "Historical data management",
       "Quantitative analysis",
       "Probability forecasting",
-      "Statistical arbitrage",
       "Volatility modeling",
       "Research notebooks",
       "Strategy experimentation labs",
