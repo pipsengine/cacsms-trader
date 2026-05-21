@@ -19,6 +19,12 @@ function numberFromEnv(name: string, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
+function stringFromEnv(name: string): string | undefined {
+  const value = (process.env as Record<string, unknown>)[name];
+  if (value == null) return undefined;
+  return String(value);
+}
+
 function sslFromEnv(): false | { rejectUnauthorized: false } {
   const value = String(process.env.POSTGRES_SSL ?? '').toLowerCase();
   if (value === 'true' || value === 'require') {
@@ -32,9 +38,13 @@ function poolConfig(): Record<string, unknown> {
   const idleTimeoutMillis = numberFromEnv('POSTGRES_IDLE_TIMEOUT_MS', 30_000);
   const connectionTimeoutMillis = numberFromEnv('POSTGRES_CONNECTION_TIMEOUT_MS', 5_000);
 
-  if (process.env.DATABASE_URL) {
+  const password = stringFromEnv('POSTGRES_PASSWORD') ?? '';
+  const databaseUrl = stringFromEnv('DATABASE_URL');
+
+  if (databaseUrl) {
     return {
-      connectionString: process.env.DATABASE_URL,
+      connectionString: databaseUrl,
+      password,
       max,
       idleTimeoutMillis,
       connectionTimeoutMillis,
@@ -43,11 +53,11 @@ function poolConfig(): Record<string, unknown> {
   }
 
   return {
-    host: process.env.POSTGRES_HOST ?? 'localhost',
+    host: stringFromEnv('POSTGRES_HOST') ?? 'localhost',
     port: numberFromEnv('POSTGRES_PORT', 5432),
-    database: process.env.POSTGRES_DB ?? 'db_cacsms-trader',
-    user: process.env.POSTGRES_USER ?? 'cacsms',
-    password: process.env.POSTGRES_PASSWORD ?? '',
+    database: stringFromEnv('POSTGRES_DB') ?? 'db_cacsms-trader',
+    user: stringFromEnv('POSTGRES_USER') ?? 'cacsms',
+    password,
     max,
     idleTimeoutMillis,
     connectionTimeoutMillis,
