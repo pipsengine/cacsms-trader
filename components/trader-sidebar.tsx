@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Bell,
@@ -55,6 +55,7 @@ interface TraderSidebarProps {
 }
 
 const preferenceKey = "cacsms-trader-sidebar-preferences";
+const scrollPositionKey = "cacsms-trader-sidebar-scroll-position";
 const executiveModuleId = "executive-command-center";
 const defaultActivePage = "executive-overview";
 
@@ -623,7 +624,7 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
   const router = useRouter();
   const pathname = usePathname();
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     let nextPreferences = defaultPreferences;
     const stored = window.localStorage.getItem(preferenceKey);
 
@@ -635,9 +636,14 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
       }
     }
 
+    const inferredActivePage = pageIdForPathname(pathname);
+    const activePage = inferredActivePage ?? nextPreferences.activePage;
+
     queueMicrotask(() => {
-      const inferredActivePage = pageIdForPathname(pathname);
-      setPreferences({ ...nextPreferences, activePage: inferredActivePage ?? nextPreferences.activePage });
+      setPreferences({
+        ...nextPreferences,
+        activePage,
+      });
       setMounted(true);
     });
   }, [pathname]);
@@ -671,7 +677,19 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
   };
 
   const selectPage = (pageId: string) => {
-    setPreference({ activePage: pageId });
+    const ancestors = findNavigationAncestors(pageId);
+
+    setPreferences((current) => {
+      const nextPreferences = {
+        ...current,
+        activePage: pageId,
+        openModules: mergeUnique(current.openModules, ancestors.modules),
+        openGroups: mergeUnique(current.openGroups, ancestors.groups),
+      };
+
+      window.localStorage.setItem(preferenceKey, JSON.stringify(nextPreferences));
+      return nextPreferences;
+    });
     onMobileOpenChange(false);
     const href = hrefForPageId(pageId);
     if (href) {
@@ -797,8 +815,31 @@ function NavigationTree(props: {
   openGroups: string[];
   openModules: string[];
 }) {
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+
+  useLayoutEffect(() => {
+    const storedPosition = window.localStorage.getItem(scrollPositionKey);
+    const nextScrollTop = storedPosition ? Number(storedPosition) : 0;
+
+    if (!Number.isFinite(nextScrollTop) || nextScrollTop <= 0) return;
+
+    if (viewportRef.current) {
+      viewportRef.current.scrollTop = nextScrollTop;
+    }
+  }, []);
+
+  const rememberScrollPosition = () => {
+    if (viewportRef.current) {
+      window.localStorage.setItem(scrollPositionKey, String(viewportRef.current.scrollTop));
+    }
+  };
+
   return (
-    <ScrollArea className="min-h-0 flex-1">
+    <ScrollArea
+      className="min-h-0 flex-1"
+      viewportRef={viewportRef}
+      viewportProps={{ onScroll: rememberScrollPosition }}
+    >
       <nav className={cn("py-3", props.collapsed ? "px-2" : "px-3")}>
         {!props.collapsed ? (
           <div className="mb-2 px-3 text-[11px] font-semibold uppercase tracking-wider text-slate-400">System Modules</div>
@@ -977,6 +1018,39 @@ function firstLeafId(item: NavigationItem): string {
 
 function toggleValue(values: string[], value: string): string[] {
   return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+}
+
+function mergeUnique(values: string[], additions: string[]): string[] {
+  return Array.from(new Set([...values, ...additions]));
+}
+
+function findNavigationAncestors(pageId: string): { modules: string[]; groups: string[] } {
+  for (const navModuleItem of navigationModules) {
+    const groups: string[] = [];
+
+    if (collectGroupAncestors(navModuleItem, pageId, groups)) {
+      return { modules: [navModuleItem.id], groups };
+    }
+  }
+
+  return { modules: [], groups: [] };
+}
+
+function collectGroupAncestors(item: NavigationItem, pageId: string, groups: string[]): boolean {
+  if (item.id === pageId) {
+    return true;
+  }
+
+  for (const child of item.children ?? []) {
+    if (collectGroupAncestors(child, pageId, groups)) {
+      if (child.children && item.id !== pageId) {
+        groups.unshift(child.id);
+      }
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function kindDotClass(kind: NodeKind = "workspace"): string {

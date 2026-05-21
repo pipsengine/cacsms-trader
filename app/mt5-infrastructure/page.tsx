@@ -1,34 +1,29 @@
 'use client';
 
 import { Activity, AlertTriangle, CheckCircle2, Gauge, Server, TerminalSquare } from 'lucide-react';
-import { Mt5OpsShell } from '@/components/mt5-ops-shell';
+import { useMt5OpsState } from '@/components/mt5-ops-shell';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 
 export default function Mt5InfrastructureOverviewPage() {
-  return (
-    <Mt5OpsShell
-      title="MT5 Infrastructure & Broker Connectivity"
-      subtitle="Infrastructure overview"
-    >
-      {(state) => {
-        const connected = state.terminals.filter((terminal) => terminal.status === 'connected');
-        const degraded = state.terminals.filter((terminal) => terminal.status === 'degraded');
-        const disconnected = state.terminals.filter((terminal) => terminal.status === 'disconnected');
-        const avgLatency = connected.length
-          ? Math.round(connected.reduce((sum, terminal) => sum + (terminal.averageLatencyMs ?? terminal.latencyMs ?? 0), 0) / connected.length)
-          : 0;
-        const lowestStability = connected.length
-          ? Math.min(...connected.map((terminal) => terminal.stabilityScore ?? 0))
-          : 0;
-        const queued = state.commandSummary?.queued ?? 0;
-        const inflight = state.commandSummary?.leased ?? 0;
-        const acks = state.commandSummary?.acknowledged ?? 0;
+  const state = useMt5OpsState();
+  const connected = state.terminals.filter((terminal) => terminal.status === 'connected');
+  const degraded = state.terminals.filter((terminal) => terminal.status === 'degraded');
+  const disconnected = state.terminals.filter((terminal) => terminal.status === 'disconnected');
+  const avgLatency = connected.length
+    ? Math.round(connected.reduce((sum, terminal) => sum + (terminal.averageLatencyMs ?? terminal.latencyMs ?? 0), 0) / connected.length)
+    : 0;
+  const lowestStability = connected.length
+    ? Math.min(...connected.map((terminal) => terminal.stabilityScore ?? 0))
+    : 0;
+  const queued = state.commandSummary?.queued ?? 0;
+  const inflight = state.commandSummary?.leased ?? 0;
+  const acks = state.commandSummary?.acknowledged ?? 0;
 
-        return (
-          <>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+  return (
+    <>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
                 <CardHeader className="pb-2">
                   <CardTitle className="text-xs text-slate-500 font-normal uppercase tracking-wider flex items-center gap-2">
@@ -124,9 +119,6 @@ export default function Mt5InfrastructureOverviewPage() {
                 </div>
               </CardContent>
             </Card>
-          </>
-        );
-      }}
-    </Mt5OpsShell>
+    </>
   );
 }

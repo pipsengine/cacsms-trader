@@ -1,8 +1,8 @@
 'use client';
 
-import { useMemo, useState, type ReactNode } from 'react';
+import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, Cpu, Database, Fingerprint, Gauge, Globe2, KeyRound, Laptop2, Layers3, LockKeyhole, MapPin, MemoryStick, Network, PlugZap, Radio, RefreshCw, Router, Search, Server, ShieldAlert, ShieldCheck, TerminalSquare, UserCheck, Wifi, Wrench } from 'lucide-react';
-import { Mt5OpsShell } from '@/components/mt5-ops-shell';
+import { useMt5OpsState } from '@/components/mt5-ops-shell';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -12,75 +12,76 @@ type EnqueueState = { status: 'idle' | 'submitting' | 'ok' | 'error'; message: s
 
 export function TerminalOperationsClientPage(props: { page: string }) {
   const page = props.page;
-  const meta = resolveMeta(page);
+  const hydrated = useHydrated();
+  const state = useMt5OpsState();
+
+  if (!hydrated) {
+    return (
+      <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+        <CardHeader className="border-b border-slate-200 py-4">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <RefreshCw className="w-4 h-4 text-blue-600" /> Loading terminal operations
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-4 text-sm text-slate-600">
+          Preparing live terminal telemetry.
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (page === 'connected-terminals') {
+    return <ConnectedTerminals terminals={state.terminals} />;
+  }
+  if (page === 'terminal-registration') {
+    return <TerminalRegistration terminals={state.terminals} registrations={state.registrations} />;
+  }
+  if (page === 'terminal-heartbeat') {
+    return <TerminalHeartbeat terminals={state.terminals} />;
+  }
+  if (page === 'terminal-health-monitoring') {
+    return <TerminalHealth terminals={state.terminals} />;
+  }
+  if (page === 'mt5-synchronization') {
+    return <Mt5Synchronization terminals={state.terminals} />;
+  }
+  if (page === 'mt5-execution-bridge') {
+    return <Mt5ExecutionBridge terminals={state.terminals} commands={state.commands} recentAcks={state.recentAcks} commandSummary={state.commandSummary} />;
+  }
+  if (page === 'live-latency-monitoring') {
+    return <LatencyMonitoring terminals={state.terminals} />;
+  }
+  if (page === 'multi-computer-support') {
+    return <MultiComputerSupport terminals={state.terminals} registrations={state.registrations} />;
+  }
+  if (page === 'account-routing') {
+    return <AccountRouting terminals={state.terminals} routing={state.routing} />;
+  }
+  if (page === 'vps-management') {
+    return <VpsManagement vps={state.vps} />;
+  }
+  if (page === 'ea-deployment') {
+    return <EaDeploymentDashboard terminals={state.terminals} />;
+  }
 
   return (
-    <Mt5OpsShell title="Terminal Operations" subtitle={meta.subtitle}>
-      {(state) => {
-        if (page === 'connected-terminals') {
-          return <ConnectedTerminals terminals={state.terminals} />;
-        }
-        if (page === 'terminal-registration') {
-          return <TerminalRegistration terminals={state.terminals} registrations={state.registrations} />;
-        }
-        if (page === 'terminal-heartbeat') {
-          return <TerminalHeartbeat terminals={state.terminals} />;
-        }
-        if (page === 'terminal-health-monitoring') {
-          return <TerminalHealth terminals={state.terminals} />;
-        }
-        if (page === 'mt5-synchronization') {
-          return <Mt5Synchronization terminals={state.terminals} />;
-        }
-        if (page === 'mt5-execution-bridge') {
-          return <Mt5ExecutionBridge terminals={state.terminals} commands={state.commands} recentAcks={state.recentAcks} commandSummary={state.commandSummary} />;
-        }
-        if (page === 'live-latency-monitoring') {
-          return <LatencyMonitoring terminals={state.terminals} />;
-        }
-        if (page === 'multi-computer-support') {
-          return <MultiComputerSupport terminals={state.terminals} registrations={state.registrations} />;
-        }
-        if (page === 'account-routing') {
-          return <AccountRouting terminals={state.terminals} routing={state.routing} />;
-        }
-        if (page === 'vps-management') {
-          return <VpsManagement vps={state.vps} />;
-        }
-        if (page === 'ea-deployment') {
-          return <EaDeploymentDashboard terminals={state.terminals} />;
-        }
-
-        return (
-          <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
-            <CardHeader className="border-b border-slate-200 py-4">
-              <CardTitle className="text-sm font-semibold flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-rose-600" /> Unknown page
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="p-4 text-sm text-slate-600 font-mono">{page}</CardContent>
-          </Card>
-        );
-      }}
-    </Mt5OpsShell>
+    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+      <CardHeader className="border-b border-slate-200 py-4">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-rose-600" /> Unknown page
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-4 text-sm text-slate-600 font-mono">{page}</CardContent>
+    </Card>
   );
 }
 
-function resolveMeta(page: string): { subtitle: string } {
-  const mapping: Record<string, string> = {
-    'connected-terminals': 'Connected terminals',
-    'terminal-registration': 'Terminal registration',
-    'terminal-heartbeat': 'Terminal heartbeat',
-    'terminal-health-monitoring': 'Terminal health monitoring',
-    'mt5-synchronization': 'MT5 synchronization',
-    'mt5-execution-bridge': 'MT5 execution bridge',
-    'live-latency-monitoring': 'Live latency monitoring',
-    'multi-computer-support': 'Multi-computer support',
-    'account-routing': 'Account routing',
-    'vps-management': 'VPS management',
-    'ea-deployment': 'EA deployment',
-  };
-  return { subtitle: mapping[page] ?? page };
+function useHydrated(): boolean {
+  return useSyncExternalStore(
+    () => () => undefined,
+    () => true,
+    () => false,
+  );
 }
 
 function ConnectedTerminals({ terminals }: { terminals: any[] }) {

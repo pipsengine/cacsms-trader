@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Clock, Menu } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { TraderSidebar } from '@/components/trader-sidebar';
@@ -146,10 +146,20 @@ export type Mt5OpsState = {
   refreshedAt: string;
 };
 
+const Mt5OpsStateContext = createContext<Mt5OpsState | null>(null);
+
+export function useMt5OpsState(): Mt5OpsState {
+  const state = useContext(Mt5OpsStateContext);
+  if (!state) {
+    throw new Error('useMt5OpsState must be used inside Mt5OpsShell');
+  }
+  return state;
+}
+
 export function Mt5OpsShell(props: {
   title: string;
   subtitle: string;
-  children: (state: Mt5OpsState) => React.ReactNode;
+  children: ReactNode | ((state: Mt5OpsState) => ReactNode);
 }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [ngaTime, setNgaTime] = useState<string>('');
@@ -277,9 +287,11 @@ export function Mt5OpsShell(props: {
           </div>
         </header>
 
-        <div className="flex-1 overflow-auto bg-white p-4 md:p-6 lg:p-8 space-y-6">
-          {props.children(state)}
-        </div>
+        <Mt5OpsStateContext.Provider value={state}>
+          <div className="flex-1 overflow-auto bg-white p-4 md:p-6 lg:p-8 space-y-6">
+            {typeof props.children === 'function' ? props.children(state) : props.children}
+          </div>
+        </Mt5OpsStateContext.Provider>
       </div>
     </div>
   );
