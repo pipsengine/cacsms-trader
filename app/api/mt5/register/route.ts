@@ -1,3 +1,5 @@
+import { recordRegistrationAttempt, upsertTerminalRegistration } from '@/lib/mt5-registration-store';
+
 export const runtime = 'nodejs';
 
 function bridgeUrl(): string {
@@ -10,21 +12,62 @@ function bridgeSecretHeader(): Record<string, string> {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const body = await request.text();
-  const response = await fetch(`${bridgeUrl()}/terminals/register`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...bridgeSecretHeader(),
+  const payload = await request.json();
+  const registration = await upsertTerminalRegistration(payload);
+
+  let bridgeEnrollment = {
+    ok: false,
+    status: 0,
+    error: 'Bridge enrollment was not attempted.',
+  } as { ok: boolean; status: number; error?: string };
+
+  try {
+    const response = await fetch(`${bridgeUrl()}/terminals/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...bridgeSecretHeader(),
+      },
+      body: JSON.stringify(payload),
+    });
+
+    bridgeEnrollment = {
+      ok: response.ok,
+      status: response.status,
+      error: response.ok ? undefined : await response.text(),
+    };
+
+    await recordRegistrationAttempt(
+      registration.terminalId,
+      response.ok ? 'bridge_enrolled' : 'bridge_failed',
+      response.ok ? 'Registration forwarded to MT5 bridge.' : bridgeEnrollment.error ?? 'Bridge enrollment failed.',
+      response.ok ? '' : `HTTP_${response.status}`,
+    );
+  } catch (error) {
+    bridgeEnrollment = {
+      ok: false,
+      status: 0,
+      error: error instanceof Error ? error.message : 'Bridge unavailable.',
+    };
+
+    await recordRegistrationAttempt(
+      registration.terminalId,
+      'bridge_unavailable',
+      bridgeEnrollment.error ?? 'Bridge unavailable.',
+      'BRIDGE_UNAVAILABLE',
+    );
+  }
+
+  return Response.json(
+    {
+      ok: true,
+      registration,
+      bridgeEnrollment,
     },
-    body,
-  });
-  const responseBody = await response.text();
-  return new Response(responseBody, {
-    status: response.status,
-    headers: {
-      'Content-Type': response.headers.get('Content-Type') ?? 'application/json',
-      'Cache-Control': 'no-store',
+    {
+      headers: {
+        'Cache-Control': 'no-store',
+      },
     },
-  });
+  );
 }

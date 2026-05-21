@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, Cpu, Database, Fingerprint, Gauge, Globe2, KeyRound, Laptop2, Layers3, LockKeyhole, MapPin, MemoryStick, Network, PlugZap, Radio, RefreshCw, Router, Search, Server, ShieldAlert, ShieldCheck, TerminalSquare, UserCheck, Wifi, Wrench } from 'lucide-react';
+import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, Cpu, Database, Gauge, Globe2, KeyRound, Laptop2, Layers3, LockKeyhole, MapPin, MemoryStick, Network, PlugZap, Radio, RefreshCw, Router, Search, Server, ShieldAlert, ShieldCheck, TerminalSquare, UserCheck, Wifi, Wrench } from 'lucide-react';
 import { useMt5OpsState } from '@/components/mt5-ops-shell';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -668,7 +668,7 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
     serverName: '',
     mt5Build: '4150',
     eaVersion: 'CACSMS-EA 1.0.0',
-    terminalType: 'live-trading',
+    terminalType: 'demo-validation',
     region: 'LD4',
     environment: 'demo',
     authenticationKey: '',
@@ -686,6 +686,17 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
   const passedRules = validationRules.filter((rule) => rule.status === 'passed').length;
   const registrationHealth = Math.round((passedRules / validationRules.length) * 100);
   const logs = buildRegistrationLogs(registrations, terminals);
+  const identityReady = Boolean(form.terminalId.trim() && form.terminalName.trim() && (form.computerId.trim() || form.computerName.trim()));
+  const brokerReady = Boolean(form.brokerName.trim() && form.serverName.trim() && form.accountNumber.trim() && Number(form.mt5Build) >= 3900 && form.eaVersion.startsWith('CACSMS-EA'));
+  const authorizationReady = form.authenticationKey.trim().length >= 24 || authorize.status === 'ok';
+  const hasFailedValidation = validationRules.some((rule) => rule.status === 'failed');
+  const canEnroll = identityReady && brokerReady && authorizationReady && !hasFailedValidation && submit.status !== 'submitting';
+  const registrationStages = [
+    { title: 'Identity', status: identityReady ? 'Ready' : 'Needs terminal details' },
+    { title: 'Broker', status: brokerReady ? 'Ready' : 'Needs broker details' },
+    { title: 'Authorization', status: authorizationReady ? 'Ready' : 'Needs EA key' },
+    { title: 'Database', status: submit.status === 'ok' ? 'Saved' : 'Pending save' },
+  ];
 
   const onPrefill = (terminalId: string) => {
     const terminal = terminals.find((t) => t.terminalId === terminalId);
@@ -790,16 +801,16 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
         <OpsSummaryCard icon={ShieldCheck} title="Validation score" value={`${registrationHealth}%`} detail="Current wizard readiness" tone={registrationHealth > 80 ? 'green' : 'amber'} />
       </section>
 
-      <section className="grid grid-cols-1 2xl:grid-cols-[360px_minmax(0,1fr)_420px] gap-6">
+      <section className="grid grid-cols-1 2xl:grid-cols-[300px_minmax(0,1fr)] gap-6">
         <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
           <CardHeader className="border-b border-slate-200 py-4">
             <CardTitle className="flex items-center gap-2 text-sm font-semibold">
-              <ClipboardCheck className="h-4 w-4 text-blue-700" /> Registration Workflow
+              <ClipboardCheck className="h-4 w-4 text-blue-700" /> Registration Path
             </CardTitle>
           </CardHeader>
           <CardContent className="p-4">
             <div className="space-y-3">
-              {REGISTRATION_STEPS.map((step, index) => (
+              {registrationStages.map((step, index) => (
                 <button
                   key={step.title}
                   type="button"
@@ -812,10 +823,18 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
                   <span className={cn('grid h-7 w-7 shrink-0 place-items-center rounded-md border font-mono text-xs', activeStep >= index ? 'border-blue-200 bg-white text-blue-700' : 'border-slate-200 bg-slate-50 text-slate-500')}>{index + 1}</span>
                   <span>
                     <span className="block text-sm font-semibold">{step.title}</span>
-                    <span className="mt-1 block text-xs text-slate-500">{step.detail}</span>
+                    <span className="mt-1 block text-xs text-slate-500">{step.status}</span>
                   </span>
                 </button>
               ))}
+            </div>
+            <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+              <div className="text-xs font-semibold text-slate-900">Current result</div>
+              <div className="mt-1 text-xs text-slate-600">
+                {submit.status === 'ok'
+                  ? 'Saved in PostgreSQL and visible in registration history.'
+                  : 'Not saved yet.'}
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -832,32 +851,45 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
               </div>
             </div>
           </CardHeader>
-          <CardContent className="p-5 space-y-5">
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <ProvisionField label="Terminal name" value={form.terminalName} onChange={(value) => setForm((c) => ({ ...c, terminalName: value }))} placeholder="LD4 Alpha 01" />
-              <ProvisionField label="Terminal ID" value={form.terminalId} onChange={(value) => setForm((c) => ({ ...c, terminalId: value }))} placeholder="CACSMS-..." mono />
-              <label className="space-y-1.5">
-                <span className="text-xs font-medium uppercase text-slate-500">Existing heartbeat</span>
-                <select className="h-10 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={selectedTerminalId} onChange={(e) => onPrefill(e.target.value)}>
-                  <option value="">Manual enrollment</option>
-                  {terminals.map((terminal) => <option key={terminal.terminalId} value={terminal.terminalId}>{terminal.terminalId}</option>)}
-                </select>
-              </label>
-              <ProvisionField label="VPS/computer name" value={form.computerName} onChange={(value) => setForm((c) => ({ ...c, computerName: value }))} placeholder="cacsms-ld4-vps-01" />
-              <ProvisionField label="VPS ID" value={form.vpsId} onChange={(value) => setForm((c) => ({ ...c, vpsId: value }))} placeholder="vps-ld4-01" mono />
-              <ProvisionField label="Computer fingerprint" value={form.computerId} onChange={(value) => setForm((c) => ({ ...c, computerId: value }))} placeholder="HWFP-..." mono />
-              <ProvisionField label="Broker" value={form.brokerName} onChange={(value) => setForm((c) => ({ ...c, brokerName: value }))} placeholder="IC Markets" />
-              <ProvisionField label="Broker server" value={form.serverName} onChange={(value) => setForm((c) => ({ ...c, serverName: value }))} placeholder="ICMarketsSC-Demo" />
-              <ProvisionField label="Account number" value={form.accountNumber} onChange={(value) => setForm((c) => ({ ...c, accountNumber: value }))} placeholder="12345678" mono />
-              <ProvisionField label="MT5 build" value={form.mt5Build} onChange={(value) => setForm((c) => ({ ...c, mt5Build: value }))} placeholder="4150" mono />
-              <ProvisionField label="EA version" value={form.eaVersion} onChange={(value) => setForm((c) => ({ ...c, eaVersion: value }))} placeholder="CACSMS-EA 1.0.0" mono />
+          <CardContent className="p-5 space-y-6">
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-2">
+                <div className="text-xs font-semibold uppercase text-slate-500">1. Terminal identity</div>
+                <OpsStatusBadge status={identityReady ? 'READY' : 'PENDING'} />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium uppercase text-slate-500">Existing heartbeat</span>
+                  <select className="h-10 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={selectedTerminalId} onChange={(e) => onPrefill(e.target.value)}>
+                    <option value="">Manual enrollment</option>
+                    {terminals.map((terminal) => <option key={terminal.terminalId} value={terminal.terminalId}>{terminal.terminalId}</option>)}
+                  </select>
+                </label>
+                <ProvisionField label="Terminal name" value={form.terminalName} onChange={(value) => setForm((c) => ({ ...c, terminalName: value }))} placeholder="LD4 Alpha 01" />
+                <ProvisionField label="Terminal ID" value={form.terminalId} onChange={(value) => setForm((c) => ({ ...c, terminalId: value }))} placeholder="CACSMS-..." mono />
+                <ProvisionField label="VPS/computer name" value={form.computerName} onChange={(value) => setForm((c) => ({ ...c, computerName: value }))} placeholder="cacsms-ld4-vps-01" />
+                <ProvisionField label="VPS ID" value={form.vpsId} onChange={(value) => setForm((c) => ({ ...c, vpsId: value }))} placeholder="vps-ld4-01" mono />
+                <ProvisionField label="Computer fingerprint" value={form.computerId} onChange={(value) => setForm((c) => ({ ...c, computerId: value }))} placeholder="HWFP-..." mono />
+              </div>
+            </section>
+
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-2">
+                <div className="text-xs font-semibold uppercase text-slate-500">2. Broker account</div>
+                <OpsStatusBadge status={brokerReady ? 'READY' : 'PENDING'} />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <ProvisionField label="Broker" value={form.brokerName} onChange={(value) => setForm((c) => ({ ...c, brokerName: value }))} placeholder="IC Markets" />
+                <ProvisionField label="Broker server" value={form.serverName} onChange={(value) => setForm((c) => ({ ...c, serverName: value }))} placeholder="ICMarketsSC-Demo" />
+                <ProvisionField label="Account number" value={form.accountNumber} onChange={(value) => setForm((c) => ({ ...c, accountNumber: value }))} placeholder="12345678" mono />
+                <ProvisionField label="MT5 build" value={form.mt5Build} onChange={(value) => setForm((c) => ({ ...c, mt5Build: value }))} placeholder="4150" mono />
+                <ProvisionField label="EA version" value={form.eaVersion} onChange={(value) => setForm((c) => ({ ...c, eaVersion: value }))} placeholder="CACSMS-EA 1.0.0" mono />
               <label className="space-y-1.5">
                 <span className="text-xs font-medium uppercase text-slate-500">Terminal type</span>
                 <select className="h-10 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={form.terminalType} onChange={(e) => setForm((c) => ({ ...c, terminalType: e.target.value }))}>
-                  <option value="live-trading">Live trading</option>
-                  <option value="demo-validation">Demo validation</option>
-                  <option value="market-data">Market data only</option>
-                  <option value="failover">Failover reserve</option>
+                  {TERMINAL_TYPE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
                 </select>
               </label>
               <label className="space-y-1.5">
@@ -881,36 +913,44 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
               </label>
               <ProvisionField label="Priority" value={form.priority} onChange={(value) => setForm((c) => ({ ...c, priority: value }))} placeholder="50" mono />
             </div>
-            <ProvisionField label="Authentication key" value={form.authenticationKey} onChange={(value) => setForm((c) => ({ ...c, authenticationKey: value }))} placeholder="ea_live_..." mono />
+            </section>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <ActionPanel icon={PlugZap} title="Live connection test" state={verify} button="Run verify" onClick={onVerify} />
-              <ActionPanel icon={KeyRound} title="EA authorization" state={authorize} button="Authorize EA" onClick={onAuthorize} />
-              <ActionPanel icon={ShieldCheck} title="Secure enrollment" state={submit} button="Enroll terminal" onClick={onSubmit} />
-            </div>
+            <section className="space-y-3">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-100 pb-2">
+                <div className="text-xs font-semibold uppercase text-slate-500">3. Authorization and save</div>
+                <OpsStatusBadge status={canEnroll ? 'READY' : 'PENDING'} />
+              </div>
+              <ProvisionField label="Authentication key" value={form.authenticationKey} onChange={(value) => setForm((c) => ({ ...c, authenticationKey: value }))} placeholder="ea_live_..." mono />
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <ActionPanel icon={PlugZap} title="Verify" state={verify} button="Run verify" onClick={onVerify} />
+                <ActionPanel icon={KeyRound} title="Authorize" state={authorize} button="Issue EA key" onClick={onAuthorize} />
+                <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                    <ShieldCheck className="h-4 w-4 text-blue-700" />
+                    Enroll
+                  </div>
+                  <div className={cn(
+                    'mt-2 min-h-8 text-xs',
+                    submit.status === 'ok' && 'text-emerald-700',
+                    submit.status === 'error' && 'text-rose-700',
+                    submit.status === 'submitting' && 'text-slate-500',
+                    submit.status === 'idle' && 'text-slate-500',
+                  )}>
+                    {submit.message || (canEnroll ? 'Ready to save.' : 'Complete the pending sections.')}
+                  </div>
+                  <button
+                    type="button"
+                    className="mt-3 h-8 w-full rounded-md border border-blue-200 bg-white px-3 text-xs font-semibold text-blue-800 hover:bg-blue-50 disabled:opacity-50"
+                    disabled={!canEnroll}
+                    onClick={onSubmit}
+                  >
+                    Save registration
+                  </button>
+                </div>
+              </div>
+            </section>
           </CardContent>
         </Card>
-
-        <div className="space-y-6">
-          <OpsPanel title="Validation Engine" icon={ShieldAlert}>
-            <div className="space-y-3">
-              {validationRules.map((rule) => (
-                <ValidationRow key={rule.label} {...rule} />
-              ))}
-            </div>
-          </OpsPanel>
-
-          <OpsPanel title="Security Design" icon={LockKeyhole}>
-            <div className="grid grid-cols-1 gap-3">
-              {SECURITY_LINES.map((line) => (
-                <div key={line} className="flex items-center gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
-                  <Fingerprint className="h-4 w-4 shrink-0 text-blue-700" />
-                  {line}
-                </div>
-              ))}
-            </div>
-          </OpsPanel>
-        </div>
       </section>
 
       <section className="grid grid-cols-1 xl:grid-cols-2 gap-6">
@@ -942,7 +982,7 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
                       <TableCell className="font-mono text-xs text-slate-700">{r.terminalId}</TableCell>
                       <TableCell className="font-mono text-xs text-slate-700">{r.vpsId || r.computerId || r.computerName}</TableCell>
                       <TableCell className="text-xs text-slate-700">{r.brokerName} / <span className="font-mono">{r.accountNumber}</span></TableCell>
-                      <TableCell><OpsStatusBadge status="BRIDGE HEALTHY" /></TableCell>
+                      <TableCell><OpsStatusBadge status={String(r.approvalStatus ?? 'pending').replaceAll('_', ' ').toUpperCase()} /></TableCell>
                       <TableCell className="text-right font-mono text-xs text-slate-700">{r.priority}</TableCell>
                     </TableRow>
                   ))}
@@ -972,82 +1012,9 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
           </div>
         </OpsPanel>
       </section>
-
-      <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <ArchitectureCard title="Frontend Architecture" lines={REGISTRATION_FRONTEND_LINES} />
-        <ArchitectureCard title="Backend Architecture" lines={REGISTRATION_BACKEND_LINES} />
-        <ArchitectureCard title="PostgreSQL Schema" lines={REGISTRATION_SCHEMA_LINES} />
-        <ArchitectureCard title="WebSocket Events" lines={REGISTRATION_WS_LINES} />
-        <ArchitectureCard title="Validation Rules" lines={REGISTRATION_RULE_LINES} />
-        <ArchitectureCard title="Failure Handling" lines={REGISTRATION_FAILURE_LINES} />
-      </section>
     </div>
   );
 }
-
-const REGISTRATION_STEPS = [
-  { title: 'Identity', detail: 'Generate terminal ID, assign name, bind VPS fingerprint.' },
-  { title: 'Broker verification', detail: 'Validate broker server, account number, and MT5 build.' },
-  { title: 'EA authorization', detail: 'Issue authentication key and signed session policy.' },
-  { title: 'Secure enrollment', detail: 'Register terminal, account, region, and environment.' },
-  { title: 'Operational approval', detail: 'Track heartbeat, retry failures, and approve production use.' },
-];
-
-const SECURITY_LINES = [
-  'API token validation for every enrollment and verification request.',
-  'Secure handshake binds terminal ID, account number, VPS fingerprint, and EA version.',
-  'Terminal fingerprinting prevents cloned terminals from reusing an authorization token.',
-  'Connection encryption is required at the edge proxy before production enrollment.',
-  'Session signing rotates short-lived EA authorization claims after approval.',
-];
-
-const REGISTRATION_FRONTEND_LINES = [
-  'TerminalRegistrationPage -> RegistrationWorkflowStepper -> SecureEnrollmentForm',
-  'ValidationEnginePanel derives duplicate, broker, build, EA, heartbeat, and token states',
-  'RegistrationHistoryTable tracks approved, pending, failed, and retryable entries',
-  'LiveConnectionTesting calls /api/mt5/verify and merges result into wizard state',
-  'Operational panels expose schema, events, retry logic, and security contract',
-];
-
-const REGISTRATION_BACKEND_LINES = [
-  'POST /api/mt5/register -> persists terminal registration and bridge enrollment',
-  'POST /api/mt5/verify -> validates broker, build, EA compatibility, heartbeat readiness',
-  'POST /api/mt5/authorize -> issues signed EA authentication key and session policy',
-  'Bridge adapter forwards compatible payloads to /terminals/register',
-  'Future service boundary: registration-service, authorization-service, audit-service',
-];
-
-const REGISTRATION_SCHEMA_LINES = [
-  'mt5_terminal_registrations(id, terminal_id unique, terminal_name, type, environment)',
-  'mt5_vps_nodes(id, vps_id unique, computer_name, region, fingerprint, status)',
-  'mt5_broker_accounts(id, account_number, broker_name, server_name, verified_at)',
-  'mt5_ea_authorizations(id, terminal_id, token_hash, ea_version, expires_at)',
-  'mt5_registration_attempts(id, terminal_id, status, error_code, retry_count, created_at)',
-];
-
-const REGISTRATION_WS_LINES = [
-  'registration.started { terminalId, requestedBy, environment }',
-  'registration.validation.updated { terminalId, rule, status, reason }',
-  'registration.authorized { terminalId, tokenId, expiresAt }',
-  'registration.failed { terminalId, errorCode, retryAfterMs }',
-  'registration.approved { terminalId, approvedBy, approvedAt }',
-];
-
-const REGISTRATION_RULE_LINES = [
-  'terminal_id must be unique across active and retired terminal records',
-  'mt5_build >= 3900 and ea_version must match supported compatibility matrix',
-  'broker_name, server_name, and account_number must resolve through broker verification',
-  'authentication_key must be present, signed, non-expired, and scoped to terminal fingerprint',
-  'heartbeat must arrive within timeout before production approval can be granted',
-];
-
-const REGISTRATION_FAILURE_LINES = [
-  'Duplicate terminal -> block save, show existing owner, require manual override',
-  'Broker verify failed -> keep draft, expose retry action and broker server hint',
-  'EA auth failed -> revoke partial token and require new secure handshake',
-  'Heartbeat missing -> enroll as pending and retry validation on next heartbeat event',
-  'Approval rejected -> retain audit history and prevent command routing',
-];
 
 function ProvisionField(props: { label: string; value: string; onChange: (value: string) => void; placeholder: string; mono?: boolean }) {
   return (
@@ -1147,6 +1114,17 @@ function buildRegistrationPayload(form: {
     notes: `Provisioned via terminal registration wizard. MT5 build ${form.mt5Build}.`,
   };
 }
+
+const TERMINAL_TYPE_OPTIONS = [
+  { label: 'Demo Validation', value: 'demo-validation' },
+  { label: 'Live Trading', value: 'live-trading' },
+  { label: 'Market Data Monitor', value: 'market-data-monitor' },
+  { label: 'Execution Terminal', value: 'execution-terminal' },
+  { label: 'Failover Reserve', value: 'failover-reserve' },
+  { label: 'Prop Firm Trading', value: 'prop-firm-trading' },
+  { label: 'Paper Trading', value: 'paper-trading' },
+  { label: 'Research & AI Analysis', value: 'research-ai-analysis' },
+];
 
 function buildRegistrationValidation(form: ReturnType<typeof useRegistrationFormShape>, registrations: any[], terminals: any[]) {
   const terminalId = form.terminalId.trim();

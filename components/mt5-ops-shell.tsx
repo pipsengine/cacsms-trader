@@ -110,6 +110,7 @@ type BridgeCommandView = {
 
 type TerminalOperationsPayload = {
   ok: boolean;
+  bridgeOnline?: boolean;
   terminals: BridgeTerminal[];
   registrations?: TerminalRegistrationView[];
   routing?: AccountRouteView[];
@@ -208,7 +209,7 @@ export function Mt5OpsShell(props: {
         if (cancelled) return;
 
         setState({
-          bridgeOnline: true,
+          bridgeOnline: payload.bridgeOnline ?? true,
           lastError: '',
           terminals: payload.terminals ?? [],
           registrations: payload.registrations ?? [],

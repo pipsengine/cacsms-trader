@@ -2,9 +2,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: cacsms_trader
-      POSTGRES_USER: cacsms
-      POSTGRES_PASSWORD: change_me
+      POSTGRES_DB: ${POSTGRES_DB:-db_cacsms-trader}
+      POSTGRES_USER: ${POSTGRES_USER:-cacsms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-Adm1n.c0m}
     ports:
       - "5432:5432"
     volumes:

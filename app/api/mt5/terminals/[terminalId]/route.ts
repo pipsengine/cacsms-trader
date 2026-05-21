@@ -1,19 +1,30 @@
-export const runtime = 'nodejs';
+import { getTerminalHeartbeatHistory, getTerminalSnapshot } from '@/lib/mt5-heartbeat-store';
 
-function bridgeUrl(): string {
-  return process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787';
-}
+export const runtime = 'nodejs';
 
 export async function GET(_request: Request, context: { params: Promise<{ terminalId: string }> }): Promise<Response> {
   const { terminalId } = await context.params;
-  const response = await fetch(`${bridgeUrl()}/terminals/${encodeURIComponent(terminalId)}`, { cache: 'no-store' });
-  const body = await response.text();
-  return new Response(body, {
-    status: response.status,
-    headers: {
-      'Content-Type': response.headers.get('Content-Type') ?? 'application/json',
-      'Cache-Control': 'no-store',
-    },
-  });
-}
+  const terminal = await getTerminalSnapshot(terminalId);
 
+  if (!terminal) {
+    return Response.json(
+      { ok: false, error: 'Terminal not found', terminalId },
+      { status: 404, headers: { 'Cache-Control': 'no-store' } },
+    );
+  }
+
+  const history = await getTerminalHeartbeatHistory(terminalId);
+
+  return Response.json(
+    {
+      ok: true,
+      terminal,
+      history,
+    },
+    {
+      headers: {
+        'Cache-Control': 'no-store',
+      },
+    },
+  );
+}

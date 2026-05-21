@@ -1,3 +1,5 @@
+import { recordTerminalHeartbeat } from '@/lib/mt5-heartbeat-store';
+
 export const runtime = 'nodejs';
 
 function bridgeUrl(): string {
@@ -10,21 +12,40 @@ function bridgeSecretHeader(): Record<string, string> {
 }
 
 export async function POST(request: Request): Promise<Response> {
-  const body = await request.text();
-  const response = await fetch(`${bridgeUrl()}/heartbeat`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...bridgeSecretHeader(),
+  const payload = await request.json();
+  const terminal = await recordTerminalHeartbeat(payload);
+
+  let bridgeForwarded = false;
+  let bridgeError = '';
+
+  try {
+    const response = await fetch(`${bridgeUrl()}/heartbeat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...bridgeSecretHeader(),
+      },
+      body: JSON.stringify(payload),
+    });
+    bridgeForwarded = response.ok;
+    bridgeError = response.ok ? '' : await response.text();
+  } catch (error) {
+    bridgeError = error instanceof Error ? error.message : 'MT5 bridge unavailable.';
+  }
+
+  return Response.json(
+    {
+      ok: true,
+      terminal,
+      bridgeForwarded,
+      bridgeError,
+      receivedAt: terminal?.receivedAt ?? new Date().toISOString(),
+      heartbeatTimeoutMs: Number(process.env.MT5_HEARTBEAT_TIMEOUT_MS ?? 15000),
     },
-    body,
-  });
-  const responseBody = await response.text();
-  return new Response(responseBody, {
-    status: response.status,
-    headers: {
-      'Content-Type': response.headers.get('Content-Type') ?? 'application/json',
-      'Cache-Control': 'no-store',
+    {
+      headers: {
+        'Cache-Control': 'no-store',
+      },
     },
-  });
+  );
 }
