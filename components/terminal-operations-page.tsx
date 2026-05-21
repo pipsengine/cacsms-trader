@@ -5781,7 +5781,7 @@ function EaCommunicationEnginePage(props: { terminals: any[]; commands: any[]; r
 
   const eventRows = useMemo(() => {
     const query = filters.query.trim().toLowerCase();
-    return (Array.isArray(state.events) ? state.events : [])
+    const rows = (Array.isArray(state.events) ? state.events : [])
       .map((event) => ({
         id: String(event?.id ?? ''),
         terminalId: event?.terminalId ?? event?.terminal_id ?? null,
@@ -5805,7 +5805,16 @@ function EaCommunicationEnginePage(props: { terminals: any[]; commands: any[]; r
           || String(row.channel).toLowerCase().includes(query)
         );
       })
-      .sort((a, b) => Date.parse(String(b.createdAt ?? '')) - Date.parse(String(a.createdAt ?? '')));
+      ;
+
+    const deduped = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) {
+      const key = row.id;
+      if (!key) continue;
+      deduped.set(key, row);
+    }
+
+    return Array.from(deduped.values()).sort((a, b) => Date.parse(String(b.createdAt ?? '')) - Date.parse(String(a.createdAt ?? '')));
   }, [filters.channel, filters.query, filters.severity, filters.terminalId, state.events]);
 
   const selectedEvent = useMemo(() => eventRows.find((row) => row.id === selectedEventId) ?? null, [eventRows, selectedEventId]);
