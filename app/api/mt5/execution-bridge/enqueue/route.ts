@@ -43,19 +43,65 @@ export async function POST(request: Request): Promise<Response> {
   try {
     assertLocalOnly(request);
     const body = (await request.json()) as any;
-    assertExecutionSafety(body);
+    const mode = String(body?.mode ?? '').toUpperCase();
+    const sandboxMode = Boolean(body?.sandboxMode ?? body?.sandbox ?? (mode ? mode === 'SANDBOX' : true));
+    const environment = String(body?.environment ?? body?.payload?.environment ?? 'DEMO').toUpperCase();
+    const commandType = String(body?.type ?? '').trim() || 'PLACE_ORDER';
+
+    const resolvedSymbol = String(body?.symbol ?? body?.payload?.symbol ?? '').trim();
+    const resolvedSideRaw = String(body?.side ?? body?.payload?.side ?? '').trim();
+    const resolvedSide = resolvedSideRaw ? resolvedSideRaw.toUpperCase() : 'BUY';
+    const resolvedOrderType = String(body?.orderType ?? body?.payload?.orderType ?? body?.payload?.orderKind ?? 'MARKET').trim().toUpperCase();
+    const resolvedVolume = Number(body?.volume ?? body?.payload?.volume ?? body?.payload?.volumeLots ?? NaN);
+    const resolvedSl = Number(body?.sl ?? body?.payload?.sl ?? body?.payload?.stopLoss ?? 0);
+    const resolvedTp = Number(body?.tp ?? body?.payload?.tp ?? body?.payload?.takeProfit ?? 0);
+    const resolvedComment = String(body?.comment ?? body?.payload?.comment ?? 'Cacsms Trader sandbox test');
+
+    const canonicalPayload: Record<string, unknown> = {
+      mode: sandboxMode ? 'SANDBOX' : 'LIVE',
+      environment,
+      symbol: resolvedSymbol,
+      side: resolvedSide,
+      orderType: resolvedOrderType,
+      volume: Number.isFinite(resolvedVolume) ? resolvedVolume : null,
+      sl: Number.isFinite(resolvedSl) ? resolvedSl : 0,
+      tp: Number.isFinite(resolvedTp) ? resolvedTp : 0,
+      comment: resolvedComment,
+      orderKind: resolvedOrderType.toLowerCase(),
+      volumeLots: Number.isFinite(resolvedVolume) ? resolvedVolume : null,
+      stopLoss: Number.isFinite(resolvedSl) ? resolvedSl : 0,
+      takeProfit: Number.isFinite(resolvedTp) ? resolvedTp : 0,
+      sideLower: resolvedSide.toLowerCase(),
+    };
+
+    const normalizedBody = {
+      ...body,
+      type: commandType,
+      sandboxMode,
+      environment,
+      payload: typeof body?.payload === 'object' && body.payload ? { ...canonicalPayload, ...(body.payload ?? {}) } : canonicalPayload,
+    };
+
+    if (String(commandType).trim().toUpperCase() === 'PLACE_ORDER') {
+      if (!resolvedSymbol) throw new Error('symbol is required.');
+      if (!Number.isFinite(resolvedVolume) || resolvedVolume <= 0) throw new Error('volume must be a positive number.');
+      if (resolvedOrderType !== 'MARKET') throw new Error('Only MARKET orderType is supported in the current test pipeline.');
+      if (resolvedSide !== 'BUY' && resolvedSide !== 'SELL') throw new Error('side must be BUY or SELL.');
+    }
+
+    assertExecutionSafety(normalizedBody);
 
     const dedupeKey =
-      typeof body?.dedupeKey === 'string' && body.dedupeKey.trim()
-        ? body.dedupeKey.trim()
+      typeof normalizedBody?.dedupeKey === 'string' && normalizedBody.dedupeKey.trim()
+        ? normalizedBody.dedupeKey.trim()
         : stableDedupeKey({
-            terminalId: String(body.terminalId ?? ''),
-            type: String(body.type ?? ''),
-            symbol: String(body?.payload?.symbol ?? ''),
-            side: String(body?.payload?.side ?? ''),
-            volumeLots: Number(body?.payload?.volumeLots ?? NaN),
-            intentId: String(body?.payload?.intentId ?? ''),
-            expiresAt: String(body.expiresAt ?? ''),
+            terminalId: String(normalizedBody.terminalId ?? ''),
+            type: String(normalizedBody.type ?? ''),
+            symbol: resolvedSymbol || String(normalizedBody?.payload?.symbol ?? ''),
+            side: resolvedSide || String(normalizedBody?.payload?.side ?? ''),
+            volumeLots: Number.isFinite(resolvedVolume) ? resolvedVolume : Number(normalizedBody?.payload?.volumeLots ?? normalizedBody?.payload?.volume ?? NaN),
+            intentId: String(normalizedBody?.payload?.intentId ?? ''),
+            expiresAt: String(normalizedBody.expiresAt ?? ''),
           });
 
     const rowToCommand = (row: any) => ({
@@ -85,16 +131,16 @@ export async function POST(request: Request): Promise<Response> {
     let commandResult: { command: any; inserted: boolean };
     try {
       commandResult = await upsertExecutionCommand({
-        commandId: String(body.commandId ?? ''),
-        terminalId: String(body.terminalId ?? ''),
-        type: String(body.type ?? ''),
-        payload: (body.payload ?? {}) as Record<string, unknown>,
-        createdAt: String(body.createdAt ?? new Date().toISOString()),
-        expiresAt: String(body.expiresAt ?? new Date(Date.now() + 60_000).toISOString()),
-        environment: String(body.environment ?? 'DEMO') as any,
-        sandboxMode: Boolean(body.sandboxMode ?? body.sandbox ?? true),
+        commandId: String(normalizedBody.commandId ?? ''),
+        terminalId: String(normalizedBody.terminalId ?? ''),
+        type: String(normalizedBody.type ?? ''),
+        payload: (normalizedBody.payload ?? {}) as Record<string, unknown>,
+        createdAt: String(normalizedBody.createdAt ?? new Date().toISOString()),
+        expiresAt: String(normalizedBody.expiresAt ?? new Date(Date.now() + 5 * 60_000).toISOString()),
+        environment: environment as any,
+        sandboxMode,
         dedupeKey,
-        maxAttempts: Number(body.maxAttempts ?? 3),
+        maxAttempts: Number(normalizedBody.maxAttempts ?? 3),
       });
     } catch (error: any) {
       if (String(error?.code ?? '') === '23505') {
@@ -133,29 +179,35 @@ export async function POST(request: Request): Promise<Response> {
 
     if (!forward.ok) {
       const message = await forward.text();
-      await queryPostgres(
-        `
-          UPDATE execution_commands
-          SET last_error = $2,
-              last_updated_at = now()
-          WHERE command_id = $1
-        `,
-        [command.commandId, message || `Bridge enqueue failed with HTTP ${forward.status}`],
-      );
+      try {
+        await queryPostgres(
+          `
+            UPDATE execution_commands
+            SET last_error = $2,
+                last_updated_at = now()
+            WHERE command_id = $1
+          `,
+          [command.commandId, message || `Bridge enqueue failed with HTTP ${forward.status}`],
+        );
+      } catch {
+      }
       return Response.json({ ok: false, error: message || `Bridge enqueue failed with HTTP ${forward.status}`, command, inserted }, { status: 502 });
     }
 
-    await queryPostgres(
-      `
-        UPDATE execution_commands
-        SET lifecycle_state = 'ROUTING',
-            routed_at = COALESCE(routed_at, now()),
-            last_updated_at = now()
-        WHERE command_id = $1
-          AND lifecycle_state = 'QUEUED'
-      `,
-      [command.commandId],
-    );
+    try {
+      await queryPostgres(
+        `
+          UPDATE execution_commands
+          SET lifecycle_state = 'ROUTING',
+              routed_at = COALESCE(routed_at, now()),
+              last_updated_at = now()
+          WHERE command_id = $1
+            AND lifecycle_state = 'QUEUED'
+        `,
+        [command.commandId],
+      );
+    } catch {
+    }
     await appendExecutionEvent({
       commandId: command.commandId,
       terminalId: command.terminalId,

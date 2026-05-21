@@ -5024,19 +5024,18 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
         body: JSON.stringify({
           commandId: `${selectedTerminalId}-${crypto.randomUUID()}`,
           terminalId: selectedTerminalId,
-          type: 'place_order',
+          type: 'PLACE_ORDER',
           createdAt: new Date().toISOString(),
-          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
           environment: enqueue.environment,
-          sandboxMode: enqueue.sandboxMode,
-          payload: {
-            symbol: enqueue.symbol.trim(),
-            side: enqueue.side,
-            orderKind: 'market',
-            volumeLots,
-            stopLoss,
-            takeProfit,
-          },
+          mode: enqueue.sandboxMode ? 'SANDBOX' : 'LIVE',
+          symbol: enqueue.symbol.trim(),
+          side: String(enqueue.side).toUpperCase(),
+          orderType: 'MARKET',
+          volume: volumeLots,
+          sl: stopLoss,
+          tp: takeProfit,
+          comment: 'Cacsms Trader sandbox test',
         }),
       });
       if (!response.ok) {
@@ -5190,7 +5189,7 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
               <input className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs" placeholder="takeProfit" value={enqueue.takeProfit} onChange={(e) => setEnqueue((c) => ({ ...c, takeProfit: e.target.value }))} />
             </div>
             <div className={cn('text-xs font-mono', submit.status === 'ok' && 'text-teal-700', submit.status === 'error' && 'text-rose-700', submit.status === 'submitting' && 'text-slate-500')}>
-              {submit.message || 'Execution requires EA EnableExecution=true; disabled terminals ACK rejected.'}
+              {submit.message || 'Ready. If an EA rejects execution, set EnableExecution=true and CommandPollSeconds>0 on that terminal.'}
             </div>
             {dbState.error ? (
               <div className="text-xs font-mono text-rose-700">{dbState.error}</div>

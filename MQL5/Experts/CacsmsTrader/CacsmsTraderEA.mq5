@@ -3,7 +3,7 @@
 //| Demo heartbeat bridge first, execution later.                     |
 //+------------------------------------------------------------------+
 #property strict
-#property version "0.1.0"
+#property version "001.001"
 
 #include <Trade\Trade.mqh>
 
@@ -24,6 +24,68 @@ datetime eaStartedAt = 0;
 long heartbeatSequence = 0;
 int lastWebRequestLatencyMs = 0;
 datetime lastCommandPoll = 0;
+string currentCommandId = "";
+string currentCommandTerminalId = "";
+ulong pendingOrderTickets[32];
+string pendingOrderCommandIds[32];
+string pendingOrderTerminalIds[32];
+string pendingOrderTypes[32];
+int pendingOrderCount = 0;
+
+string BoolToString(bool value)
+{
+   return value ? "true" : "false";
+}
+
+string TruncateString(string value, int maxLen)
+{
+   if (maxLen <= 0) return "";
+   if (StringLen(value) <= maxLen) return value;
+   return StringSubstr(value, 0, maxLen) + "...";
+}
+
+int FindPendingIndex(ulong orderTicket)
+{
+   for (int i = 0; i < pendingOrderCount; i++)
+   {
+      if (pendingOrderTickets[i] == orderTicket) return i;
+   }
+   return -1;
+}
+
+void AddPending(ulong orderTicket, string commandId, string terminalId)
+{
+   if (orderTicket <= 0) return;
+   if (commandId == "") return;
+   int existing = FindPendingIndex(orderTicket);
+   if (existing >= 0)
+   {
+      pendingOrderCommandIds[existing] = commandId;
+      pendingOrderTerminalIds[existing] = terminalId;
+      return;
+   }
+   if (pendingOrderCount >= 32) return;
+   pendingOrderTickets[pendingOrderCount] = orderTicket;
+   pendingOrderCommandIds[pendingOrderCount] = commandId;
+   pendingOrderTerminalIds[pendingOrderCount] = terminalId;
+   pendingOrderTypes[pendingOrderCount] = "PLACE_ORDER";
+   pendingOrderCount++;
+}
+
+void RemovePendingAt(int index)
+{
+   if (index < 0 || index >= pendingOrderCount) return;
+   int last = pendingOrderCount - 1;
+   pendingOrderTickets[index] = pendingOrderTickets[last];
+   pendingOrderCommandIds[index] = pendingOrderCommandIds[last];
+   pendingOrderTerminalIds[index] = pendingOrderTerminalIds[last];
+   pendingOrderTypes[index] = pendingOrderTypes[last];
+   pendingOrderTickets[last] = 0;
+   pendingOrderCommandIds[last] = "";
+   pendingOrderTerminalIds[last] = "";
+   pendingOrderTypes[last] = "";
+   pendingOrderCount--;
+}
 
 int OnInit()
 {
@@ -42,6 +104,20 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    // Execution remains disabled until command polling and risk acknowledgments exist.
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
+{
+   if (pendingOrderCount <= 0) return;
+   if (trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+   if (trans.order <= 0) return;
+   int index = FindPendingIndex(trans.order);
+   if (index < 0) return;
+   string commandId = pendingOrderCommandIds[index];
+   string terminalId = pendingOrderTerminalIds[index];
+   string receivedType = pendingOrderTypes[index];
+   RemovePendingAt(index);
+   PostAck(commandId, terminalId, "filled", (string)trans.deal, "ok", trans.price, trans.volume, 0, 0, 0, receivedType);
 }
 
 void OnTimer()
@@ -68,7 +144,7 @@ void SendHeartbeat()
    string nigeriaTime = TimeToString((datetime)(TimeGMT() + 3600), TIME_DATE | TIME_SECONDS);
    string connectionStatus = "connected";
    string heartbeat = StringFormat(
-      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"0.2.0\"}",
+      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.001\"}",
       EscapeJson(TerminalId),
       EscapeJson(computerId),
       EscapeJson(computerName),
@@ -78,7 +154,7 @@ void SendHeartbeat()
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_MARGIN),
-      AccountInfoDouble(ACCOUNT_FREEMARGIN),
+      AccountInfoDouble(ACCOUNT_MARGIN_FREE),
       OrdersTotal(),
       EscapeJson(connectionStatus),
       TimeToString(lastHeartbeat, TIME_DATE | TIME_SECONDS),
@@ -155,6 +231,7 @@ void PollNextCommand()
    }
 
    string body = CharArrayToString(result, 0, -1, CP_UTF8);
+   Print("EA_RAW_COMMAND_PAYLOAD ", TruncateString(body, 900));
    string commandJson;
    bool isNull = false;
    if (!ExtractJsonObject(body, "command", commandJson, isNull))
@@ -167,62 +244,95 @@ void PollNextCommand()
    }
 
    string commandId;
-   string type;
+   string commandType = "";
    string terminalId;
    string payloadJson;
    if (!ExtractJsonString(commandJson, "commandId", commandId)) return;
-   if (!ExtractJsonString(commandJson, "type", type)) return;
+   ExtractJsonString(commandJson, "type", commandType);
    if (!ExtractJsonString(commandJson, "terminalId", terminalId)) terminalId = TerminalId;
    bool payloadNull = false;
    if (!ExtractJsonObject(commandJson, "payload", payloadJson, payloadNull)) payloadJson = "{}";
+
+   string parsedSymbol = "";
+   string parsedSide = "";
+   string parsedOrderType = "";
+   double parsedVolume = 0.0;
+   ExtractJsonString(payloadJson, "symbol", parsedSymbol);
+   ExtractJsonString(payloadJson, "side", parsedSide);
+   if (!ExtractJsonString(payloadJson, "orderType", parsedOrderType))
+   {
+      ExtractJsonString(payloadJson, "orderKind", parsedOrderType);
+   }
+   if (!ExtractJsonNumber(payloadJson, "volume", parsedVolume))
+   {
+      ExtractJsonNumber(payloadJson, "volumeLots", parsedVolume);
+   }
+
+   Print("EA_PARSED_TYPE ", commandType);
+   Print("EA_PARSED_SYMBOL ", parsedSymbol);
+   Print("EA_PARSED_SIDE ", parsedSide);
+   Print("EA_PARSED_ORDER_TYPE ", parsedOrderType);
+   Print("EA_PARSED_VOLUME ", DoubleToString(parsedVolume, 4));
+   Print("EA_ENABLE_EXECUTION ", BoolToString(EnableExecution));
+   bool accountTradeAllowed = (AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) != 0);
+   bool terminalTradeAllowed = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
+   Print("EA_ACCOUNT_TRADE_ALLOWED ", BoolToString(accountTradeAllowed));
+   Print("EA_TERMINAL_TRADE_ALLOWED ", BoolToString(terminalTradeAllowed));
 
    string ackStatus = "failed";
    string ticket = "";
    string brokerMessage = "";
    double executedPrice = 0.0;
    double executedVolumeLots = 0.0;
+   int slippagePoints = 0;
+   int spreadPoints = 0;
 
-   if (!EnableExecution)
+   string typeUpper = StringTrim(commandType);
+   StringToUpper(typeUpper);
+   if (typeUpper == "")
+   {
+      ackStatus = "failed";
+      brokerMessage = "{\"status\":\"FAILED\",\"reason\":\"missing_type\",\"receivedType\":\"\"}";
+   }
+   else if (!EnableExecution)
    {
       ackStatus = "rejected";
       brokerMessage = "execution_disabled";
    }
    else
    {
-      ExecuteCommand(type, payloadJson, ackStatus, ticket, brokerMessage, executedPrice, executedVolumeLots);
+      currentCommandId = commandId;
+      currentCommandTerminalId = terminalId;
+      ExecuteCommand(commandType, payloadJson, ackStatus, ticket, brokerMessage, executedPrice, executedVolumeLots, slippagePoints, spreadPoints);
+      currentCommandId = "";
+      currentCommandTerminalId = "";
    }
 
-   PostAck(commandId, terminalId, ackStatus, ticket, brokerMessage, executedPrice, executedVolumeLots, latencyMs);
+   PostAck(commandId, terminalId, ackStatus, ticket, brokerMessage, executedPrice, executedVolumeLots, slippagePoints, spreadPoints, latencyMs, commandType);
 }
 
-void ExecuteCommand(string type, string payloadJson, string &ackStatus, string &ticket, string &brokerMessage, double &executedPrice, double &executedVolumeLots)
+void ExecuteCommand(string commandType, string payloadJson, string &ackStatus, string &ticket, string &brokerMessage, double &executedPrice, double &executedVolumeLots, int &slippagePointsOut, int &spreadPointsOut)
 {
-   string normalized = StringToLower(type);
+   string normalized = commandType;
+   StringToLower(normalized);
+   normalized = StringTrim(normalized);
+   StringReplace(normalized, "-", "_");
+   if (normalized == "test_hardcoded_order")
+   {
+      string hardcodedPayload = "{\"type\":\"TEST_HARDCODED_ORDER\",\"symbol\":\"EURUSD\",\"side\":\"BUY\",\"orderType\":\"MARKET\",\"volume\":0.01,\"mode\":\"SANDBOX\",\"environment\":\"DEMO\",\"comment\":\"Cacsms Trader hardcoded test\"}";
+      ExecutePlaceOrder(hardcodedPayload, ackStatus, ticket, brokerMessage, executedPrice, executedVolumeLots, slippagePointsOut, spreadPointsOut);
+      return;
+   }
    if (normalized == "place_order")
    {
-      ExecutePlaceOrder(payloadJson, ackStatus, ticket, brokerMessage, executedPrice, executedVolumeLots);
-      return;
-   }
-   if (normalized == "close_order")
-   {
-      ExecuteCloseOrder(payloadJson, ackStatus, ticket, brokerMessage);
-      return;
-   }
-   if (normalized == "modify_order")
-   {
-      ExecuteModifyOrder(payloadJson, ackStatus, ticket, brokerMessage);
-      return;
-   }
-   if (normalized == "emergency_close_all")
-   {
-      ExecuteEmergencyCloseAll(ackStatus, brokerMessage);
+      ExecutePlaceOrder(payloadJson, ackStatus, ticket, brokerMessage, executedPrice, executedVolumeLots, slippagePointsOut, spreadPointsOut);
       return;
    }
    ackStatus = "failed";
-   brokerMessage = "unsupported_command_type";
+   brokerMessage = StringFormat("{\"status\":\"FAILED\",\"reason\":\"unsupported_command_type\",\"receivedType\":\"%s\"}", EscapeJson(commandType));
 }
 
-void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage, double &executedPrice, double &executedVolumeLots)
+void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage, double &executedPrice, double &executedVolumeLots, int &slippagePointsOut, int &spreadPointsOut)
 {
    string symbol;
    string side;
@@ -230,13 +340,27 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
    double volumeLots = 0.0;
    double stopLoss = 0.0;
    double takeProfit = 0.0;
+   string comment = "cacsms";
 
-   if (!ExtractJsonString(payloadJson, "symbol", symbol)) { ackStatus = "failed"; brokerMessage = "missing_symbol"; return; }
-   if (!ExtractJsonString(payloadJson, "side", side)) { ackStatus = "failed"; brokerMessage = "missing_side"; return; }
-   if (!ExtractJsonString(payloadJson, "orderKind", orderKind)) orderKind = "market";
-   if (!ExtractJsonNumber(payloadJson, "volumeLots", volumeLots)) { ackStatus = "failed"; brokerMessage = "missing_volumeLots"; return; }
-   if (!ExtractJsonNumber(payloadJson, "stopLoss", stopLoss)) { ackStatus = "failed"; brokerMessage = "missing_stopLoss"; return; }
-   if (!ExtractJsonNumber(payloadJson, "takeProfit", takeProfit)) { ackStatus = "failed"; brokerMessage = "missing_takeProfit"; return; }
+   if (!ExtractJsonString(payloadJson, "symbol", symbol)) { ackStatus = "failed"; brokerMessage = "{\"status\":\"FAILED\",\"reason\":\"missing_symbol\"}"; return; }
+   if (!ExtractJsonString(payloadJson, "side", side)) { ackStatus = "failed"; brokerMessage = "{\"status\":\"FAILED\",\"reason\":\"missing_side\"}"; return; }
+   if (!ExtractJsonString(payloadJson, "orderKind", orderKind))
+   {
+      if (!ExtractJsonString(payloadJson, "orderType", orderKind)) orderKind = "market";
+   }
+   if (!ExtractJsonNumber(payloadJson, "volume", volumeLots))
+   {
+      if (!ExtractJsonNumber(payloadJson, "volumeLots", volumeLots)) { ackStatus = "failed"; brokerMessage = "{\"status\":\"FAILED\",\"reason\":\"missing_volume\"}"; return; }
+   }
+   if (!ExtractJsonNumber(payloadJson, "stopLoss", stopLoss))
+   {
+      if (!ExtractJsonNumber(payloadJson, "sl", stopLoss)) stopLoss = 0.0;
+   }
+   if (!ExtractJsonNumber(payloadJson, "takeProfit", takeProfit))
+   {
+      if (!ExtractJsonNumber(payloadJson, "tp", takeProfit)) takeProfit = 0.0;
+   }
+   ExtractJsonString(payloadJson, "comment", comment);
 
    if (!SymbolSelect(symbol, true))
    {
@@ -272,14 +396,29 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
    trade.SetExpertMagicNumber((ulong)MagicNumber);
 
    bool ok = false;
-   string sideLower = StringToLower(side);
+   double requestPrice = 0.0;
+   double pointRef = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   string sideLower = side;
+   StringToLower(sideLower);
    if (sideLower == "buy")
    {
-      ok = trade.Buy(normalizedLots, symbol, 0.0, stopLoss, takeProfit, "cacsms");
+      double bid = 0.0;
+      double ask = 0.0;
+      SymbolInfoDouble(symbol, SYMBOL_BID, bid);
+      SymbolInfoDouble(symbol, SYMBOL_ASK, ask);
+      requestPrice = ask;
+      spreadPointsOut = pointRef > 0.0 ? (int)MathRound((ask - bid) / pointRef) : 0;
+      ok = trade.Buy(normalizedLots, symbol, 0.0, stopLoss, takeProfit, comment);
    }
    else if (sideLower == "sell")
    {
-      ok = trade.Sell(normalizedLots, symbol, 0.0, stopLoss, takeProfit, "cacsms");
+      double bid = 0.0;
+      double ask = 0.0;
+      SymbolInfoDouble(symbol, SYMBOL_BID, bid);
+      SymbolInfoDouble(symbol, SYMBOL_ASK, ask);
+      requestPrice = bid;
+      spreadPointsOut = pointRef > 0.0 ? (int)MathRound((ask - bid) / pointRef) : 0;
+      ok = trade.Sell(normalizedLots, symbol, 0.0, stopLoss, takeProfit, comment);
    }
    else
    {
@@ -298,10 +437,20 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
    ulong deal = trade.ResultDeal();
    ulong order = trade.ResultOrder();
    executedPrice = trade.ResultPrice();
+   slippagePointsOut = pointRef > 0.0 ? (int)MathRound(MathAbs(executedPrice - requestPrice) / pointRef) : 0;
    executedVolumeLots = normalizedLots;
    ticket = (string)(deal > 0 ? deal : order);
-   ackStatus = "filled";
-   brokerMessage = "ok";
+   if (deal > 0)
+   {
+      ackStatus = "filled";
+      brokerMessage = "ok";
+   }
+   else
+   {
+      ackStatus = "accepted";
+      brokerMessage = "order_accepted";
+      AddPending(order, currentCommandId, currentCommandTerminalId);
+   }
 }
 
 void ExecuteCloseOrder(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage)
@@ -411,10 +560,10 @@ void ExecuteEmergencyCloseAll(string &ackStatus, string &brokerMessage)
    brokerMessage = anyFailed ? "close_all_partial_failure" : "ok";
 }
 
-void PostAck(string commandId, string terminalId, string status, string ticket, string brokerMessage, double executedPrice, double executedVolumeLots, int latencyMs)
+void PostAck(string commandId, string terminalId, string status, string ticket, string brokerMessage, double executedPrice, double executedVolumeLots, int slippagePoints, int spreadPoints, int latencyMs, string receivedType)
 {
    string ack = StringFormat(
-      "{\"commandId\":\"%s\",\"terminalId\":\"%s\",\"status\":\"%s\",\"ticket\":\"%s\",\"brokerMessage\":\"%s\",\"executedPrice\":%s,\"executedVolumeLots\":%s,\"latencyMs\":%d,\"receivedAt\":\"%s\"}",
+      "{\"commandId\":\"%s\",\"terminalId\":\"%s\",\"status\":\"%s\",\"ticket\":\"%s\",\"brokerMessage\":\"%s\",\"executedPrice\":%s,\"executedVolumeLots\":%s,\"slippagePoints\":%d,\"spreadPoints\":%d,\"latencyMs\":%d,\"receivedType\":\"%s\",\"receivedAt\":\"%s\"}",
       EscapeJson(commandId),
       EscapeJson(terminalId),
       EscapeJson(status),
@@ -422,7 +571,10 @@ void PostAck(string commandId, string terminalId, string status, string ticket, 
       EscapeJson(brokerMessage),
       DoubleToJson(executedPrice),
       DoubleToJson(executedVolumeLots),
+      slippagePoints,
+      spreadPoints,
       latencyMs,
+      EscapeJson(receivedType),
       TimeToString(TimeLocal(), TIME_DATE | TIME_SECONDS)
    );
 

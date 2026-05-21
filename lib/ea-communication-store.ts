@@ -16,6 +16,28 @@ export type EaCommEventRecord = {
   createdAt: string;
 };
 
+type EaCommSchemaCaps = {
+  hasEventsTable: boolean;
+};
+
+let schemaCache: { caps: EaCommSchemaCaps; loadedAt: number } | null = null;
+
+async function getSchemaCaps(): Promise<EaCommSchemaCaps> {
+  const now = Date.now();
+  if (schemaCache && now - schemaCache.loadedAt < 30_000) return schemaCache.caps;
+  try {
+    const result = await queryPostgres(`SELECT to_regclass('public.ea_comm_events') IS NOT NULL AS has_events_table`);
+    const row = result.rows[0] as any;
+    const caps: EaCommSchemaCaps = { hasEventsTable: Boolean(row?.has_events_table) };
+    schemaCache = { caps, loadedAt: now };
+    return caps;
+  } catch {
+    const caps: EaCommSchemaCaps = { hasEventsTable: false };
+    schemaCache = { caps, loadedAt: now };
+    return caps;
+  }
+}
+
 export async function appendEaCommEvent(input: {
   terminalId?: string | null;
   direction: EaCommDirection;
@@ -25,6 +47,8 @@ export async function appendEaCommEvent(input: {
   message: string;
   payload?: Record<string, unknown>;
 }): Promise<void> {
+  const caps = await getSchemaCaps();
+  if (!caps.hasEventsTable) return;
   await queryPostgres(
     `
       INSERT INTO ea_comm_events (
@@ -56,6 +80,8 @@ export async function listEaCommEvents(filter: {
   channel?: EaCommChannel;
   limit?: number;
 }): Promise<EaCommEventRecord[]> {
+  const caps = await getSchemaCaps();
+  if (!caps.hasEventsTable) return [];
   const limit = Math.min(500, Math.max(1, Number(filter.limit ?? 200)));
   const conditions: string[] = [];
   const params: any[] = [];
@@ -75,16 +101,21 @@ export async function listEaCommEvents(filter: {
 
   params.push(limit);
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const result = await queryPostgres(
-    `
-      SELECT *
-      FROM ea_comm_events
-      ${where}
-      ORDER BY id ASC
-      LIMIT $${params.length}
-    `,
-    params,
-  );
+  let result: any;
+  try {
+    result = await queryPostgres(
+      `
+        SELECT *
+        FROM ea_comm_events
+        ${where}
+        ORDER BY id ASC
+        LIMIT $${params.length}
+      `,
+      params,
+    );
+  } catch {
+    return [];
+  }
 
   return result.rows.map((row: any) => ({
     id: String(row.id),
@@ -100,34 +131,53 @@ export async function listEaCommEvents(filter: {
 }
 
 export async function summarizeEaComm(filter: { windowMinutes?: number } = {}) {
+  const caps = await getSchemaCaps();
   const minutes = Math.min(24 * 60, Math.max(1, Number(filter.windowMinutes ?? 60)));
-  const result = await queryPostgres(
-    `
-      SELECT
-        channel,
-        severity,
-        event_type,
-        count(*)::int AS count
-      FROM ea_comm_events
-      WHERE created_at > now() - ($1::int * interval '1 minute')
-      GROUP BY channel, severity, event_type
-      ORDER BY count(*) DESC
-      LIMIT 200
-    `,
-    [minutes],
-  );
+  if (!caps.hasEventsTable) {
+    return {
+      windowMinutes: minutes,
+      totals: { total: 0, errors: 0, warnings: 0 },
+      breakdown: [],
+    };
+  }
 
-  const totals = await queryPostgres(
-    `
-      SELECT
-        count(*)::int AS total,
-        sum(CASE WHEN severity = 'ERROR' THEN 1 ELSE 0 END)::int AS errors,
-        sum(CASE WHEN severity = 'WARNING' THEN 1 ELSE 0 END)::int AS warnings
-      FROM ea_comm_events
-      WHERE created_at > now() - ($1::int * interval '1 minute')
-    `,
-    [minutes],
-  );
+  let result: any;
+  let totals: any;
+  try {
+    result = await queryPostgres(
+      `
+        SELECT
+          channel,
+          severity,
+          event_type,
+          count(*)::int AS count
+        FROM ea_comm_events
+        WHERE created_at > now() - ($1::int * interval '1 minute')
+        GROUP BY channel, severity, event_type
+        ORDER BY count(*) DESC
+        LIMIT 200
+      `,
+      [minutes],
+    );
+
+    totals = await queryPostgres(
+      `
+        SELECT
+          count(*)::int AS total,
+          sum(CASE WHEN severity = 'ERROR' THEN 1 ELSE 0 END)::int AS errors,
+          sum(CASE WHEN severity = 'WARNING' THEN 1 ELSE 0 END)::int AS warnings
+        FROM ea_comm_events
+        WHERE created_at > now() - ($1::int * interval '1 minute')
+      `,
+      [minutes],
+    );
+  } catch {
+    return {
+      windowMinutes: minutes,
+      totals: { total: 0, errors: 0, warnings: 0 },
+      breakdown: [],
+    };
+  }
 
   return {
     windowMinutes: minutes,

@@ -44,7 +44,7 @@ export async function POST(request: Request): Promise<Response> {
 
     const newCommandId = `retry-${crypto.randomUUID()}`;
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + 60_000).toISOString();
+    const expiresAt = new Date(now.getTime() + 5 * 60_000).toISOString();
 
     const payload = (row.payload ?? {}) as Record<string, unknown>;
     const enrichedPayload = { ...payload, retryOfCommandId: commandId };

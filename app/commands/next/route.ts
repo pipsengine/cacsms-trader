@@ -66,7 +66,11 @@ export async function GET(request: Request): Promise<Response> {
   const payload = safeJson(body);
   const command = payload && typeof payload === 'object' ? (payload as any).command : null;
   if (response.ok && command && typeof command === 'object') {
+    console.log('BACKEND_OUTGOING_COMMAND_JSON', body);
     const now = new Date().toISOString();
+    const commandPayload = (command.payload ?? {}) as any;
+    const environment = String(commandPayload.environment ?? 'DEMO').toUpperCase();
+    const sandboxMode = String(commandPayload.mode ?? '').toUpperCase() === 'SANDBOX' ? true : Boolean(commandPayload.sandboxMode ?? true);
     try {
       await upsertExecutionCommand({
         commandId: String(command.commandId ?? ''),
@@ -74,9 +78,9 @@ export async function GET(request: Request): Promise<Response> {
         type: String(command.type ?? ''),
         payload: (command.payload ?? {}) as Record<string, unknown>,
         createdAt: String(command.createdAt ?? now),
-        expiresAt: String(command.expiresAt ?? new Date(Date.now() + 60_000).toISOString()),
-        environment: 'DEMO',
-        sandboxMode: true,
+        expiresAt: String(command.expiresAt ?? new Date(Date.now() + 5 * 60_000).toISOString()),
+        environment: environment as any,
+        sandboxMode,
       });
       await recordDispatch({
         terminalId: String(command.terminalId ?? terminalId),

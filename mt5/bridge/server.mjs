@@ -227,6 +227,9 @@ const server = http.createServer(async (request, response) => {
       const terminalId = requiredString(url.searchParams.get("terminalId") ?? "", "terminalId");
       assertAuthorized(request);
       const leased = leaseNextCommand(terminalId);
+      if (leased) {
+        console.log("BRIDGE_DELIVERED_COMMAND_JSON", JSON.stringify(toCommandEnvelope(leased)));
+      }
       sendJson(response, 200, {
         ok: true,
         terminalId,
@@ -619,7 +622,8 @@ function enqueueCommand(payload) {
   const now = new Date().toISOString();
   const commandId = requiredString(payload.commandId, "commandId");
   const terminalId = requiredString(payload.terminalId, "terminalId");
-  const type = requiredString(payload.type, "type").toLowerCase();
+  const rawType = requiredString(payload.type, "type");
+  const normalizedType = rawType.trim().toLowerCase().replaceAll("-", "_");
   const allowedTypes = new Set([
     "place_order",
     "modify_order",
@@ -629,9 +633,25 @@ function enqueueCommand(payload) {
     "set_trailing_stop",
     "emergency_close_all",
   ]);
-  if (!allowedTypes.has(type)) {
-    throw new Error(`Unsupported command type: ${type}.`);
+  if (!allowedTypes.has(normalizedType)) {
+    throw new Error(`Unsupported command type: ${normalizedType}.`);
   }
+  const type =
+    normalizedType === "place_order"
+      ? "PLACE_ORDER"
+      : normalizedType === "modify_order"
+        ? "MODIFY_ORDER"
+        : normalizedType === "close_order"
+          ? "CLOSE_ORDER"
+          : normalizedType === "partial_close"
+            ? "PARTIAL_CLOSE"
+            : normalizedType === "move_to_breakeven"
+              ? "MOVE_TO_BREAKEVEN"
+              : normalizedType === "set_trailing_stop"
+                ? "SET_TRAILING_STOP"
+                : normalizedType === "emergency_close_all"
+                  ? "EMERGENCY_CLOSE_ALL"
+                  : rawType.trim();
   const createdAt = String(payload.createdAt ?? now);
   const expiresAt = String(payload.expiresAt ?? new Date(Date.now() + 60_000).toISOString());
 
