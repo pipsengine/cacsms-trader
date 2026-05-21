@@ -28,7 +28,9 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   const url = new URL(request.url);
-  let cursor = url.searchParams.get('sinceId') ?? '0';
+  const queryCursor = url.searchParams.get('sinceId') ?? '0';
+  const headerCursor = request.headers.get('last-event-id') ?? request.headers.get('Last-Event-ID') ?? '';
+  let cursor = queryCursor !== '0' ? queryCursor : (headerCursor || queryCursor);
 
   const stream = new ReadableStream({
     async start(controller) {

@@ -33,7 +33,9 @@ export async function GET(request: Request): Promise<Response> {
 
   const url = new URL(request.url);
   const terminalId = url.searchParams.get('terminalId') ?? '';
-  let cursor = url.searchParams.get('sinceId') ?? '';
+  const queryCursor = url.searchParams.get('sinceId') ?? '';
+  const headerCursor = request.headers.get('last-event-id') ?? request.headers.get('Last-Event-ID') ?? '';
+  let cursor = queryCursor || headerCursor || '';
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -51,6 +53,7 @@ export async function GET(request: Request): Promise<Response> {
 
           for (const event of batch) {
             cursor = event.id;
+            write(`id: ${event.id}\n`);
             write(`event: ea_comm_event\n`);
             write(`data: ${JSON.stringify(event)}\n\n`);
           }

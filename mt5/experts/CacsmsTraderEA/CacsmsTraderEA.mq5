@@ -143,14 +143,53 @@ void SendHeartbeat()
    string computerName = TerminalInfoString(TERMINAL_NAME);
    string nigeriaTime = TimeToString((datetime)(TimeGMT() + 3600), TIME_DATE | TIME_SECONDS);
    string connectionStatus = "connected";
+   long tradeMode = AccountInfoInteger(ACCOUNT_TRADE_MODE);
+   string accountType = tradeMode == 2 ? "live" : "demo";
+   bool accountTradeAllowed = (AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) != 0);
+   bool terminalTradeAllowed = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
+   bool eurusdAvailable = SymbolSelect("EURUSD", true);
+   bool xauusdAvailable = SymbolSelect("XAUUSD", true);
+   int eurusdSpreadPoints = 0;
+   int xauusdSpreadPoints = 0;
+   if (eurusdAvailable)
+   {
+      double bidE = 0.0;
+      double askE = 0.0;
+      SymbolInfoDouble("EURUSD", SYMBOL_BID, bidE);
+      SymbolInfoDouble("EURUSD", SYMBOL_ASK, askE);
+      double pointE = SymbolInfoDouble("EURUSD", SYMBOL_POINT);
+      eurusdSpreadPoints = pointE > 0.0 ? (int)MathRound((askE - bidE) / pointE) : 0;
+   }
+   if (xauusdAvailable)
+   {
+      double bidX = 0.0;
+      double askX = 0.0;
+      SymbolInfoDouble("XAUUSD", SYMBOL_BID, bidX);
+      SymbolInfoDouble("XAUUSD", SYMBOL_ASK, askX);
+      double pointX = SymbolInfoDouble("XAUUSD", SYMBOL_POINT);
+      xauusdSpreadPoints = pointX > 0.0 ? (int)MathRound((askX - bidX) / pointX) : 0;
+   }
+   string enableExecutionJson = EnableExecution ? "true" : "false";
+   string accountTradeAllowedJson = accountTradeAllowed ? "true" : "false";
+   string terminalTradeAllowedJson = terminalTradeAllowed ? "true" : "false";
+   string eurusdAvailableJson = eurusdAvailable ? "true" : "false";
+   string xauusdAvailableJson = xauusdAvailable ? "true" : "false";
    string heartbeat = StringFormat(
-      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.001\"}",
+      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"accountType\":\"%s\",\"enableExecution\":%s,\"accountTradeAllowed\":%s,\"terminalTradeAllowed\":%s,\"eurusdAvailable\":%s,\"xauusdAvailable\":%s,\"eurusdSpreadPoints\":%d,\"xauusdSpreadPoints\":%d,\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.001\"}",
       EscapeJson(TerminalId),
       EscapeJson(computerId),
       EscapeJson(computerName),
       AccountInfoInteger(ACCOUNT_LOGIN),
       EscapeJson(AccountInfoString(ACCOUNT_COMPANY)),
       EscapeJson(AccountInfoString(ACCOUNT_SERVER)),
+      EscapeJson(accountType),
+      enableExecutionJson,
+      accountTradeAllowedJson,
+      terminalTradeAllowedJson,
+      eurusdAvailableJson,
+      xauusdAvailableJson,
+      eurusdSpreadPoints,
+      xauusdSpreadPoints,
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_MARGIN),

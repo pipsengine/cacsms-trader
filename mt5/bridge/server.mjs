@@ -295,6 +295,14 @@ function normalizeHeartbeat(payload, existing) {
   const mt5ServerTime = String(payload.mt5ServerTime ?? now);
   const terminalTime = String(payload.terminalTime ?? now);
   const nigeriaTime = String(payload.nigeriaTime ?? payload.nigeria_time ?? "");
+  const accountType = String(payload.accountType ?? payload.account_type ?? "");
+  const enableExecution = Boolean(payload.enableExecution ?? payload.enable_execution ?? false);
+  const accountTradeAllowed = payload.accountTradeAllowed == null ? null : Boolean(payload.accountTradeAllowed);
+  const terminalTradeAllowed = payload.terminalTradeAllowed == null ? null : Boolean(payload.terminalTradeAllowed);
+  const eurusdAvailable = payload.eurusdAvailable == null ? null : Boolean(payload.eurusdAvailable);
+  const xauusdAvailable = payload.xauusdAvailable == null ? null : Boolean(payload.xauusdAvailable);
+  const eurusdSpreadPoints = Number.isFinite(Number(payload.eurusdSpreadPoints)) ? Number(payload.eurusdSpreadPoints) : null;
+  const xauusdSpreadPoints = Number.isFinite(Number(payload.xauusdSpreadPoints)) ? Number(payload.xauusdSpreadPoints) : null;
   const historyItem = {
     sequence,
     receivedAt: now,
@@ -316,6 +324,14 @@ function normalizeHeartbeat(payload, existing) {
     accountNumber: String(payload.accountNumber ?? ""),
     brokerName: String(payload.brokerName ?? ""),
     serverName: String(payload.serverName ?? ""),
+    accountType,
+    enableExecution,
+    accountTradeAllowed,
+    terminalTradeAllowed,
+    eurusdAvailable,
+    xauusdAvailable,
+    eurusdSpreadPoints,
+    xauusdSpreadPoints,
     balance: historyItem.balance,
     equity: historyItem.equity,
     margin: finiteNumber(payload.margin, "margin"),

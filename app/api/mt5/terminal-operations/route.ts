@@ -1,5 +1,6 @@
 import { approvePendingRegistrationsFromHeartbeats, listTerminalRegistrations } from '@/lib/mt5-registration-store';
 import { listTerminalSnapshots, purgeTestTerminals, recordTerminalHeartbeat } from '@/lib/mt5-heartbeat-store';
+import { tickAutoExecutionTestRunner } from '@/lib/auto-execution-test-runner';
 
 export const runtime = 'nodejs';
 
@@ -8,10 +9,38 @@ function bridgeUrl(): string {
 }
 
 export async function GET(): Promise<Response> {
-  await purgeTestTerminals();
-  await approvePendingRegistrationsFromHeartbeats();
-  let databaseRegistrations = await listTerminalRegistrations();
-  let databaseTerminalIds = new Set(databaseRegistrations.map((registration) => registration.terminalId));
+  const preflightEvents: Array<{ type: string; message: string; time: string }> = [];
+  try {
+    await purgeTestTerminals();
+  } catch (error) {
+    preflightEvents.push({
+      type: 'WARN',
+      message: error instanceof Error ? `Database purge failed: ${error.message}` : 'Database purge failed.',
+      time: new Date().toISOString(),
+    });
+  }
+  try {
+    await approvePendingRegistrationsFromHeartbeats();
+  } catch (error) {
+    preflightEvents.push({
+      type: 'WARN',
+      message: error instanceof Error ? `Registration approval failed: ${error.message}` : 'Registration approval failed.',
+      time: new Date().toISOString(),
+    });
+  }
+
+  let databaseRegistrations: any[] = [];
+  let databaseTerminalIds = new Set<string>();
+  try {
+    databaseRegistrations = await listTerminalRegistrations();
+    databaseTerminalIds = new Set(databaseRegistrations.map((registration) => registration.terminalId));
+  } catch (error) {
+    preflightEvents.push({
+      type: 'WARN',
+      message: error instanceof Error ? `Database registrations unavailable: ${error.message}` : 'Database registrations unavailable.',
+      time: new Date().toISOString(),
+    });
+  }
 
   try {
     const response = await fetch(`${bridgeUrl()}/terminal-operations`, { cache: 'no-store' });
@@ -21,15 +50,41 @@ export async function GET(): Promise<Response> {
     );
 
     if (response.ok && bridgeTerminals.length) {
+      await tickAutoExecutionTestRunner({ bridgeOnline: true, terminals: bridgeTerminals }).catch(() => null);
       await Promise.allSettled(
         bridgeTerminals.map((terminal: any) => recordTerminalHeartbeat(mapBridgeTerminalToHeartbeatPayload(terminal))),
       );
-      await approvePendingRegistrationsFromHeartbeats();
-      databaseRegistrations = await listTerminalRegistrations();
-      databaseTerminalIds = new Set(databaseRegistrations.map((registration) => registration.terminalId));
+      try {
+        await approvePendingRegistrationsFromHeartbeats();
+      } catch (error) {
+        preflightEvents.push({
+          type: 'WARN',
+          message: error instanceof Error ? `Registration approval failed: ${error.message}` : 'Registration approval failed.',
+          time: new Date().toISOString(),
+        });
+      }
+      try {
+        databaseRegistrations = await listTerminalRegistrations();
+        databaseTerminalIds = new Set(databaseRegistrations.map((registration) => registration.terminalId));
+      } catch (error) {
+        preflightEvents.push({
+          type: 'WARN',
+          message: error instanceof Error ? `Database registrations unavailable: ${error.message}` : 'Database registrations unavailable.',
+          time: new Date().toISOString(),
+        });
+      }
     }
 
-    const databaseTerminals = await listTerminalSnapshots();
+    let databaseTerminals: any[] = [];
+    try {
+      databaseTerminals = await listTerminalSnapshots();
+    } catch (error) {
+      preflightEvents.push({
+        type: 'WARN',
+        message: error instanceof Error ? `Database terminals unavailable: ${error.message}` : 'Database terminals unavailable.',
+        time: new Date().toISOString(),
+      });
+    }
     const mergedTerminals = mergeTerminals(databaseTerminals, bridgeTerminals);
 
     return Response.json(
@@ -38,7 +93,10 @@ export async function GET(): Promise<Response> {
         bridgeOnline: response.ok,
         terminals: mergedTerminals,
         registrations: databaseRegistrations,
-        events: filterBridgeOnlyRegistrationEvents(payload.events ?? [], databaseTerminalIds),
+        events: [
+          ...preflightEvents,
+          ...filterBridgeOnlyRegistrationEvents(payload.events ?? [], databaseTerminalIds),
+        ],
       },
       {
         status: response.ok ? 200 : response.status,
@@ -48,7 +106,16 @@ export async function GET(): Promise<Response> {
       },
     );
   } catch (error) {
-    const databaseTerminals = await listTerminalSnapshots();
+    let databaseTerminals: any[] = [];
+    try {
+      databaseTerminals = await listTerminalSnapshots();
+    } catch (inner) {
+      preflightEvents.push({
+        type: 'WARN',
+        message: inner instanceof Error ? `Database terminals unavailable: ${inner.message}` : 'Database terminals unavailable.',
+        time: new Date().toISOString(),
+      });
+    }
     return Response.json(
       {
         ok: true,
@@ -71,6 +138,7 @@ export async function GET(): Promise<Response> {
           recentAcks: [],
         },
         events: [
+          ...preflightEvents,
           {
             type: 'WARN',
             message: error instanceof Error ? `MT5 bridge unavailable: ${error.message}` : 'MT5 bridge unavailable.',
@@ -99,6 +167,14 @@ function mapBridgeTerminalToHeartbeatPayload(terminal: any): Record<string, unkn
     accountNumber: terminal.accountNumber,
     brokerName: terminal.brokerName,
     serverName: terminal.serverName,
+    accountType: terminal.accountType,
+    enableExecution: terminal.enableExecution,
+    accountTradeAllowed: terminal.accountTradeAllowed,
+    terminalTradeAllowed: terminal.terminalTradeAllowed,
+    eurusdAvailable: terminal.eurusdAvailable,
+    xauusdAvailable: terminal.xauusdAvailable,
+    eurusdSpreadPoints: terminal.eurusdSpreadPoints,
+    xauusdSpreadPoints: terminal.xauusdSpreadPoints,
     balance: terminal.balance,
     equity: terminal.equity,
     margin: terminal.margin,

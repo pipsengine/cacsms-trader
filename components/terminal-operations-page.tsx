@@ -4811,6 +4811,170 @@ function VpsMiniList({ items }: { items: Array<{ label: string; value: string }>
   );
 }
 
+type AutoTestStatusView = {
+  enabled: boolean;
+  state: string;
+  runId: string | null;
+  terminalId: string | null;
+  countdownSeconds: number | null;
+  safetyChecks: Array<{ name: string; ok: boolean; detail: string }>;
+  lastResult: { state: string; commandId: string | null; ticket: string | null; message: string | null; updatedAt: string | null };
+  logs: Array<{ id: string; severity: string; message: string; eventType: string; createdAt: string }>;
+};
+
+function AutomaticExecutionTestPanel() {
+  const [status, setStatus] = useState<AutoTestStatusView | null>(null);
+  const [busy, setBusy] = useState<'idle' | 'enabling' | 'disabling'>('idle');
+  const [error, setError] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await fetch('/api/mt5/auto-test/status', { cache: 'no-store' });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload?.error ?? `Auto test status failed with HTTP ${response.status}`);
+        }
+        if (cancelled) return;
+        setStatus(payload as AutoTestStatusView);
+        setError('');
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Unable to load auto test status.');
+      }
+    };
+
+    load();
+    const interval = window.setInterval(load, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  const onEnable = async () => {
+    setBusy('enabling');
+    try {
+      const response = await fetch('/api/mt5/auto-test/enable', { method: 'POST' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error ?? `Enable failed with HTTP ${response.status}`);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Enable failed.');
+    } finally {
+      setBusy('idle');
+    }
+  };
+
+  const onDisable = async () => {
+    setBusy('disabling');
+    try {
+      const response = await fetch('/api/mt5/auto-test/disable', { method: 'POST' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error ?? `Disable failed with HTTP ${response.status}`);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Disable failed.');
+    } finally {
+      setBusy('idle');
+    }
+  };
+
+  const enabled = Boolean(status?.enabled);
+  const state = status?.state ?? 'IDLE';
+  const countdown = status?.countdownSeconds == null ? null : Math.max(0, Math.round(Number(status.countdownSeconds)));
+  const logs = status?.logs ?? [];
+
+  return (
+    <OpsPanel title="Automatic Execution Test" icon={ClipboardCheck}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <ExecutionBadge state={enabled ? 'ACKNOWLEDGED' : 'CANCELLED'} />
+          <span className="font-mono text-xs text-slate-700">{enabled ? 'Enabled' : 'Disabled'}</span>
+          <span className="font-mono text-xs text-slate-500">State: {state}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="secondary" disabled={busy !== 'idle'} onClick={onEnable}>
+            Enable
+          </Button>
+          <Button size="sm" variant="destructive" disabled={busy !== 'idle'} onClick={onDisable}>
+            Disable
+          </Button>
+        </div>
+      </div>
+
+      {status?.terminalId ? (
+        <div className="mt-3 grid grid-cols-1 gap-2 rounded-md border border-slate-200 bg-white p-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-xs font-semibold text-slate-900">Terminal</span>
+            <span className="font-mono text-xs text-slate-700">{status.terminalId}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-xs font-semibold text-slate-900">Countdown</span>
+            <span className="font-mono text-xs text-slate-700">{countdown == null ? '—' : `${countdown}s`}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="font-mono text-xs font-semibold text-slate-900">Run ID</span>
+            <span className="font-mono text-xs text-slate-500">{status.runId ?? '—'}</span>
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 rounded-md border border-slate-200 bg-white p-3 text-xs text-slate-600">
+          Waiting for a connected terminal.
+        </div>
+      )}
+
+      <div className="mt-4 grid grid-cols-1 gap-2">
+        {(status?.safetyChecks ?? []).map((check) => (
+          <div key={check.name} className="flex items-start justify-between gap-3 rounded-md border border-slate-200 bg-white p-3">
+            <div>
+              <div className="text-xs font-semibold text-slate-900">{check.name}</div>
+              <div className="mt-1 text-[11px] text-slate-500">{check.detail}</div>
+            </div>
+            <ExecutionBadge state={check.ok ? 'ACKNOWLEDGED' : 'FAILED'} />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4 rounded-md border border-slate-200 bg-white p-3">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs font-semibold text-slate-900">Last result</span>
+          <span className="font-mono text-xs text-slate-600">{status?.lastResult?.state ?? '—'}</span>
+        </div>
+        <div className="mt-2 grid grid-cols-1 gap-1 font-mono text-[11px] text-slate-600">
+          <div>commandId: {status?.lastResult?.commandId ?? '—'}</div>
+          <div>ticket: {status?.lastResult?.ticket ?? '—'}</div>
+          <div>message: {status?.lastResult?.message ?? '—'}</div>
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-md border border-slate-200 bg-white p-3">
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs font-semibold text-slate-900">Logs</span>
+          <span className="font-mono text-[11px] text-slate-500">{logs.length} entries</span>
+        </div>
+        <div className="mt-3 space-y-2">
+          {logs.slice(0, 10).map((log) => (
+            <div key={log.id} className="rounded-md border border-slate-100 bg-slate-50 p-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-[10px] uppercase text-slate-500">{log.severity}</span>
+                <span className="font-mono text-[10px] text-slate-500">{formatTime(log.createdAt)}</span>
+              </div>
+              <div className="mt-1 text-xs text-slate-700">{log.message}</div>
+            </div>
+          ))}
+          {!logs.length ? (
+            <div className="text-xs text-slate-500">No auto-test logs yet.</div>
+          ) : null}
+        </div>
+      </div>
+
+      {error ? <div className="mt-3 text-xs font-mono text-rose-700">{error}</div> : null}
+    </OpsPanel>
+  );
+}
+
 function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAcks: any[]; commandSummary: any }) {
   const connected = props.terminals.filter((t) => t.status === 'connected');
   type ExecutionBridgeDbState = {
@@ -5209,6 +5373,7 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
         </Card>
 
         <div className="space-y-6">
+          <AutomaticExecutionTestPanel />
           <OpsPanel title="Execution Diagnostics" icon={Gauge}>
             <div className="space-y-3">
               {diagnostics.map((item) => (
@@ -5395,8 +5560,8 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
 
         <OpsPanel title="Live Execution Feed" icon={Radio}>
           <div className="space-y-3">
-            {logs.slice(0, 8).map((log) => (
-              <div key={`${log.time}-${log.message}`} className="flex gap-3 rounded-md border border-slate-200 bg-white p-3">
+            {logs.slice(0, 8).map((log, index) => (
+              <div key={`${log.time}-${log.message}-${index}`} className="flex gap-3 rounded-md border border-slate-200 bg-white p-3">
                 <div
                   className={cn(
                     'mt-1 h-2 w-2 rounded-full',
@@ -5591,7 +5756,13 @@ function EaCommunicationEnginePage(props: { terminals: any[]; commands: any[]; r
           if (!parsed || typeof parsed !== 'object') return;
           setState((current) => ({
             ...current,
-            events: [...current.events, parsed].slice(-600),
+            events: (() => {
+              const parsedId = String((parsed as any)?.id ?? '');
+              if (!parsedId) return current.events;
+              const existing = Array.isArray(current.events) ? current.events : [];
+              if (existing.some((row) => String((row as any)?.id ?? '') === parsedId)) return existing;
+              return [...existing, parsed].slice(-600);
+            })(),
           }));
         } catch {
           return;
