@@ -43,6 +43,7 @@ function terminalOperationsSubtitle(page: string): string {
     'account-routing': 'Account routing',
     'vps-management': 'VPS management',
     'ea-deployment': 'EA deployment',
+    'ea-deployment-link': 'EA Deployment Link Manager',
   };
 
   return mapping[page] ?? 'Terminal operations';

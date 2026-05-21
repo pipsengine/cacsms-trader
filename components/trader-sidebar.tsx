@@ -396,11 +396,14 @@ const navigationModules: NavigationModule[] = [
       "Terminal health monitoring",
       "MT5 synchronization",
       "MT5 execution bridge",
+      "EA Communication Engine",
+      "Execution Audit Journal",
       "Live latency monitoring",
       "Multi-computer support",
       "Account routing",
       "VPS management",
       "EA deployment",
+      "EA Deployment Link Manager",
     ], "integration"),
     group("Broker & Failover", [
       "Broker connection manager",
@@ -1428,11 +1431,14 @@ function hrefForPageId(pageId: string): string | null {
   if (pageId === "terminal-health-monitoring") return "/mt5-infrastructure/terminal-operations/terminal-health-monitoring";
   if (pageId === "mt5-synchronization") return "/mt5-infrastructure/terminal-operations/mt5-synchronization";
   if (pageId === "mt5-execution-bridge") return "/mt5-infrastructure/terminal-operations/mt5-execution-bridge";
+  if (pageId === "ea-communication-engine") return "/mt5-infrastructure/terminal-operations/ea-communication-engine";
+  if (pageId === "execution-audit-journal") return "/mt5-infrastructure/terminal-operations/execution-audit-journal";
   if (pageId === "live-latency-monitoring") return "/mt5-infrastructure/terminal-operations/live-latency-monitoring";
   if (pageId === "multi-computer-support") return "/mt5-infrastructure/terminal-operations/multi-computer-support";
   if (pageId === "account-routing") return "/mt5-infrastructure/terminal-operations/account-routing";
   if (pageId === "vps-management") return "/mt5-infrastructure/terminal-operations/vps-management";
   if (pageId === "ea-deployment") return "/mt5-infrastructure/terminal-operations/ea-deployment";
+  if (pageId === "ea-deployment-link-manager") return "/mt5-infrastructure/terminal-operations/ea-deployment-link";
   return null;
 }
 

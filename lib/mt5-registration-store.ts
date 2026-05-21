@@ -139,6 +139,7 @@ export function normalizeRegistrationPayload(payload: RegistrationPayload) {
 export async function upsertTerminalRegistration(payload: RegistrationPayload) {
   const registration = normalizeRegistrationPayload(payload);
   const vpsId = registration.vpsId || `computer-${registration.computerId}`;
+  const approvalStatus = await resolveApprovalStatus(registration.terminalId);
 
   await queryPostgres(
     `
@@ -190,7 +191,7 @@ export async function upsertTerminalRegistration(payload: RegistrationPayload) {
         approval_status,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 'pending_heartbeat', now())
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now())
       ON CONFLICT (terminal_id) DO UPDATE SET
         terminal_name = EXCLUDED.terminal_name,
         computer_id = EXCLUDED.computer_id,
@@ -209,6 +210,10 @@ export async function upsertTerminalRegistration(payload: RegistrationPayload) {
         capabilities = EXCLUDED.capabilities,
         notes = EXCLUDED.notes,
         token_hash = COALESCE(EXCLUDED.token_hash, mt5_terminal_registrations.token_hash),
+        approval_status = CASE
+          WHEN mt5_terminal_registrations.approval_status IN ('approved', 'retired') THEN mt5_terminal_registrations.approval_status
+          ELSE EXCLUDED.approval_status
+        END,
         updated_at = now()
       RETURNING *
     `,
@@ -231,11 +236,30 @@ export async function upsertTerminalRegistration(payload: RegistrationPayload) {
       registration.capabilities,
       registration.notes,
       registration.authenticationKeyHash,
+      approvalStatus,
     ],
   );
 
   await recordRegistrationAttempt(registration.terminalId, 'registered', 'Registration stored in PostgreSQL.');
   return mapRegistration(result.rows[0] as DbRegistrationRow);
+}
+
+async function resolveApprovalStatus(terminalId: string): Promise<'pending_heartbeat' | 'approved'> {
+  const result = await queryPostgres(
+    `
+      SELECT last_heartbeat_at
+      FROM mt5_terminals
+      WHERE terminal_id = $1
+      LIMIT 1
+    `,
+    [terminalId],
+  );
+  const row = result.rows[0] as { last_heartbeat_at?: Date | string } | undefined;
+  if (!row?.last_heartbeat_at) return 'pending_heartbeat';
+  const last = Date.parse(String(row.last_heartbeat_at));
+  if (!Number.isFinite(last)) return 'pending_heartbeat';
+  const ageMs = Date.now() - last;
+  return ageMs <= 60_000 ? 'approved' : 'pending_heartbeat';
 }
 
 export async function recordRegistrationAttempt(
@@ -251,6 +275,39 @@ export async function recordRegistrationAttempt(
     `,
     [terminalId, status, errorCode, message],
   );
+}
+
+export async function getTerminalRegistration(terminalId: string): Promise<TerminalRegistrationView | null> {
+  const result = await queryPostgres(
+    `
+      SELECT *
+      FROM mt5_terminal_registrations
+      WHERE terminal_id = $1
+      LIMIT 1
+    `,
+    [terminalId],
+  );
+  const row = result.rows[0] as DbRegistrationRow | undefined;
+  return row ? mapRegistration(row) : null;
+}
+
+export async function approvePendingRegistrationsFromHeartbeats(windowSeconds = 180): Promise<number> {
+  const seconds = Number.isFinite(Number(windowSeconds)) ? Math.max(15, Math.round(Number(windowSeconds))) : 180;
+  const result = await queryPostgres(
+    `
+      UPDATE mt5_terminal_registrations r
+      SET approval_status = 'approved',
+          updated_at = now()
+      FROM mt5_terminals t
+      WHERE r.terminal_id = t.terminal_id
+        AND r.account_number = t.account_number
+        AND r.approval_status = 'pending_heartbeat'
+        AND t.last_heartbeat_at > now() - ($1::text || ' seconds')::interval
+      RETURNING r.terminal_id
+    `,
+    [String(seconds)],
+  );
+  return result.rows.length;
 }
 
 export async function listTerminalRegistrations(): Promise<TerminalRegistrationView[]> {

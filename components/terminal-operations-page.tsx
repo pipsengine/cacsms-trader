@@ -1,8 +1,9 @@
 'use client';
 
-import { useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, Cpu, Database, Gauge, Globe2, KeyRound, Laptop2, Layers3, LockKeyhole, MapPin, MemoryStick, Network, PlugZap, Radio, RefreshCw, Router, Search, Server, ShieldAlert, ShieldCheck, TerminalSquare, UserCheck, Wifi, Wrench } from 'lucide-react';
+import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, Cpu, Database, Folder, Gauge, Globe2, KeyRound, Laptop2, Layers3, Link2, LockKeyhole, MapPin, MemoryStick, Network, PlugZap, Radio, RefreshCw, Router, Search, Server, ShieldAlert, ShieldCheck, TerminalSquare, UserCheck, Wifi, Wrench } from 'lucide-react';
 import { useMt5OpsState } from '@/components/mt5-ops-shell';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -30,6 +31,10 @@ export function TerminalOperationsClientPage(props: { page: string }) {
     );
   }
 
+  if (page === 'ea-deployment-link') {
+    return <EADeploymentLinkPage />;
+  }
+
   if (page === 'connected-terminals') {
     return <ConnectedTerminals terminals={state.terminals} />;
   }
@@ -37,7 +42,7 @@ export function TerminalOperationsClientPage(props: { page: string }) {
     return <TerminalRegistration terminals={state.terminals} registrations={state.registrations} />;
   }
   if (page === 'terminal-heartbeat') {
-    return <TerminalHeartbeat terminals={state.terminals} />;
+    return <TerminalHeartbeat terminals={state.terminals} registrations={state.registrations} />;
   }
   if (page === 'terminal-health-monitoring') {
     return <TerminalHealth terminals={state.terminals} />;
@@ -47,6 +52,12 @@ export function TerminalOperationsClientPage(props: { page: string }) {
   }
   if (page === 'mt5-execution-bridge') {
     return <Mt5ExecutionBridge terminals={state.terminals} commands={state.commands} recentAcks={state.recentAcks} commandSummary={state.commandSummary} />;
+  }
+  if (page === 'ea-communication-engine') {
+    return <EaCommunicationEnginePage terminals={state.terminals} commands={state.commands} recentAcks={state.recentAcks} commandSummary={state.commandSummary} />;
+  }
+  if (page === 'execution-audit-journal') {
+    return <ExecutionAuditJournalPage terminals={state.terminals} commandSummary={state.commandSummary} />;
   }
   if (page === 'live-latency-monitoring') {
     return <LatencyMonitoring terminals={state.terminals} />;
@@ -73,6 +84,760 @@ export function TerminalOperationsClientPage(props: { page: string }) {
       </CardHeader>
       <CardContent className="p-4 text-sm text-slate-600 font-mono">{page}</CardContent>
     </Card>
+  );
+}
+
+type DeploymentMethod = 'SYMLINK' | 'COPY';
+
+type DeploymentStatus =
+  | 'NOT_CONFIGURED'
+  | 'READY'
+  | 'VALIDATING'
+  | 'DEPLOYING'
+  | 'SUCCESS'
+  | 'FAILED'
+  | 'PARTIAL'
+  | 'REQUIRES_ADMIN'
+  | 'REQUIRES_MT5_REFRESH';
+
+interface MT5DataFolder {
+  id: string;
+  path: string;
+  terminalHash: string;
+  hasMql5: boolean;
+  hasExperts: boolean;
+  detectedAt: string;
+  brokerHint?: string;
+  accountHint?: string;
+}
+
+interface EADeploymentConfig {
+  projectEaFolder: string;
+  mt5DataFolder: string;
+  mt5ExpertsFolder: string;
+  targetFolderName: string;
+  deploymentMethod: DeploymentMethod;
+  environment: 'DEMO' | 'LIVE' | 'PROP' | 'MARKET_DATA_MONITOR' | 'FAILOVER_RESERVE';
+  eaSourceFolder?: string;
+  eaCompiledFolder?: string;
+  mt5DataRoot?: string;
+  mt5TerminalName?: string;
+  brokerAccountLabel?: string;
+}
+
+interface DeploymentVerification {
+  linkExists: boolean;
+  isSymlink: boolean;
+  targetExists: boolean;
+  eaEx5Exists: boolean;
+  eaMq5Exists: boolean;
+  filesCount: number;
+  lastModified?: string;
+  status: DeploymentStatus;
+  message: string;
+  deploymentMethod?: DeploymentMethod;
+}
+
+interface DeploymentLog {
+  id: string;
+  timestamp: string;
+  severity: 'DEBUG' | 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR';
+  action: string;
+  message: string;
+  path?: string;
+}
+
+type FolderStatus = {
+  path: string;
+  exists: boolean;
+  kind: 'directory' | 'file' | 'symlink' | 'missing' | 'unknown';
+  message?: string;
+};
+
+export function EADeploymentLinkPage() {
+  const [config, setConfig] = useState<EADeploymentConfig>({
+    projectEaFolder: 'C:\\Next-Generation\\cacsms-trader\\mt5\\experts\\CacsmsTraderEA',
+    mt5DataFolder: '',
+    mt5ExpertsFolder: '',
+    targetFolderName: 'CacsmsTrader',
+    deploymentMethod: 'SYMLINK',
+    environment: 'DEMO',
+  });
+  const [folders, setFolders] = useState<MT5DataFolder[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string>('');
+  const [status, setStatus] = useState<DeploymentVerification | null>(null);
+  const [logs, setLogs] = useState<DeploymentLog[]>([]);
+  const [loading, setLoading] = useState<{ detect: boolean; deploy: boolean; copy: boolean; refresh: boolean }>({
+    detect: false,
+    deploy: false,
+    copy: false,
+    refresh: false,
+  });
+  const [toast, setToast] = useState<{ tone: 'success' | 'warning' | 'error' | 'info'; message: string } | null>(null);
+  const [confirm, setConfirm] = useState<{ open: boolean; action: 'relink' | 'overwrite' | null; message: string }>({
+    open: false,
+    action: null,
+    message: '',
+  });
+
+  const derivedMt5ExpertsFolder = useMemo(() => {
+    if (!config.mt5DataFolder) return '';
+    return `${config.mt5DataFolder}\\MQL5\\Experts\\${config.targetFolderName}`;
+  }, [config.mt5DataFolder, config.targetFolderName]);
+
+  const showToast = (tone: 'success' | 'warning' | 'error' | 'info', message: string) => {
+    setToast({ tone, message });
+    window.setTimeout(() => setToast(null), 5000);
+  };
+
+  const refresh = async () => {
+    setLoading((c) => ({ ...c, refresh: true }));
+    try {
+      const response = await fetch('/api/mt5/ea-deployment/status', { cache: 'no-store' });
+      const payload = await response.json();
+      setStatus(payload.verification ?? null);
+      setLogs(payload.logs ?? []);
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'Failed to load status.');
+    } finally {
+      setLoading((c) => ({ ...c, refresh: false }));
+    }
+  };
+
+  const detectFolders = async () => {
+    setLoading((c) => ({ ...c, detect: true }));
+    try {
+      const response = await fetch('/api/mt5/ea-deployment/detect', { method: 'POST' });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Detect failed with HTTP ${response.status}`);
+      }
+      setFolders(payload.folders ?? []);
+      setLogs(payload.logs ?? []);
+      showToast('success', `Detected ${payload.folders?.length ?? 0} MT5 data folders.`);
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'Failed to detect MT5 folders.');
+    } finally {
+      setLoading((c) => ({ ...c, detect: false }));
+    }
+  };
+
+  const applySelectedFolder = (folderId: string) => {
+    setSelectedFolderId(folderId);
+    const folder = folders.find((item) => item.id === folderId);
+    if (!folder) return;
+    const mt5ExpertsFolder = `${folder.path}\\MQL5\\Experts\\${config.targetFolderName}`;
+    setConfig((current) => ({
+      ...current,
+      mt5DataFolder: folder.path,
+      mt5ExpertsFolder,
+      mt5DataRoot: payloadDefaultRoot(),
+    }));
+  };
+
+  const createLink = async (force = false) => {
+    setLoading((c) => ({ ...c, deploy: true }));
+    try {
+      const response = await fetch('/api/mt5/ea-deployment/create-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          config: { ...config, mt5ExpertsFolder: config.mt5ExpertsFolder || derivedMt5ExpertsFolder },
+          force,
+        }),
+      });
+      const payload = await response.json();
+      setLogs(payload.logs ?? []);
+      setStatus(payload.verification ?? null);
+      if (!response.ok) {
+        if (payload?.requiresConfirmation) {
+          setConfirm({ open: true, action: payload.confirmAction ?? 'overwrite', message: payload.message ?? 'Confirmation required.' });
+          return;
+        }
+        throw new Error(payload?.error ?? `Create link failed with HTTP ${response.status}`);
+      }
+      showToast('success', payload.message ?? 'EA symbolic link created.');
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'Failed to create link.');
+    } finally {
+      setLoading((c) => ({ ...c, deploy: false }));
+    }
+  };
+
+  const copyFiles = async (force = false) => {
+    setLoading((c) => ({ ...c, copy: true }));
+    try {
+      const response = await fetch('/api/mt5/ea-deployment/copy-files', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          config: { ...config, mt5ExpertsFolder: config.mt5ExpertsFolder || derivedMt5ExpertsFolder, deploymentMethod: 'COPY' },
+          force,
+        }),
+      });
+      const payload = await response.json();
+      setLogs(payload.logs ?? []);
+      setStatus(payload.verification ?? null);
+      if (!response.ok) {
+        if (payload?.requiresConfirmation) {
+          setConfirm({ open: true, action: payload.confirmAction ?? 'overwrite', message: payload.message ?? 'Confirmation required.' });
+          return;
+        }
+        throw new Error(payload?.error ?? `Copy failed with HTTP ${response.status}`);
+      }
+      showToast('success', payload.message ?? 'EA files copied.');
+    } catch (error) {
+      showToast('error', error instanceof Error ? error.message : 'Failed to copy files.');
+    } finally {
+      setLoading((c) => ({ ...c, copy: false }));
+    }
+  };
+
+  const steps = [
+    { id: 'detect', label: 'Detect MT5 data folders', done: folders.length > 0 },
+    { id: 'select', label: 'Select target MT5 terminal folder', done: Boolean(config.mt5DataFolder) },
+    { id: 'confirm', label: 'Confirm project EA folder', done: Boolean(config.projectEaFolder) },
+    { id: 'deploy', label: 'Deploy via symlink or copy', done: status?.status === 'SUCCESS' || status?.status === 'REQUIRES_MT5_REFRESH' || status?.status === 'PARTIAL' },
+    { id: 'verify', label: 'Verify deployment', done: Boolean(status) },
+    { id: 'refresh', label: 'Refresh MT5 Navigator / restart MT5', done: status?.status !== 'REQUIRES_MT5_REFRESH' },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <header className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <h3 className="text-lg font-semibold tracking-tight text-slate-950">EA Deployment Link Manager</h3>
+          <p className="text-sm text-slate-600">Link the Cacsms Trader EA folder to MetaTrader 5 Experts directory</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="inline-flex items-center gap-2 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs font-semibold text-violet-700">
+            <LockKeyhole className="h-3.5 w-3.5" /> Development Tool / Admin Only / Requires Local Machine Access
+          </span>
+          <Button variant="outline" size="sm" onClick={refresh} disabled={loading.refresh}>
+            <RefreshCw className={cn('h-4 w-4', loading.refresh && 'animate-spin')} />
+            Refresh status
+          </Button>
+        </div>
+      </header>
+
+      <WorkflowStepper steps={steps} />
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <FolderStatusCard title="Project EA Folder Status" icon={Folder} status={statusFolder(config.projectEaFolder)} />
+        <FolderStatusCard title="MT5 Experts Folder Status" icon={Folder} status={statusFolder(config.mt5ExpertsFolder || derivedMt5ExpertsFolder)} />
+        <SymbolicLinkStatusCard title="Symbolic Link Status" icon={Link2} verification={status} />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <DeploymentReadinessCard verification={status} />
+        <LastScriptRunCard logs={logs} />
+        <AdminPermissionStatusCard verification={status} />
+      </div>
+
+      <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+        <CardHeader className="border-b border-slate-200 py-4">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Wrench className="w-4 h-4 text-indigo-700" /> Folder Configuration
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-4 space-y-4">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <PathInputField
+              label="Project EA folder"
+              value={config.projectEaFolder}
+              onChange={(value) => setConfig((c) => ({ ...c, projectEaFolder: value }))}
+              placeholder="C:\\Cacsms Limited\\cacsms-trader\\mt5\\ea\\compiled"
+            />
+            <PathInputField
+              label="MT5 data folder"
+              value={config.mt5DataFolder}
+              onChange={(value) => setConfig((c) => ({ ...c, mt5DataFolder: value }))}
+              placeholder="C:\\Users\\USERNAME\\AppData\\Roaming\\MetaQuotes\\Terminal\\TERMINAL_ID"
+            />
+            <PathInputField
+              label="MT5 Experts target folder"
+              value={config.mt5ExpertsFolder || derivedMt5ExpertsFolder}
+              onChange={(value) => setConfig((c) => ({ ...c, mt5ExpertsFolder: value }))}
+              placeholder="...\\MQL5\\Experts\\CacsmsTrader"
+            />
+            <PathInputField
+              label="Target folder name"
+              value={config.targetFolderName}
+              onChange={(value) => setConfig((c) => ({ ...c, targetFolderName: value }))}
+              placeholder="CacsmsTrader"
+            />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <PathInputField
+              label="EA source folder (optional)"
+              value={config.eaSourceFolder ?? ''}
+              onChange={(value) => setConfig((c) => ({ ...c, eaSourceFolder: value || undefined }))}
+              placeholder="...\\mt5\\experts\\CacsmsTraderEA"
+            />
+            <PathInputField
+              label="EA compiled folder (optional)"
+              value={config.eaCompiledFolder ?? ''}
+              onChange={(value) => setConfig((c) => ({ ...c, eaCompiledFolder: value || undefined }))}
+              placeholder="...\\MQL5\\Experts\\Compiled"
+            />
+            <SelectField
+              label="Terminal environment"
+              value={config.environment}
+              options={[
+                { value: 'DEMO', label: 'Demo' },
+                { value: 'LIVE', label: 'Live' },
+                { value: 'PROP', label: 'Prop' },
+                { value: 'MARKET_DATA_MONITOR', label: 'Market Data Monitor' },
+                { value: 'FAILOVER_RESERVE', label: 'Failover Reserve' },
+              ]}
+              onChange={(value) => setConfig((c) => ({ ...c, environment: value as EADeploymentConfig['environment'] }))}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <PathInputField
+              label="MT5 terminal name (optional)"
+              value={config.mt5TerminalName ?? ''}
+              onChange={(value) => setConfig((c) => ({ ...c, mt5TerminalName: value || undefined }))}
+              placeholder="MetaTrader 5"
+            />
+            <PathInputField
+              label="Broker account label (optional)"
+              value={config.brokerAccountLabel ?? ''}
+              onChange={(value) => setConfig((c) => ({ ...c, brokerAccountLabel: value || undefined }))}
+              placeholder="BrokerName / Demo / 123456"
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+        <CardHeader className="border-b border-slate-200 py-4">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Search className="w-4 h-4 text-indigo-700" /> Auto-Detect MT5 Folder
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-4 space-y-3">
+          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div className="text-sm text-slate-600">
+              Scan MetaQuotes terminal folders on this machine and pick the target MT5 installation.
+            </div>
+            <Button onClick={detectFolders} disabled={loading.detect}>
+              <Search className={cn('h-4 w-4', loading.detect && 'animate-pulse')} />
+              Detect MT5 Data Folders
+            </Button>
+          </div>
+          <MT5FolderTable folders={folders} selectedId={selectedFolderId} onSelect={applySelectedFolder} />
+        </CardContent>
+      </Card>
+
+      <DeploymentMethodSelector
+        method={config.deploymentMethod}
+        onChange={(deploymentMethod) => setConfig((c) => ({ ...c, deploymentMethod }))}
+      />
+
+      <DeploymentActionButtons
+        onCreateLink={() => createLink(false)}
+        onCopy={() => copyFiles(false)}
+        busy={loading.deploy || loading.copy}
+        method={config.deploymentMethod}
+      />
+
+      <DeploymentVerificationPanel verification={status} />
+      <DeploymentLogsPanel logs={logs} />
+
+      <ConfirmationModal
+        open={confirm.open}
+        message={confirm.message}
+        onCancel={() => setConfirm({ open: false, action: null, message: '' })}
+        onConfirm={() => {
+          const action = confirm.action;
+          setConfirm({ open: false, action: null, message: '' });
+          if (config.deploymentMethod === 'COPY') {
+            copyFiles(true);
+          } else {
+            createLink(action === 'relink' || action === 'overwrite');
+          }
+        }}
+      />
+
+      {toast ? <Toast tone={toast.tone} message={toast.message} /> : null}
+    </div>
+  );
+}
+
+function payloadDefaultRoot(): string {
+  return 'C:\\Users\\';
+}
+
+function statusFolder(path: string): FolderStatus {
+  if (!path) {
+    return { path: '', exists: false, kind: 'missing', message: 'Not configured' };
+  }
+  return { path, exists: true, kind: 'unknown', message: 'Will be verified by backend' };
+}
+
+function FolderStatusCard(props: { title: string; icon: any; status: FolderStatus }) {
+  const Icon = props.icon;
+  const tone = props.status.exists ? 'teal' : 'amber';
+  return (
+    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-xs text-slate-500 font-normal uppercase tracking-wider flex items-center gap-2">
+          <Icon className={cn('w-3 h-3', tone === 'teal' ? 'text-teal-700' : 'text-amber-700')} /> {props.title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <div className="text-sm font-semibold text-slate-950">{props.status.exists ? 'Configured' : 'Missing'}</div>
+        <div className="text-xs font-mono text-slate-600 break-all">{props.status.path || '--'}</div>
+        <div className="text-[11px] text-slate-500">{props.status.message}</div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SymbolicLinkStatusCard(props: { title: string; icon: any; verification: DeploymentVerification | null }) {
+  const Icon = props.icon;
+  const verification = props.verification;
+  const status = verification?.isSymlink ? 'Symlink' : verification?.linkExists ? 'Folder' : 'Not deployed';
+  const tone = verification?.status === 'SUCCESS' ? 'teal' : verification?.status === 'REQUIRES_ADMIN' ? 'amber' : verification?.status === 'FAILED' ? 'rose' : 'slate';
+  const toneClass: Record<string, string> = {
+    teal: 'text-teal-700',
+    amber: 'text-amber-700',
+    rose: 'text-rose-700',
+    slate: 'text-slate-600',
+  };
+  return (
+    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-xs text-slate-500 font-normal uppercase tracking-wider flex items-center gap-2">
+          <Icon className={cn('w-3 h-3', toneClass[tone])} /> {props.title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <div className="text-sm font-semibold text-slate-950">{status}</div>
+        <div className="text-[11px] text-slate-500">{verification?.message ?? 'Awaiting deployment status.'}</div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DeploymentReadinessCard({ verification }: { verification: DeploymentVerification | null }) {
+  const ready = verification?.status === 'SUCCESS' || verification?.status === 'REQUIRES_MT5_REFRESH';
+  return (
+    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-xs text-slate-500 font-normal uppercase tracking-wider flex items-center gap-2">
+          <ClipboardCheck className={cn('w-3 h-3', ready ? 'text-teal-700' : 'text-amber-700')} /> Deployment Readiness
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <div className="text-sm font-semibold text-slate-950">{ready ? 'Ready' : 'Not ready'}</div>
+        <div className="text-[11px] text-slate-500">{verification?.message ?? 'Run detection and configure folders to proceed.'}</div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function LastScriptRunCard({ logs }: { logs: DeploymentLog[] }) {
+  const last = logs[0];
+  return (
+    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-xs text-slate-500 font-normal uppercase tracking-wider flex items-center gap-2">
+          <Activity className="w-3 h-3 text-indigo-700" /> Last Script Run
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <div className="text-sm font-semibold text-slate-950">{last ? formatTime(last.timestamp) : '--:--:--'}</div>
+        <div className="text-[11px] text-slate-500">{last ? `${last.severity} / ${last.action}` : 'No script runs recorded yet.'}</div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function AdminPermissionStatusCard({ verification }: { verification: DeploymentVerification | null }) {
+  const requiresAdmin = verification?.status === 'REQUIRES_ADMIN';
+  return (
+    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-xs text-slate-500 font-normal uppercase tracking-wider flex items-center gap-2">
+          <KeyRound className={cn('w-3 h-3', requiresAdmin ? 'text-amber-700' : 'text-teal-700')} /> Admin Permission Status
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        <div className="text-sm font-semibold text-slate-950">{requiresAdmin ? 'Administrator required' : 'OK'}</div>
+        <div className="text-[11px] text-slate-500">
+          {requiresAdmin ? 'Run the app as Administrator or use Copy EA Files Instead.' : 'Symlink creation supported or not required.'}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function PathInputField(props: { label: string; value: string; placeholder: string; onChange: (value: string) => void }) {
+  return (
+    <div className="space-y-1">
+      <div className="text-xs font-semibold text-slate-700">{props.label}</div>
+      <input
+        className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 font-mono text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-200"
+        value={props.value}
+        placeholder={props.placeholder}
+        onChange={(e) => props.onChange(e.target.value)}
+      />
+    </div>
+  );
+}
+
+function SelectField(props: { label: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void }) {
+  return (
+    <div className="space-y-1">
+      <div className="text-xs font-semibold text-slate-700">{props.label}</div>
+      <select
+        className="h-10 w-full rounded-lg border border-slate-200 bg-white px-3 font-mono text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-200"
+        value={props.value}
+        onChange={(e) => props.onChange(e.target.value)}
+      >
+        {props.options.map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function MT5FolderTable(props: { folders: MT5DataFolder[]; selectedId: string; onSelect: (id: string) => void }) {
+  if (props.folders.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-6 text-sm text-slate-500">
+        No MT5 data folders detected yet. Click Detect MT5 Data Folders.
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-slate-200 overflow-hidden">
+      <Table>
+        <TableHeader className="bg-slate-50">
+          <TableRow className="border-slate-200 hover:bg-transparent">
+            <TableHead className="text-xs font-mono text-slate-500">Terminal</TableHead>
+            <TableHead className="text-xs font-mono text-slate-500">MT5 Data Folder</TableHead>
+            <TableHead className="text-xs font-mono text-slate-500 text-right">Experts</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {props.folders.map((folder) => {
+            const active = props.selectedId === folder.id;
+            return (
+              <TableRow
+                key={folder.id}
+                className={cn('border-slate-100 cursor-pointer', active ? 'bg-blue-50' : 'hover:bg-slate-50')}
+                onClick={() => props.onSelect(folder.id)}
+              >
+                <TableCell className="font-mono text-xs text-slate-700">{folder.terminalHash.slice(0, 8)}</TableCell>
+                <TableCell className="font-mono text-xs text-slate-700 break-all">{folder.path}</TableCell>
+                <TableCell className="text-right font-mono text-xs text-slate-700">{folder.hasExperts ? 'YES' : 'NO'}</TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
+function DeploymentMethodSelector(props: { method: DeploymentMethod; onChange: (method: DeploymentMethod) => void }) {
+  return (
+    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+      <CardHeader className="border-b border-slate-200 py-4">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <Layers3 className="w-4 h-4 text-indigo-700" /> Deployment Method
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <button
+            type="button"
+            className={cn(
+              'rounded-lg border p-4 text-left transition-colors',
+              props.method === 'SYMLINK' ? 'border-indigo-200 bg-indigo-50' : 'border-slate-200 bg-white hover:bg-slate-50',
+            )}
+            onClick={() => props.onChange('SYMLINK')}
+          >
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+              <Link2 className="h-4 w-4 text-indigo-700" /> Symbolic Link (Recommended)
+            </div>
+            <div className="mt-1 text-xs text-slate-600">
+              MT5 reads the EA directly from the project folder (no copying). Requires admin on some systems.
+            </div>
+          </button>
+          <button
+            type="button"
+            className={cn(
+              'rounded-lg border p-4 text-left transition-colors',
+              props.method === 'COPY' ? 'border-amber-200 bg-amber-50' : 'border-slate-200 bg-white hover:bg-slate-50',
+            )}
+            onClick={() => props.onChange('COPY')}
+          >
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+              <Server className="h-4 w-4 text-amber-700" /> Copy EA Files Instead
+            </div>
+            <div className="mt-1 text-xs text-slate-600">
+              Copies .ex5/.mq5/.set and supporting files into MT5 Experts folder. Works without admin.
+            </div>
+          </button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DeploymentActionButtons(props: { method: DeploymentMethod; busy: boolean; onCreateLink: () => void; onCopy: () => void }) {
+  return (
+    <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-end">
+      <Button variant="outline" onClick={props.onCopy} disabled={props.busy}>
+        <Server className="h-4 w-4" />
+        Copy EA Files Instead
+      </Button>
+      <Button onClick={props.onCreateLink} disabled={props.busy}>
+        <Link2 className="h-4 w-4" />
+        Create EA Symbolic Link
+      </Button>
+    </div>
+  );
+}
+
+function DeploymentVerificationPanel({ verification }: { verification: DeploymentVerification | null }) {
+  const tone = verification?.status === 'SUCCESS'
+    ? 'teal'
+    : verification?.status === 'FAILED'
+      ? 'rose'
+      : verification?.status === 'REQUIRES_ADMIN'
+        ? 'amber'
+        : 'slate';
+  const toneClass = tone === 'teal'
+    ? 'border-teal-200 bg-teal-50'
+    : tone === 'rose'
+      ? 'border-rose-200 bg-rose-50'
+      : tone === 'amber'
+        ? 'border-amber-200 bg-amber-50'
+        : 'border-slate-200 bg-slate-50';
+
+  return (
+    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+      <CardHeader className="border-b border-slate-200 py-4">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <ClipboardCheck className="w-4 h-4 text-indigo-700" /> Deployment Verification
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-4 space-y-3">
+        {!verification ? (
+          <div className="text-sm text-slate-600">No verification yet. Run deployment to verify.</div>
+        ) : (
+          <div className={cn('rounded-lg border p-4', toneClass)}>
+            <div className="flex items-center justify-between">
+              <div className="text-sm font-semibold text-slate-950">{verification.status}</div>
+              <div className="text-xs font-mono text-slate-700">{verification.deploymentMethod ?? ''}</div>
+            </div>
+            <div className="mt-1 text-sm text-slate-700">{verification.message}</div>
+            <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs font-mono text-slate-700">
+              <div>Link: {verification.linkExists ? 'YES' : 'NO'}</div>
+              <div>Symlink: {verification.isSymlink ? 'YES' : 'NO'}</div>
+              <div>Target: {verification.targetExists ? 'YES' : 'NO'}</div>
+              <div>Files: {verification.filesCount}</div>
+              <div>.ex5: {verification.eaEx5Exists ? 'YES' : 'NO'}</div>
+              <div>.mq5: {verification.eaMq5Exists ? 'YES' : 'NO'}</div>
+              <div>Modified: {verification.lastModified ? formatTime(verification.lastModified) : '--:--:--'}</div>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function DeploymentLogsPanel({ logs }: { logs: DeploymentLog[] }) {
+  return (
+    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+      <CardHeader className="border-b border-slate-200 py-4">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <Radio className="w-4 h-4 text-indigo-700" /> Deployment Logs
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-0">
+        <ScrollArea className="h-[280px]">
+          <div className="flex flex-col">
+            {logs.length === 0 ? (
+              <div className="p-6 text-sm text-slate-500">No logs yet.</div>
+            ) : logs.map((log) => (
+              <div key={log.id} className="flex gap-4 p-2 px-4 text-xs border-b border-slate-100 hover:bg-slate-50 font-mono">
+                <span className="text-slate-500 shrink-0 w-20">{formatTime(log.timestamp)}</span>
+                <span className={cn('w-20 shrink-0 font-bold',
+                  log.severity === 'SUCCESS' ? 'text-teal-700'
+                    : log.severity === 'WARNING' ? 'text-amber-700'
+                      : log.severity === 'ERROR' ? 'text-rose-700'
+                        : log.severity === 'INFO' ? 'text-indigo-700'
+                          : 'text-slate-600',
+                )}>{log.severity}</span>
+                <span className="w-40 shrink-0 text-slate-700">{log.action}</span>
+                <span className="text-slate-700">{log.message}</span>
+              </div>
+            ))}
+          </div>
+        </ScrollArea>
+      </CardContent>
+    </Card>
+  );
+}
+
+function WorkflowStepper({ steps }: { steps: Array<{ id: string; label: string; done: boolean }> }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
+      {steps.map((step, idx) => (
+        <div key={step.id} className={cn('rounded-lg border px-3 py-3 bg-white', step.done ? 'border-teal-200 bg-teal-50' : 'border-slate-200')}>
+          <div className="flex items-center justify-between">
+            <div className="text-[11px] font-mono text-slate-500">Step {idx + 1}</div>
+            {step.done ? <CheckCircle2 className="h-4 w-4 text-teal-600" /> : <div className="h-4 w-4 rounded-full border border-slate-200" />}
+          </div>
+          <div className="mt-1 text-xs font-semibold text-slate-900">{step.label}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ConfirmationModal(props: { open: boolean; message: string; onCancel: () => void; onConfirm: () => void }) {
+  if (!props.open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-slate-950/35" onClick={props.onCancel} />
+      <div className="relative w-[min(92vw,560px)] rounded-xl border border-slate-200 bg-white shadow-2xl">
+        <div className="border-b border-slate-200 px-4 py-3 text-sm font-semibold text-slate-950">Confirmation Required</div>
+        <div className="p-4 text-sm text-slate-700">{props.message}</div>
+        <div className="flex items-center justify-end gap-2 border-t border-slate-200 px-4 py-3">
+          <Button variant="outline" onClick={props.onCancel}>Cancel</Button>
+          <Button onClick={props.onConfirm}>Confirm</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Toast(props: { tone: 'success' | 'warning' | 'error' | 'info'; message: string }) {
+  const toneClass = props.tone === 'success'
+    ? 'border-teal-200 bg-teal-50 text-teal-800'
+    : props.tone === 'warning'
+      ? 'border-amber-200 bg-amber-50 text-amber-800'
+      : props.tone === 'error'
+        ? 'border-rose-200 bg-rose-50 text-rose-800'
+        : 'border-indigo-200 bg-indigo-50 text-indigo-800';
+  return (
+    <div className="fixed bottom-5 right-5 z-50">
+      <div className={cn('rounded-lg border px-4 py-3 shadow-lg text-sm font-semibold', toneClass)}>
+        {props.message}
+      </div>
+    </div>
   );
 }
 
@@ -386,7 +1151,7 @@ function enrichTerminal(terminal: any) {
   const terminalId = String(terminal.terminalId ?? 'unknown-terminal');
   const seed = hashCode(terminalId);
   const latencyMs = Number(terminal.latencyMs ?? terminal.averageLatencyMs ?? 0);
-  const heartbeatAgeMs = Number(terminal.heartbeatAgeMs ?? 0);
+  const heartbeatAgeMs = terminal.heartbeatAgeMs == null ? 999_999 : Number(terminal.heartbeatAgeMs);
   const status = String(terminal.status ?? 'disconnected');
   const tickTime = String(terminal.lastTickTime ?? terminal.mt5ServerTime ?? terminal.receivedAt ?? new Date().toISOString());
   const tickDelayMs = Math.max(0, Date.now() - Date.parse(tickTime || new Date().toISOString()));
@@ -1205,9 +1970,10 @@ function buildRegistrationLogs(registrations: any[], terminals: any[]) {
   ];
 }
 
-function TerminalHeartbeat({ terminals }: { terminals: any[] }) {
+function TerminalHeartbeat({ terminals, registrations }: { terminals: any[]; registrations: any[] }) {
   const [terminalId, setTerminalId] = useState('');
-  const selectedTerminalId = terminalId || terminals[0]?.terminalId || '';
+  const selectable = useMemo(() => mergeHeartbeatSources(terminals, registrations), [terminals, registrations]);
+  const selectedTerminalId = terminalId || selectable[0]?.terminalId || '';
   const [details, setDetails] = useState<{ status: 'idle' | 'loading' | 'ok' | 'error'; payload: any | null; message: string }>({
     status: 'idle',
     payload: null,
@@ -1232,7 +1998,7 @@ function TerminalHeartbeat({ terminals }: { terminals: any[] }) {
 
   const history = details.payload?.history ?? [];
   const loadedTerminal = details.payload?.terminal ?? null;
-  const heartbeatRows = useMemo(() => terminals.map(enrichHeartbeatTerminal), [terminals]);
+  const heartbeatRows = useMemo(() => selectable.map(enrichHeartbeatTerminal), [selectable]);
   const selectedTerminal = loadedTerminal ? enrichHeartbeatTerminal(loadedTerminal) : heartbeatRows.find((terminal) => terminal.terminalId === selectedTerminalId) ?? null;
   const fleetSummary = summarizeHeartbeatFleet(heartbeatRows);
   const alerts = buildHeartbeatAlerts(heartbeatRows);
@@ -1268,7 +2034,7 @@ function TerminalHeartbeat({ terminals }: { terminals: any[] }) {
                   onChange={(e) => setTerminalId(e.target.value)}
                 >
                   <option value="">Select terminal</option>
-                  {terminals.map((t) => (
+                  {selectable.map((t) => (
                     <option key={t.terminalId} value={t.terminalId}>{t.terminalId}</option>
                   ))}
                 </select>
@@ -1312,7 +2078,7 @@ function TerminalHeartbeat({ terminals }: { terminals: any[] }) {
                   {heartbeatRows.length === 0 ? (
                     <TableRow className="border-slate-100 hover:bg-transparent">
                       <TableCell colSpan={10} className="h-40 text-center text-sm text-slate-500">
-                        Waiting for MT5 heartbeat ingestion.
+                        Waiting for MT5 heartbeat ingestion. Registered terminals appear immediately, and heartbeats populate after MT5 connects.
                       </TableCell>
                     </TableRow>
                   ) : heartbeatRows.map((terminal) => (
@@ -1438,6 +2204,37 @@ function TerminalHeartbeat({ terminals }: { terminals: any[] }) {
       </section>
     </div>
   );
+}
+
+function mergeHeartbeatSources(terminals: any[], registrations: any[]) {
+  const merged = new Map<string, any>();
+  terminals.forEach((terminal) => {
+    const terminalId = String(terminal?.terminalId ?? '');
+    if (!terminalId) return;
+    merged.set(terminalId, terminal);
+  });
+  registrations.forEach((registration) => {
+    const terminalId = String(registration?.terminalId ?? '');
+    if (!terminalId) return;
+    if (merged.has(terminalId)) return;
+    merged.set(terminalId, {
+      terminalId,
+      terminalName: registration.terminalName,
+      computerId: registration.computerId,
+      computerName: registration.computerName,
+      accountNumber: registration.accountNumber,
+      brokerName: registration.brokerName,
+      serverName: registration.serverName,
+      status: 'disconnected',
+      receivedAt: '',
+      heartbeatAgeMs: 999_999,
+      latencyMs: 0,
+      lastTickTime: '',
+      version: registration.eaVersion,
+      hasHeartbeat: false,
+    });
+  });
+  return Array.from(merged.values()).sort((a, b) => String(a.terminalId).localeCompare(String(b.terminalId)));
 }
 
 const HEARTBEAT_FRONTEND_LINES = [
@@ -4016,14 +4813,103 @@ function VpsMiniList({ items }: { items: Array<{ label: string; value: string }>
 
 function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAcks: any[]; commandSummary: any }) {
   const connected = props.terminals.filter((t) => t.status === 'connected');
-  const commandRows = useMemo(() => props.commands.map((command) => enrichExecutionCommand(command, props.terminals, props.recentAcks)), [props.commands, props.recentAcks, props.terminals]);
-  const ackRows = useMemo(() => props.recentAcks.map((ack) => enrichExecutionAck(ack)), [props.recentAcks]);
+  type ExecutionBridgeDbState = {
+    loaded: boolean;
+    error: string;
+    commands: any[];
+    events: any[];
+    bridgeOnline: boolean;
+    bridgeHealth: any;
+    bridgeTerminalOps: any;
+  };
+
+  const [dbState, setDbState] = useState<ExecutionBridgeDbState>({
+    loaded: false,
+    error: '',
+    commands: [],
+    events: [],
+    bridgeOnline: false,
+    bridgeHealth: null,
+    bridgeTerminalOps: null,
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    let eventSource: EventSource | null = null;
+
+    const load = async () => {
+      try {
+        const response = await fetch('/api/mt5/execution-bridge/state', { cache: 'no-store' });
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || `Execution bridge state failed with HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        if (cancelled) return;
+        setDbState((current) => ({
+          ...current,
+          loaded: true,
+          error: '',
+          commands: Array.isArray(payload?.commands) ? payload.commands : [],
+          events: Array.isArray(payload?.events) ? payload.events : current.events,
+          bridgeOnline: Boolean(payload?.bridge?.online),
+          bridgeHealth: payload?.bridge?.health ?? null,
+          bridgeTerminalOps: payload?.bridge?.terminalOperations ?? null,
+        }));
+      } catch (error) {
+        if (cancelled) return;
+        setDbState((current) => ({
+          ...current,
+          loaded: true,
+          error: error instanceof Error ? error.message : 'Unable to load execution bridge state.',
+        }));
+      }
+    };
+
+    load();
+    const interval = window.setInterval(load, 4000);
+
+    try {
+      eventSource = new EventSource('/api/mt5/execution-bridge/stream');
+      eventSource.addEventListener('execution_event', (event) => {
+        try {
+          const messageEvent = event as MessageEvent<string>;
+          const parsed = JSON.parse(messageEvent.data);
+          if (!parsed || typeof parsed !== 'object') return;
+          setDbState((current) => ({
+            ...current,
+            events: [...current.events, parsed].slice(-400),
+          }));
+        } catch {
+          return;
+        }
+      });
+    } catch {
+      eventSource = null;
+    }
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      eventSource?.close();
+    };
+  }, []);
+
+  const mergedCommands = useMemo(() => mergeExecutionCommandSources(props.commands, dbState.commands), [props.commands, dbState.commands]);
+  const commandRows = useMemo(() => mergedCommands.map((command) => enrichExecutionCommand(command, props.terminals, props.recentAcks)), [mergedCommands, props.recentAcks, props.terminals]);
+  const ackRows = useMemo(() => mergeExecutionAckSources(props.recentAcks, dbState.commands).map((ack) => enrichExecutionAck(ack)), [props.recentAcks, dbState.commands]);
   const bridgeSummary = summarizeExecutionBridge(commandRows, ackRows, props.commandSummary, connected.length);
   const diagnostics = buildExecutionDiagnostics(props.terminals, commandRows, ackRows);
   const lifecycle = buildOrderLifecycle(commandRows, ackRows);
-  const logs = buildExecutionLogs(commandRows, ackRows);
+  const logs = dbState.events.length ? buildDbExecutionLogs(dbState.events) : buildExecutionLogs(commandRows, ackRows);
   const failover = buildExecutionFailover(props.terminals);
   const integrity = buildExecutionIntegrity(commandRows, ackRows);
+  const [filters, setFilters] = useState<{ environment: string; lifecycle: string; sandbox: string; query: string }>({
+    environment: 'ALL',
+    lifecycle: 'ALL',
+    sandbox: 'ALL',
+    query: '',
+  });
   const [enqueue, setEnqueue] = useState({
     terminalId: '',
     symbol: 'XAUUSD',
@@ -4031,9 +4917,97 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
     volumeLots: '0.01',
     stopLoss: '0',
     takeProfit: '0',
+    environment: 'DEMO' as 'DEMO' | 'LIVE' | 'PROP' | 'MARKET_DATA_MONITOR' | 'FAILOVER_RESERVE',
+    sandboxMode: true,
   });
   const [submit, setSubmit] = useState<EnqueueState>({ status: 'idle', message: '' });
+  const [actions, setActions] = useState<EnqueueState>({ status: 'idle', message: '' });
   const selectedTerminalId = enqueue.terminalId || connected[0]?.terminalId || '';
+
+  const dedupeDuplicates = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const command of commandRows) {
+      const key = String(command.dedupeKey ?? '').trim();
+      if (!key) continue;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return new Set(Array.from(counts.entries()).filter(([, count]) => count > 1).map(([key]) => key));
+  }, [commandRows]);
+
+  const filteredCommands = useMemo(() => {
+    const query = filters.query.trim().toLowerCase();
+    return commandRows.filter((command) => {
+      if (filters.environment !== 'ALL' && String(command.environment ?? '') !== filters.environment) return false;
+      if (filters.lifecycle !== 'ALL' && String(command.lifecycleState ?? '') !== filters.lifecycle) return false;
+      if (filters.sandbox !== 'ALL') {
+        const sandbox = Boolean(command.sandboxMode);
+        if (filters.sandbox === 'SANDBOX' && !sandbox) return false;
+        if (filters.sandbox === 'LIVE' && sandbox) return false;
+      }
+      if (!query) return true;
+      return (
+        String(command.commandId ?? '').toLowerCase().includes(query)
+        || String(command.terminalId ?? '').toLowerCase().includes(query)
+        || String(command.type ?? '').toLowerCase().includes(query)
+        || String(command.symbol ?? '').toLowerCase().includes(query)
+        || String(command.ticket ?? '').toLowerCase().includes(query)
+      );
+    });
+  }, [commandRows, filters.environment, filters.lifecycle, filters.query, filters.sandbox]);
+
+  const filteredAcks = useMemo(() => {
+    const query = filters.query.trim().toLowerCase();
+    return ackRows.filter((ack) => {
+      if (filters.environment !== 'ALL') {
+        const command = commandRows.find((row) => row.commandId === ack.commandId);
+        if (String(command?.environment ?? '') !== filters.environment) return false;
+      }
+      if (filters.lifecycle !== 'ALL' && String(ack.lifecycleState ?? '') !== filters.lifecycle) return false;
+      if (!query) return true;
+      return (
+        String(ack.commandId ?? '').toLowerCase().includes(query)
+        || String(ack.terminalId ?? '').toLowerCase().includes(query)
+        || String(ack.status ?? '').toLowerCase().includes(query)
+        || String(ack.ticket ?? '').toLowerCase().includes(query)
+        || String(ack.brokerMessage ?? '').toLowerCase().includes(query)
+      );
+    });
+  }, [ackRows, commandRows, filters.environment, filters.lifecycle, filters.query]);
+
+  const failureAnalytics = useMemo(() => {
+    const failures = commandRows.filter((command) => ['FAILED', 'TIMEOUT', 'CANCELLED'].includes(String(command.lifecycleState)));
+    const buckets = new Map<string, { label: string; count: number; lastAt: string }>();
+    for (const command of failures) {
+      const label =
+        String(command.lastError ?? '').trim()
+        || String(command.ackStatus ?? '').trim()
+        || String(command.brokerMessage ?? '').trim()
+        || String(command.lifecycleState ?? 'FAILED');
+      const existing = buckets.get(label);
+      const lastAt = String(command.lastUpdatedAt ?? command.createdAt ?? new Date().toISOString());
+      if (!existing) buckets.set(label, { label, count: 1, lastAt });
+      else buckets.set(label, { ...existing, count: existing.count + 1, lastAt: Date.parse(lastAt) > Date.parse(existing.lastAt) ? lastAt : existing.lastAt });
+    }
+    return Array.from(buckets.values()).sort((a, b) => b.count - a.count).slice(0, 8);
+  }, [commandRows]);
+
+  const onRetry = async (commandId: string) => {
+    setActions({ status: 'submitting', message: '' });
+    try {
+      const response = await fetch('/api/mt5/execution-bridge/retry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ commandId }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Retry failed with HTTP ${response.status}`);
+      }
+      setActions({ status: 'ok', message: `Retry enqueued for ${commandId}.` });
+    } catch (error) {
+      setActions({ status: 'error', message: error instanceof Error ? error.message : 'Retry failed.' });
+    }
+  };
 
   const onEnqueue = async () => {
     setSubmit({ status: 'submitting', message: '' });
@@ -4044,7 +5018,7 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
       if (!selectedTerminalId) throw new Error('Select a terminal.');
       if (!Number.isFinite(volumeLots) || volumeLots <= 0) throw new Error('Volume must be a positive number.');
       if (!Number.isFinite(stopLoss) || !Number.isFinite(takeProfit)) throw new Error('SL/TP must be numeric values.');
-      const response = await fetch('/api/mt5/commands/enqueue', {
+      const response = await fetch('/api/mt5/execution-bridge/enqueue', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -4053,6 +5027,8 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
           type: 'place_order',
           createdAt: new Date().toISOString(),
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          environment: enqueue.environment,
+          sandboxMode: enqueue.sandboxMode,
           payload: {
             symbol: enqueue.symbol.trim(),
             side: enqueue.side,
@@ -4086,6 +5062,69 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
         <OpsSummaryCard icon={RefreshCw} title="Retry pressure" value={String(bridgeSummary.retryPressure)} detail="Attempts, expired, dead commands" tone={bridgeSummary.retryPressure ? 'amber' : 'green'} />
       </section>
 
+      <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+        <CardHeader className="border-b border-slate-200 py-4">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Search className="w-4 h-4 text-slate-700" /> Filters & Controls
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-4 space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
+            <select
+              className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+              value={filters.environment}
+              onChange={(e) => setFilters((c) => ({ ...c, environment: e.target.value }))}
+            >
+              <option value="ALL">ALL ENV</option>
+              <option value="DEMO">DEMO</option>
+              <option value="LIVE">LIVE</option>
+              <option value="PROP">PROP</option>
+              <option value="MARKET_DATA_MONITOR">MARKET_DATA_MONITOR</option>
+              <option value="FAILOVER_RESERVE">FAILOVER_RESERVE</option>
+            </select>
+            <select
+              className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+              value={filters.lifecycle}
+              onChange={(e) => setFilters((c) => ({ ...c, lifecycle: e.target.value }))}
+            >
+              <option value="ALL">ALL STATES</option>
+              <option value="QUEUED">QUEUED</option>
+              <option value="ROUTING">ROUTING</option>
+              <option value="SENT">SENT</option>
+              <option value="ACKNOWLEDGED">ACKNOWLEDGED</option>
+              <option value="EXECUTED">EXECUTED</option>
+              <option value="FAILED">FAILED</option>
+              <option value="TIMEOUT">TIMEOUT</option>
+              <option value="CANCELLED">CANCELLED</option>
+            </select>
+            <select
+              className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+              value={filters.sandbox}
+              onChange={(e) => setFilters((c) => ({ ...c, sandbox: e.target.value }))}
+            >
+              <option value="ALL">ALL MODES</option>
+              <option value="SANDBOX">SANDBOX</option>
+              <option value="LIVE">LIVE MODE</option>
+            </select>
+            <input
+              className="md:col-span-3 h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+              placeholder="Search commandId, terminalId, symbol, ticket…"
+              value={filters.query}
+              onChange={(e) => setFilters((c) => ({ ...c, query: e.target.value }))}
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs text-slate-600">
+              <span className="font-mono">{filteredCommands.length}</span> command(s) • <span className="font-mono">{filteredAcks.length}</span> ack(s) • Bridge {dbState.bridgeOnline ? 'online' : 'offline'}
+            </div>
+            <div className={cn('text-xs font-mono', actions.status === 'ok' && 'text-teal-700', actions.status === 'error' && 'text-rose-700', actions.status === 'submitting' && 'text-slate-500')}>
+              {actions.message}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       <section className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_430px] gap-6">
         <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
           <CardHeader className="border-b border-slate-200 py-4">
@@ -4094,7 +5133,7 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
             </CardTitle>
           </CardHeader>
           <CardContent className="p-4 space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-6 gap-2">
+            <div className="grid grid-cols-1 md:grid-cols-8 gap-2">
               <select
                 className="md:col-span-2 h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
                 value={selectedTerminalId}
@@ -4105,6 +5144,27 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
                   <option key={t.terminalId} value={t.terminalId}>{t.terminalId}</option>
                 ))}
               </select>
+              <select
+                className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                value={enqueue.environment}
+                onChange={(e) => setEnqueue((c) => ({ ...c, environment: e.target.value as any }))}
+              >
+                <option value="DEMO">DEMO</option>
+                <option value="LIVE">LIVE</option>
+                <option value="PROP">PROP</option>
+                <option value="MARKET_DATA_MONITOR">MARKET_DATA_MONITOR</option>
+                <option value="FAILOVER_RESERVE">FAILOVER_RESERVE</option>
+              </select>
+              <button
+                type="button"
+                className={cn(
+                  'h-9 rounded-md border px-3 text-xs font-semibold',
+                  enqueue.sandboxMode ? 'border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100' : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50',
+                )}
+                onClick={() => setEnqueue((c) => ({ ...c, sandboxMode: !c.sandboxMode }))}
+              >
+                {enqueue.sandboxMode ? 'Sandbox' : 'Live mode'}
+              </button>
               <input className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs" value={enqueue.symbol} onChange={(e) => setEnqueue((c) => ({ ...c, symbol: e.target.value }))} />
               <select className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs" value={enqueue.side} onChange={(e) => setEnqueue((c) => ({ ...c, side: e.target.value as any }))}>
                 <option value="buy">buy</option>
@@ -4132,6 +5192,9 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
             <div className={cn('text-xs font-mono', submit.status === 'ok' && 'text-teal-700', submit.status === 'error' && 'text-rose-700', submit.status === 'submitting' && 'text-slate-500')}>
               {submit.message || 'Execution requires EA EnableExecution=true; disabled terminals ACK rejected.'}
             </div>
+            {dbState.error ? (
+              <div className="text-xs font-mono text-rose-700">{dbState.error}</div>
+            ) : null}
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               {integrity.map((item) => (
                 <div key={item.label} className="rounded-md border border-slate-200 bg-slate-50 p-3">
@@ -4193,25 +5256,59 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
                     <TableHead className="text-xs font-mono text-slate-500">Terminal</TableHead>
                     <TableHead className="text-xs font-mono text-slate-500">Command</TableHead>
                     <TableHead className="text-xs font-mono text-slate-500">Lifecycle</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500 text-right">Latency</TableHead>
                     <TableHead className="text-xs font-mono text-slate-500 text-right">Attempt</TableHead>
                     <TableHead className="text-xs font-mono text-slate-500 text-right">Integrity</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500 text-right">Action</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {commandRows.length === 0 ? (
+                  {filteredCommands.length === 0 ? (
                     <TableRow className="border-slate-100 hover:bg-transparent">
-                      <TableCell colSpan={6} className="h-40 text-center text-sm text-slate-500">
+                      <TableCell colSpan={8} className="h-40 text-center text-sm text-slate-500">
                         No commands enqueued yet.
                       </TableCell>
                     </TableRow>
-                  ) : commandRows.slice(0, 40).map((command) => (
-                    <TableRow key={command.commandId} className={cn('border-slate-100 hover:bg-blue-50/40', command.lifecycleState === 'FAILED' && 'bg-rose-50/30', command.lifecycleState === 'RETRYING' && 'bg-amber-50/30')}>
+                  ) : filteredCommands.slice(0, 60).map((command) => (
+                    <TableRow
+                      key={command.commandId}
+                      className={cn(
+                        'border-slate-100 hover:bg-blue-50/40',
+                        (command.lifecycleState === 'FAILED' || command.lifecycleState === 'TIMEOUT') && 'bg-rose-50/30',
+                        (command.lifecycleState === 'ROUTING' || command.lifecycleState === 'SENT') && 'bg-amber-50/30',
+                      )}
+                    >
                       <TableCell className="font-mono text-xs text-slate-700">{formatTime(command.createdAt)}</TableCell>
                       <TableCell className="font-mono text-xs text-slate-700">{command.terminalId}</TableCell>
-                      <TableCell className="text-xs text-slate-700">{command.type}<div className="font-mono text-[11px] text-slate-500">{command.symbol}</div></TableCell>
+                      <TableCell className="text-xs text-slate-700">
+                        {command.type}
+                        <div className="font-mono text-[11px] text-slate-500">
+                          {command.symbol} • {command.environment}{command.sandboxMode ? ' • sandbox' : ''}{command.dedupeKey && dedupeDuplicates.has(command.dedupeKey) ? ' • DUP' : ''}
+                        </div>
+                      </TableCell>
                       <TableCell><ExecutionBadge state={command.lifecycleState} /></TableCell>
+                      <TableCell className="text-right font-mono text-xs text-slate-700">
+                        {Math.round(command.lifecycleState === 'ACKNOWLEDGED' || command.lifecycleState === 'EXECUTED' || command.lifecycleState === 'FAILED' || command.lifecycleState === 'CANCELLED'
+                          ? command.ackLatencyMs
+                          : command.dispatchLatencyMs)}ms
+                      </TableCell>
                       <TableCell className="text-right font-mono text-xs text-slate-700">{command.attempt}</TableCell>
                       <TableCell className="text-right font-mono text-xs text-slate-700">{command.integrityScore}%</TableCell>
+                      <TableCell className="text-right">
+                        <button
+                          type="button"
+                          className={cn(
+                            'h-8 rounded-md border px-2 text-xs font-semibold',
+                            ['FAILED', 'TIMEOUT', 'CANCELLED'].includes(String(command.lifecycleState)) && Number(command.attempt ?? 0) < Number(command.maxAttempts ?? 3)
+                              ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100'
+                              : 'border-slate-200 bg-slate-100 text-slate-400',
+                          )}
+                          disabled={!['FAILED', 'TIMEOUT', 'CANCELLED'].includes(String(command.lifecycleState)) || Number(command.attempt ?? 0) >= Number(command.maxAttempts ?? 3) || actions.status === 'submitting'}
+                          onClick={() => onRetry(String(command.commandId))}
+                        >
+                          Retry
+                        </button>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -4240,20 +5337,30 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {ackRows.length === 0 ? (
+                  {filteredAcks.length === 0 ? (
                     <TableRow className="border-slate-100 hover:bg-transparent">
                       <TableCell colSpan={6} className="h-40 text-center text-sm text-slate-500">
                         No acknowledgements yet.
                       </TableCell>
                     </TableRow>
-                  ) : ackRows.slice(0, 40).map((ack) => (
+                  ) : filteredAcks.slice(0, 60).map((ack) => (
                     <TableRow key={ack.commandId} className="border-slate-100 hover:bg-slate-50">
                       <TableCell className="font-mono text-xs text-slate-700">{formatTime(ack.receivedAt)}</TableCell>
                       <TableCell className="font-mono text-xs text-slate-700">{ack.terminalId}</TableCell>
-                      <TableCell><ExecutionBadge state={ack.executionState} /></TableCell>
-                      <TableCell className="font-mono text-xs text-slate-700">{ack.ticket ?? ''}</TableCell>
+                      <TableCell><ExecutionBadge state={ack.lifecycleState} /></TableCell>
+                      <TableCell className="font-mono text-xs text-slate-700">
+                        {ack.ticket ?? ''}
+                        {ack.slippagePoints != null || ack.spreadPoints != null ? (
+                          <div className="mt-1 font-mono text-[11px] text-slate-500">
+                            {ack.slippagePoints != null ? `slip ${Number(ack.slippagePoints)}pt` : ''}{ack.slippagePoints != null && ack.spreadPoints != null ? ' • ' : ''}{ack.spreadPoints != null ? `spr ${Number(ack.spreadPoints)}pt` : ''}
+                          </div>
+                        ) : null}
+                      </TableCell>
                       <TableCell className="text-right font-mono text-xs text-slate-700">{ack.latencyMs}ms</TableCell>
-                      <TableCell className="text-xs text-slate-700">{ack.brokerMessage || 'EA acknowledged command'}</TableCell>
+                      <TableCell className="text-xs text-slate-700">
+                        {ack.brokerMessage || 'EA acknowledged command'}
+                        <div className="mt-1 font-mono text-[11px] text-slate-500">{ack.commandId}</div>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -4291,7 +5398,18 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
           <div className="space-y-3">
             {logs.slice(0, 8).map((log) => (
               <div key={`${log.time}-${log.message}`} className="flex gap-3 rounded-md border border-slate-200 bg-white p-3">
-                <div className={cn('mt-1 h-2 w-2 rounded-full', log.state === 'ACKED' && 'bg-emerald-500', log.state === 'RETRYING' && 'bg-amber-500', log.state === 'FAILED' && 'bg-rose-500', log.state === 'QUEUED' && 'bg-blue-500')} />
+                <div
+                  className={cn(
+                    'mt-1 h-2 w-2 rounded-full',
+                    log.state === 'QUEUED' && 'bg-blue-500',
+                    log.state === 'ROUTING' && 'bg-indigo-500',
+                    log.state === 'SENT' && 'bg-amber-500',
+                    log.state === 'ACKNOWLEDGED' && 'bg-teal-500',
+                    log.state === 'EXECUTED' && 'bg-emerald-500',
+                    (log.state === 'FAILED' || log.state === 'TIMEOUT') && 'bg-rose-500',
+                    log.state === 'CANCELLED' && 'bg-slate-400',
+                  )}
+                />
                 <div>
                   <div className="text-xs font-semibold text-slate-800">{log.message}</div>
                   <div className="mt-1 font-mono text-[11px] text-slate-500">{formatTime(log.time)}</div>
@@ -4316,6 +5434,79 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
         </OpsPanel>
       </section>
 
+      <section className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+        <OpsPanel title="Queue Health Monitoring" icon={ShieldCheck}>
+          <div className="space-y-3">
+            <div className="rounded-md border border-slate-200 bg-white p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-slate-900">Bridge status</span>
+                <ExecutionBadge state={dbState.bridgeOnline ? 'ACKNOWLEDGED' : 'FAILED'} />
+              </div>
+              <div className="mt-2 text-xs text-slate-600">
+                {dbState.bridgeOnline ? 'Bridge health endpoint responding.' : 'Bridge health endpoint unavailable.'}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-2">
+              <div className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-3">
+                <span className="text-xs font-semibold text-slate-900">DB queue depth</span>
+                <span className="font-mono text-xs text-slate-600">{commandRows.filter((c) => c.lifecycleState === 'QUEUED' || c.lifecycleState === 'ROUTING').length}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-3">
+                <span className="text-xs font-semibold text-slate-900">Bridge queue depth</span>
+                <span className="font-mono text-xs text-slate-600">{Number(props.commandSummary?.queued ?? 0)}</span>
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-3">
+                <span className="text-xs font-semibold text-slate-900">Queue drift</span>
+                <span className="font-mono text-xs text-slate-600">
+                  {Math.abs(commandRows.filter((c) => c.lifecycleState === 'QUEUED' || c.lifecycleState === 'ROUTING').length - Number(props.commandSummary?.queued ?? 0))}
+                </span>
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-3">
+                <span className="text-xs font-semibold text-slate-900">Duplicate dedupe keys</span>
+                <span className="font-mono text-xs text-slate-600">{dedupeDuplicates.size}</span>
+              </div>
+            </div>
+          </div>
+        </OpsPanel>
+
+        <OpsPanel title="Failed Execution Analysis" icon={AlertTriangle}>
+          <div className="space-y-3">
+            {failureAnalytics.length === 0 ? (
+              <EmptyPanel title="No failures detected" detail="Failed, timed out, or cancelled executions will surface here for analysis and retry." />
+            ) : (
+              failureAnalytics.map((bucket) => (
+                <div key={bucket.label} className="rounded-md border border-slate-200 bg-white p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-900">{bucket.label}</span>
+                    <span className="font-mono text-xs text-slate-600">{bucket.count}</span>
+                  </div>
+                  <div className="mt-2 font-mono text-[11px] text-slate-500">last {formatTime(bucket.lastAt)}</div>
+                </div>
+              ))
+            )}
+          </div>
+        </OpsPanel>
+
+        <OpsPanel title="Execution Audit Logs" icon={Database}>
+          <ScrollArea className="h-[420px]">
+            <div className="space-y-2 pr-3">
+              {(dbState.events.length ? [...dbState.events].slice(-80).reverse() : []).map((event: any) => (
+                <div key={String(event.id ?? `${event.createdAt}-${event.message}`)} className="rounded-md border border-slate-200 bg-white p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <ExecutionBadge state={String(event.lifecycleState ?? 'QUEUED')} />
+                    <span className="font-mono text-[11px] text-slate-500">{formatTime(String(event.createdAt ?? ''))}</span>
+                  </div>
+                  <div className="mt-2 text-xs text-slate-800">{String(event.eventType ?? '').toUpperCase()} {String(event.commandId ?? '')}</div>
+                  <div className="mt-1 text-[11px] text-slate-600">{String(event.message ?? '')}</div>
+                </div>
+              ))}
+              {dbState.events.length === 0 ? <EmptyPanel title="No audit events yet" detail="Execution events will appear here in real time via the event stream." /> : null}
+            </div>
+          </ScrollArea>
+        </OpsPanel>
+      </section>
+
       <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <ArchitectureCard title="Bridge Architecture" lines={EXECUTION_ARCH_LINES} />
         <ArchitectureCard title="Backend Services" lines={EXECUTION_SERVICE_LINES} />
@@ -4326,6 +5517,1104 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
       </section>
     </div>
   );
+}
+
+function EaCommunicationEnginePage(props: { terminals: any[]; commands: any[]; recentAcks: any[]; commandSummary: any }) {
+  type EaCommState = {
+    loaded: boolean;
+    error: string;
+    terminals: any[];
+    events: any[];
+    summary: any;
+    bridgeOnline: boolean;
+    bridgeHealth: any;
+  };
+
+  const [state, setState] = useState<EaCommState>({
+    loaded: false,
+    error: '',
+    terminals: [],
+    events: [],
+    summary: null,
+    bridgeOnline: false,
+    bridgeHealth: null,
+  });
+
+  const [filters, setFilters] = useState<{ terminalId: string; channel: string; severity: string; query: string }>({
+    terminalId: 'ALL',
+    channel: 'ALL',
+    severity: 'ALL',
+    query: '',
+  });
+  const [selectedEventId, setSelectedEventId] = useState<string>('');
+
+  useEffect(() => {
+    let cancelled = false;
+    let eventSource: EventSource | null = null;
+
+    const load = async () => {
+      try {
+        const response = await fetch('/api/mt5/ea-communication/state', { cache: 'no-store' });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload?.error ?? `EA comm state failed with HTTP ${response.status}`);
+        }
+        if (cancelled) return;
+        setState((current) => ({
+          ...current,
+          loaded: true,
+          error: '',
+          terminals: Array.isArray(payload?.terminals) ? payload.terminals : [],
+          events: Array.isArray(payload?.events) ? payload.events : current.events,
+          summary: payload?.summary ?? null,
+          bridgeOnline: Boolean(payload?.bridge?.online),
+          bridgeHealth: payload?.bridge?.health ?? null,
+        }));
+      } catch (error) {
+        if (cancelled) return;
+        setState((current) => ({
+          ...current,
+          loaded: true,
+          error: error instanceof Error ? error.message : 'Unable to load EA communication state.',
+        }));
+      }
+    };
+
+    load();
+    const interval = window.setInterval(load, 5000);
+
+    try {
+      eventSource = new EventSource('/api/mt5/ea-communication/stream');
+      eventSource.addEventListener('ea_comm_event', (event) => {
+        try {
+          const messageEvent = event as MessageEvent<string>;
+          const parsed = JSON.parse(messageEvent.data);
+          if (!parsed || typeof parsed !== 'object') return;
+          setState((current) => ({
+            ...current,
+            events: [...current.events, parsed].slice(-600),
+          }));
+        } catch {
+          return;
+        }
+      });
+    } catch {
+      eventSource = null;
+    }
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      eventSource?.close();
+    };
+  }, []);
+
+  const eventRows = useMemo(() => {
+    const query = filters.query.trim().toLowerCase();
+    return (Array.isArray(state.events) ? state.events : [])
+      .map((event) => ({
+        id: String(event?.id ?? ''),
+        terminalId: event?.terminalId ?? event?.terminal_id ?? null,
+        direction: String(event?.direction ?? '').toUpperCase(),
+        channel: String(event?.channel ?? '').toUpperCase(),
+        eventType: String(event?.eventType ?? event?.event_type ?? ''),
+        severity: String(event?.severity ?? '').toUpperCase(),
+        message: String(event?.message ?? ''),
+        payload: event?.payload ?? {},
+        createdAt: String(event?.createdAt ?? event?.created_at ?? ''),
+      }))
+      .filter((row) => {
+        if (filters.terminalId !== 'ALL' && String(row.terminalId ?? '') !== filters.terminalId) return false;
+        if (filters.channel !== 'ALL' && String(row.channel) !== filters.channel) return false;
+        if (filters.severity !== 'ALL' && String(row.severity) !== filters.severity) return false;
+        if (!query) return true;
+        return (
+          String(row.message).toLowerCase().includes(query)
+          || String(row.eventType).toLowerCase().includes(query)
+          || String(row.terminalId ?? '').toLowerCase().includes(query)
+          || String(row.channel).toLowerCase().includes(query)
+        );
+      })
+      .sort((a, b) => Date.parse(String(b.createdAt ?? '')) - Date.parse(String(a.createdAt ?? '')));
+  }, [filters.channel, filters.query, filters.severity, filters.terminalId, state.events]);
+
+  const selectedEvent = useMemo(() => eventRows.find((row) => row.id === selectedEventId) ?? null, [eventRows, selectedEventId]);
+
+  const commStats = useMemo(() => {
+    const recent = eventRows.slice(0, 500);
+    const windowTotal = recent.length;
+    const errors = recent.filter((e) => e.severity === 'ERROR').length;
+    const warnings = recent.filter((e) => e.severity === 'WARNING').length;
+    const jsonInvalid = recent.filter((e) => e.eventType === 'JSON_INVALID').length;
+    const heartbeat = recent.filter((e) => e.channel === 'HEARTBEAT' && e.eventType === 'HEARTBEAT_RECEIVED').length;
+    const polls = recent.filter((e) => e.eventType === 'COMMAND_POLL_RECEIVED').length;
+    const delivered = recent.filter((e) => e.eventType === 'COMMAND_DELIVERED').length;
+    const acks = recent.filter((e) => e.eventType === 'ACK_RECEIVED').length;
+    const forwardFailures = recent.filter((e) => String(e.eventType).includes('FAILED') && e.channel === 'BRIDGE').length;
+    const latestAuth = recent.find((e) => e.eventType === 'AUTH_ISSUED')?.createdAt ?? '';
+    const handshakeReady = Boolean(latestAuth) && Boolean(heartbeat);
+
+    const avgLatencyMs = (() => {
+      const samples = recent
+        .filter((e) => e.channel === 'HEARTBEAT' && e.eventType === 'HEARTBEAT_RECEIVED')
+        .map((e) => Number((e.payload as any)?.latencyMs))
+        .filter((n) => Number.isFinite(n));
+      if (!samples.length) return 0;
+      return Math.round(samples.reduce((sum, n) => sum + n, 0) / samples.length);
+    })();
+
+    const tickLagMs = (() => {
+      const samples = recent
+        .filter((e) => e.channel === 'HEARTBEAT' && e.eventType === 'HEARTBEAT_RECEIVED')
+        .map((e) => Number((e.payload as any)?.tickLagMs))
+        .filter((n) => Number.isFinite(n));
+      if (!samples.length) return 0;
+      return Math.round(samples.reduce((sum, n) => sum + n, 0) / samples.length);
+    })();
+
+    return {
+      windowTotal,
+      errors,
+      warnings,
+      jsonInvalid,
+      heartbeat,
+      polls,
+      delivered,
+      acks,
+      forwardFailures,
+      avgLatencyMs,
+      tickLagMs,
+      handshakeReady,
+      latestAuth,
+    };
+  }, [eventRows]);
+
+  const terminalRows = useMemo(() => {
+    const terminals = props.terminals ?? [];
+    const byId = new Map<string, { lastPollAt: string; lastAckAt: string; lastHeartbeatAt: string; lastErrorAt: string }>();
+    for (const event of eventRows.slice(0, 800)) {
+      const terminalId = String(event.terminalId ?? '').trim();
+      if (!terminalId) continue;
+      const existing = byId.get(terminalId) ?? { lastPollAt: '', lastAckAt: '', lastHeartbeatAt: '', lastErrorAt: '' };
+      const time = String(event.createdAt ?? '');
+      if (event.eventType === 'COMMAND_POLL_RECEIVED' && Date.parse(time) > Date.parse(existing.lastPollAt || '')) existing.lastPollAt = time;
+      if (event.eventType === 'ACK_RECEIVED' && Date.parse(time) > Date.parse(existing.lastAckAt || '')) existing.lastAckAt = time;
+      if (event.eventType === 'HEARTBEAT_RECEIVED' && Date.parse(time) > Date.parse(existing.lastHeartbeatAt || '')) existing.lastHeartbeatAt = time;
+      if (event.severity === 'ERROR' && Date.parse(time) > Date.parse(existing.lastErrorAt || '')) existing.lastErrorAt = time;
+      byId.set(terminalId, existing);
+    }
+
+    return terminals.map((terminal: any) => ({
+      terminalId: terminal.terminalId,
+      accountNumber: terminal.accountNumber,
+      brokerName: terminal.brokerName,
+      serverName: terminal.serverName,
+      status: terminal.status,
+      heartbeatAgeMs: terminal.heartbeatAgeMs,
+      latencyMs: terminal.latencyMs,
+      stabilityScore: terminal.stabilityScore ?? 0,
+      version: terminal.version ?? 'unknown',
+      lastPollAt: byId.get(terminal.terminalId)?.lastPollAt ?? '',
+      lastAckAt: byId.get(terminal.terminalId)?.lastAckAt ?? '',
+      lastHeartbeatAt: byId.get(terminal.terminalId)?.lastHeartbeatAt ?? '',
+      lastErrorAt: byId.get(terminal.terminalId)?.lastErrorAt ?? '',
+      lastTickTime: terminal.mt5ServerTime ?? terminal.terminalTime ?? '',
+    }));
+  }, [eventRows, props.terminals]);
+
+  const diagnostics = useMemo(() => {
+    const connected = terminalRows.filter((t) => t.status === 'connected').length;
+    const degraded = terminalRows.filter((t) => t.status === 'degraded').length;
+    const disconnected = terminalRows.filter((t) => t.status === 'disconnected').length;
+    const stalledTicks = commStats.tickLagMs > 10_000;
+    const latencyWarn = commStats.avgLatencyMs > 500;
+    const bridgeOk = state.bridgeOnline;
+    const jsonOk = commStats.jsonInvalid === 0;
+    return [
+      { label: 'Handshake readiness', state: commStats.handshakeReady ? 'ACKNOWLEDGED' : 'SENT', detail: commStats.handshakeReady ? 'Auth policy issued and heartbeat channel active.' : 'Issue auth policy and confirm heartbeat channel.' },
+      { label: 'EA authentication', state: commStats.latestAuth ? 'ACKNOWLEDGED' : 'QUEUED', detail: commStats.latestAuth ? `Latest auth issued ${formatTime(commStats.latestAuth)}.` : 'No auth issued in recent window.' },
+      { label: 'Bridge connectivity', state: bridgeOk ? 'ACKNOWLEDGED' : 'FAILED', detail: bridgeOk ? 'Trading bridge reachable.' : 'Trading bridge not responding.' },
+      { label: 'JSON validation', state: jsonOk ? 'ACKNOWLEDGED' : 'FAILED', detail: jsonOk ? 'No JSON parsing failures detected.' : `${commStats.jsonInvalid} JSON invalid message(s) observed.` },
+      { label: 'Latency monitoring', state: latencyWarn ? 'SENT' : 'ACKNOWLEDGED', detail: `Average heartbeat latency ${commStats.avgLatencyMs}ms.` },
+      { label: 'Tick synchronization', state: stalledTicks ? 'TIMEOUT' : 'ACKNOWLEDGED', detail: `Average tick lag ${commStats.tickLagMs}ms.` },
+      { label: 'Multi-terminal coverage', state: connected ? 'ACKNOWLEDGED' : 'FAILED', detail: `${connected} connected / ${degraded} degraded / ${disconnected} disconnected.` },
+    ];
+  }, [commStats, state.bridgeOnline, terminalRows]);
+
+  return (
+    <div className="space-y-6">
+      <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        <OpsSummaryCard icon={Wifi} title="Bridge online" value={state.bridgeOnline ? 'YES' : 'NO'} detail="Trading bridge reachability" tone={state.bridgeOnline ? 'green' : 'red'} />
+        <OpsSummaryCard icon={TerminalSquare} title="Connected terminals" value={String(terminalRows.filter((t) => t.status === 'connected').length)} detail="Multi-terminal communication" tone="blue" />
+        <OpsSummaryCard icon={Gauge} title="Heartbeat latency" value={`${commStats.avgLatencyMs}ms`} detail="EA → backend round-trip" tone={commStats.avgLatencyMs > 500 ? 'amber' : 'green'} />
+        <OpsSummaryCard icon={Radio} title="Tick lag" value={`${commStats.tickLagMs}ms`} detail="Tick synchronization monitoring" tone={commStats.tickLagMs > 10_000 ? 'red' : commStats.tickLagMs > 3000 ? 'amber' : 'green'} />
+        <OpsSummaryCard icon={Server} title="Command queue" value={String(Number(props.commandSummary?.queued ?? 0))} detail="Pending commands on bridge" tone="blue" />
+        <OpsSummaryCard icon={ClipboardCheck} title="Acks received" value={String(commStats.acks)} detail="Execution command acknowledgement" tone="green" />
+        <OpsSummaryCard icon={AlertTriangle} title="Message failures" value={String(commStats.errors + commStats.warnings)} detail="Errors and warnings (window)" tone={commStats.errors ? 'red' : commStats.warnings ? 'amber' : 'green'} />
+        <OpsSummaryCard icon={ShieldAlert} title="JSON invalid" value={String(commStats.jsonInvalid)} detail="Payload validation failures" tone={commStats.jsonInvalid ? 'red' : 'green'} />
+      </section>
+
+      {state.error ? <div className="text-xs font-mono text-rose-700">{state.error}</div> : null}
+
+      <section className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_430px] gap-6">
+        <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+          <CardHeader className="border-b border-slate-200 py-4">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <TerminalSquare className="w-4 h-4 text-indigo-700" /> Multi-Terminal Communication Monitoring
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <ScrollArea className="h-[540px]">
+              <Table>
+                <TableHeader className="bg-slate-50 sticky top-0 backdrop-blur-sm z-10">
+                  <TableRow className="border-slate-200 hover:bg-transparent">
+                    <TableHead className="text-xs font-mono text-slate-500">Terminal</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Status</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500 text-right">HB age</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500 text-right">Latency</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">EA version</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Last poll</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Last ack</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {terminalRows.length === 0 ? (
+                    <TableRow className="border-slate-100 hover:bg-transparent">
+                      <TableCell colSpan={7} className="h-40 text-center text-sm text-slate-500">
+                        No terminals detected.
+                      </TableCell>
+                    </TableRow>
+                  ) : terminalRows.map((terminal) => (
+                    <TableRow key={terminal.terminalId} className="border-slate-100 hover:bg-slate-50">
+                      <TableCell className="font-mono text-xs text-slate-700">{terminal.terminalId}</TableCell>
+                      <TableCell><ExecutionBadge state={terminal.status === 'connected' ? 'ACKNOWLEDGED' : terminal.status === 'degraded' ? 'SENT' : 'FAILED'} /></TableCell>
+                      <TableCell className="text-right font-mono text-xs text-slate-700">{Math.round(Number(terminal.heartbeatAgeMs ?? 0))}ms</TableCell>
+                      <TableCell className="text-right font-mono text-xs text-slate-700">{Math.round(Number(terminal.latencyMs ?? 0))}ms</TableCell>
+                      <TableCell className="font-mono text-xs text-slate-700">{terminal.version}</TableCell>
+                      <TableCell className="font-mono text-xs text-slate-600">{terminal.lastPollAt ? formatTime(terminal.lastPollAt) : ''}</TableCell>
+                      <TableCell className="font-mono text-xs text-slate-600">{terminal.lastAckAt ? formatTime(terminal.lastAckAt) : ''}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+
+        <div className="space-y-6">
+          <OpsPanel title="Diagnostics Dashboard" icon={ShieldCheck}>
+            <div className="space-y-3">
+              {diagnostics.map((item) => (
+                <div key={item.label} className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-3">
+                  <div>
+                    <div className="text-xs font-semibold text-slate-900">{item.label}</div>
+                    <div className="mt-1 text-[11px] text-slate-500">{item.detail}</div>
+                  </div>
+                  <ExecutionBadge state={item.state} />
+                </div>
+              ))}
+            </div>
+          </OpsPanel>
+
+          <OpsPanel title="Filters" icon={Search}>
+            <div className="space-y-3">
+              <select
+                className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                value={filters.terminalId}
+                onChange={(e) => setFilters((c) => ({ ...c, terminalId: e.target.value }))}
+              >
+                <option value="ALL">ALL TERMINALS</option>
+                {terminalRows.map((t) => (
+                  <option key={t.terminalId} value={t.terminalId}>{t.terminalId}</option>
+                ))}
+              </select>
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                  value={filters.channel}
+                  onChange={(e) => setFilters((c) => ({ ...c, channel: e.target.value }))}
+                >
+                  <option value="ALL">ALL CH</option>
+                  <option value="HEARTBEAT">HEARTBEAT</option>
+                  <option value="COMMAND">COMMAND</option>
+                  <option value="TICK">TICK</option>
+                  <option value="AUTH">AUTH</option>
+                  <option value="HANDSHAKE">HANDSHAKE</option>
+                  <option value="BRIDGE">BRIDGE</option>
+                  <option value="ERROR">ERROR</option>
+                </select>
+                <select
+                  className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                  value={filters.severity}
+                  onChange={(e) => setFilters((c) => ({ ...c, severity: e.target.value }))}
+                >
+                  <option value="ALL">ALL SEV</option>
+                  <option value="DEBUG">DEBUG</option>
+                  <option value="INFO">INFO</option>
+                  <option value="SUCCESS">SUCCESS</option>
+                  <option value="WARNING">WARNING</option>
+                  <option value="ERROR">ERROR</option>
+                </select>
+              </div>
+              <input
+                className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 font-mono text-xs"
+                placeholder="Search logs…"
+                value={filters.query}
+                onChange={(e) => setFilters((c) => ({ ...c, query: e.target.value }))}
+              />
+            </div>
+          </OpsPanel>
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+          <CardHeader className="border-b border-slate-200 py-4">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Radio className="w-4 h-4 text-blue-700" /> Live EA Communication Feed
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <ScrollArea className="h-[520px]">
+              <Table>
+                <TableHeader className="bg-slate-50 sticky top-0 backdrop-blur-sm z-10">
+                  <TableRow className="border-slate-200 hover:bg-transparent">
+                    <TableHead className="text-xs font-mono text-slate-500">Time</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Terminal</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Channel</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Event</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Severity</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {eventRows.length === 0 ? (
+                    <TableRow className="border-slate-100 hover:bg-transparent">
+                      <TableCell colSpan={5} className="h-40 text-center text-sm text-slate-500">
+                        No communication events yet.
+                      </TableCell>
+                    </TableRow>
+                  ) : eventRows.slice(0, 80).map((row) => (
+                    <TableRow
+                      key={row.id}
+                      className={cn('border-slate-100 hover:bg-blue-50/40 cursor-pointer', selectedEventId === row.id && 'bg-blue-50/60')}
+                      onClick={() => setSelectedEventId(row.id)}
+                    >
+                      <TableCell className="font-mono text-xs text-slate-700">{formatTime(row.createdAt)}</TableCell>
+                      <TableCell className="font-mono text-xs text-slate-700">{row.terminalId ?? ''}</TableCell>
+                      <TableCell className="font-mono text-xs text-slate-600">{row.channel}</TableCell>
+                      <TableCell className="text-xs text-slate-700">
+                        {row.eventType}
+                        <div className="mt-1 text-[11px] text-slate-500">{row.message}</div>
+                      </TableCell>
+                      <TableCell><ExecutionBadge state={row.severity === 'SUCCESS' ? 'EXECUTED' : row.severity === 'ERROR' ? 'FAILED' : row.severity === 'WARNING' ? 'SENT' : 'ACKNOWLEDGED'} /></TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+
+        <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+          <CardHeader className="border-b border-slate-200 py-4">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Database className="w-4 h-4 text-slate-700" /> Payload Inspection & JSON Validation
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-4 space-y-3">
+            {!selectedEvent ? (
+              <EmptyPanel title="Select an event" detail="Click any event row to inspect payload and validation output." />
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <div>
+                    <div className="text-xs font-semibold text-slate-900">{selectedEvent.eventType}</div>
+                    <div className="mt-1 font-mono text-[11px] text-slate-600">{selectedEvent.terminalId ?? ''} • {selectedEvent.channel} • {selectedEvent.direction}</div>
+                  </div>
+                  <ExecutionBadge state={selectedEvent.severity === 'ERROR' ? 'FAILED' : selectedEvent.severity === 'WARNING' ? 'SENT' : 'ACKNOWLEDGED'} />
+                </div>
+                <div className="rounded-md border border-slate-200 bg-white p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-900">Payload</span>
+                    <span className="font-mono text-[11px] text-slate-500">{formatTime(selectedEvent.createdAt)}</span>
+                  </div>
+                  <pre className="mt-3 max-h-[360px] overflow-auto rounded-md bg-slate-950 p-3 text-[11px] text-slate-100">
+{safePrettyJson(selectedEvent.payload)}
+                  </pre>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </section>
+
+      <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <ArchitectureCard title="Frontend Architecture" lines={EA_COMM_FRONTEND_LINES} />
+        <ArchitectureCard title="Backend Communication Service" lines={EA_COMM_BACKEND_LINES} />
+        <ArchitectureCard title="WebSocket Architecture" lines={EA_COMM_WS_LINES} />
+        <ArchitectureCard title="Event-Driven Model" lines={EA_COMM_EVENT_LINES} />
+        <ArchitectureCard title="Message Schemas" lines={EA_COMM_SCHEMA_LINES} />
+        <ArchitectureCard title="Retry & Reconnect" lines={EA_COMM_RETRY_LINES} />
+      </section>
+    </div>
+  );
+}
+
+function ExecutionAuditJournalPage(props: { terminals: any[]; commandSummary: any }) {
+  type AuditState = {
+    loaded: boolean;
+    error: string;
+    bridgeOnline: boolean;
+    bridgeHealth: any;
+    terminals: any[];
+    summary: any;
+    events: any[];
+  };
+
+  const [filters, setFilters] = useState<{
+    windowMinutes: number;
+    terminalId: string;
+    brokerName: string;
+    environment: string;
+    sourceSystem: string;
+    severity: string;
+    query: string;
+  }>({
+    windowMinutes: 240,
+    terminalId: 'ALL',
+    brokerName: 'ALL',
+    environment: 'ALL',
+    sourceSystem: 'ALL',
+    severity: 'ALL',
+    query: '',
+  });
+
+  const [state, setState] = useState<AuditState>({
+    loaded: false,
+    error: '',
+    bridgeOnline: false,
+    bridgeHealth: null,
+    terminals: [],
+    summary: null,
+    events: [],
+  });
+
+  const [selectedEventKey, setSelectedEventKey] = useState<string>('');
+  const [selectedCorrelationId, setSelectedCorrelationId] = useState<string>('');
+  const [timeline, setTimeline] = useState<any[]>([]);
+  const [timelineError, setTimelineError] = useState<string>('');
+  const [replay, setReplay] = useState<EnqueueState>({ status: 'idle', message: '' });
+
+  const sinceTs = useMemo(() => new Date(Date.now() - filters.windowMinutes * 60_000).toISOString(), [filters.windowMinutes]);
+
+  const buildQuery = useMemo(() => {
+    const params = new URLSearchParams();
+    params.set('sinceTs', sinceTs);
+    if (filters.terminalId !== 'ALL') params.set('terminalId', filters.terminalId);
+    if (filters.brokerName !== 'ALL') params.set('brokerName', filters.brokerName);
+    if (filters.environment !== 'ALL') params.set('environment', filters.environment);
+    if (filters.sourceSystem !== 'ALL') params.set('sourceSystem', filters.sourceSystem);
+    if (filters.severity !== 'ALL') params.set('severity', filters.severity);
+    if (filters.query.trim()) params.set('query', filters.query.trim());
+    return params;
+  }, [filters.brokerName, filters.environment, filters.query, filters.severity, filters.sourceSystem, filters.terminalId, sinceTs]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let eventSource: EventSource | null = null;
+
+    const load = async () => {
+      try {
+        const response = await fetch(`/api/mt5/execution-audit/state?${buildQuery.toString()}`, { cache: 'no-store' });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(payload?.error ?? `Audit state failed with HTTP ${response.status}`);
+        }
+        if (cancelled) return;
+        setState((current) => ({
+          ...current,
+          loaded: true,
+          error: '',
+          terminals: Array.isArray(payload?.terminals) ? payload.terminals : [],
+          summary: payload?.summary ?? null,
+          bridgeOnline: Boolean(payload?.bridge?.online),
+          bridgeHealth: payload?.bridge?.health ?? null,
+          events: Array.isArray(payload?.events) ? payload.events : current.events,
+        }));
+      } catch (error) {
+        if (cancelled) return;
+        setState((current) => ({
+          ...current,
+          loaded: true,
+          error: error instanceof Error ? error.message : 'Unable to load audit state.',
+        }));
+      }
+    };
+
+    load();
+    const interval = window.setInterval(load, 6000);
+
+    try {
+      eventSource = new EventSource(`/api/mt5/execution-audit/stream?${buildQuery.toString()}`);
+      eventSource.addEventListener('execution_audit_event', (event) => {
+        try {
+          const messageEvent = event as MessageEvent<string>;
+          const parsed = JSON.parse(messageEvent.data);
+          if (!parsed || typeof parsed !== 'object') return;
+          setState((current) => {
+            const incomingKey = String((parsed as any)?.key ?? '');
+            if (!incomingKey) return current;
+            const keys = new Set(current.events.map((e: any) => String(e?.key ?? '')));
+            if (keys.has(incomingKey)) return current;
+            return { ...current, events: [...current.events, parsed].slice(-900) };
+          });
+        } catch {
+          return;
+        }
+      });
+    } catch {
+      eventSource = null;
+    }
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      eventSource?.close();
+    };
+  }, [buildQuery]);
+
+  const auditEvents = useMemo(() => {
+    return (Array.isArray(state.events) ? state.events : [])
+      .map((row: any) => ({
+        key: String(row.key ?? `${row.sourceSystem}:${row.sourceId}`),
+        occurredAt: String(row.occurredAt ?? row.occurred_at ?? ''),
+        sourceSystem: String(row.sourceSystem ?? row.source_system ?? ''),
+        severity: String(row.severity ?? ''),
+        eventType: String(row.eventType ?? row.event_type ?? ''),
+        message: String(row.message ?? ''),
+        correlationId: row.correlationId ?? row.correlation_id ?? null,
+        terminalId: row.terminalId ?? row.terminal_id ?? null,
+        accountNumber: row.accountNumber ?? row.account_number ?? null,
+        brokerName: row.brokerName ?? row.broker_name ?? null,
+        environment: row.environment ?? null,
+        sandboxMode: row.sandboxMode ?? null,
+        payload: row.payload ?? {},
+      }))
+      .sort((a, b) => Date.parse(String(b.occurredAt ?? '')) - Date.parse(String(a.occurredAt ?? '')));
+  }, [state.events]);
+
+  const selectedEvent = useMemo(() => auditEvents.find((e) => e.key === selectedEventKey) ?? null, [auditEvents, selectedEventKey]);
+
+  useEffect(() => {
+    if (selectedEvent?.correlationId) {
+      setSelectedCorrelationId(String(selectedEvent.correlationId));
+    }
+  }, [selectedEvent?.correlationId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setTimelineError('');
+      setTimeline([]);
+      if (!selectedCorrelationId) return;
+      try {
+        const response = await fetch(`/api/mt5/execution-audit/timeline?correlationId=${encodeURIComponent(selectedCorrelationId)}`, { cache: 'no-store' });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload?.error ?? `Timeline failed with HTTP ${response.status}`);
+        if (cancelled) return;
+        setTimeline(Array.isArray(payload?.timeline) ? payload.timeline : []);
+      } catch (error) {
+        if (cancelled) return;
+        setTimelineError(error instanceof Error ? error.message : 'Unable to load timeline.');
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCorrelationId]);
+
+  const timelineRows = useMemo(() => {
+    return (Array.isArray(timeline) ? timeline : [])
+      .map((row: any) => ({
+        key: String(row.key ?? `${row.sourceSystem}:${row.sourceId}`),
+        occurredAt: String(row.occurredAt ?? ''),
+        sourceSystem: String(row.sourceSystem ?? ''),
+        severity: String(row.severity ?? ''),
+        eventType: String(row.eventType ?? ''),
+        message: String(row.message ?? ''),
+        terminalId: row.terminalId ?? null,
+        accountNumber: row.accountNumber ?? null,
+        brokerName: row.brokerName ?? null,
+        environment: row.environment ?? null,
+        payload: row.payload ?? {},
+      }))
+      .sort((a, b) => Date.parse(String(a.occurredAt ?? '')) - Date.parse(String(b.occurredAt ?? '')));
+  }, [timeline]);
+
+  const auditIntegrity = useMemo(() => {
+    const exec = timelineRows.filter((e) => e.sourceSystem === 'EXECUTION');
+    const hasEnqueue = exec.some((e) => e.eventType === 'ENQUEUE');
+    const hasDispatch = exec.some((e) => e.eventType === 'DISPATCH');
+    const hasAck = exec.some((e) => e.eventType === 'ACK');
+    const hasTimeout = exec.some((e) => e.eventType === 'TIMEOUT');
+    const orderingOk = (() => {
+      const index = (type: string) => exec.findIndex((e) => e.eventType === type);
+      const enqueueAt = index('ENQUEUE');
+      const dispatchAt = index('DISPATCH');
+      const ackAt = index('ACK');
+      if (enqueueAt === -1 || dispatchAt === -1) return false;
+      if (dispatchAt < enqueueAt) return false;
+      if (ackAt !== -1 && ackAt < dispatchAt) return false;
+      return true;
+    })();
+    const state = hasTimeout ? 'TIMEOUT' : hasAck ? 'ACKNOWLEDGED' : hasDispatch ? 'SENT' : hasEnqueue ? 'QUEUED' : 'FAILED';
+    const score = clampScore((hasEnqueue ? 25 : 0) + (hasDispatch ? 25 : 0) + (hasAck ? 25 : 0) + (orderingOk ? 25 : 0));
+    return {
+      score,
+      state,
+      checks: [
+        { label: 'Order request captured', ok: hasEnqueue },
+        { label: 'Routing/dispatch captured', ok: hasDispatch },
+        { label: 'Ack/broker response captured', ok: hasAck || hasTimeout },
+        { label: 'Lifecycle ordering valid', ok: orderingOk },
+      ],
+    };
+  }, [timelineRows]);
+
+  const latencyStats = useMemo(() => {
+    const values = timelineRows
+      .filter((e) => e.sourceSystem === 'EXECUTION' && e.eventType === 'ACK')
+      .map((e) => Number((e.payload as any)?.latencyMs))
+      .filter((n) => Number.isFinite(n));
+    const avg = values.length ? Math.round(values.reduce((sum, n) => sum + n, 0) / values.length) : 0;
+    const p95 = values.length ? values.slice().sort((a, b) => a - b)[Math.min(values.length - 1, Math.floor(values.length * 0.95))] : 0;
+    return { avg, p95: Math.round(p95) };
+  }, [timelineRows]);
+
+  const slippageSpread = useMemo(() => {
+    const slippage = timelineRows
+      .filter((e) => e.sourceSystem === 'EXECUTION' && e.eventType === 'ACK')
+      .map((e) => Number((e.payload as any)?.slippagePoints))
+      .filter((n) => Number.isFinite(n));
+    const spread = timelineRows
+      .filter((e) => e.sourceSystem === 'EXECUTION' && e.eventType === 'ACK')
+      .map((e) => Number((e.payload as any)?.spreadPoints))
+      .filter((n) => Number.isFinite(n));
+    const avgSlip = slippage.length ? Math.round(slippage.reduce((sum, n) => sum + n, 0) / slippage.length) : 0;
+    const avgSpr = spread.length ? Math.round(spread.reduce((sum, n) => sum + n, 0) / spread.length) : 0;
+    return { avgSlip, avgSpr };
+  }, [timelineRows]);
+
+  const onExport = async (format: 'json' | 'csv') => {
+    const params = new URLSearchParams(buildQuery.toString());
+    params.set('format', format);
+    const url = `/api/mt5/execution-audit/export?${params.toString()}`;
+    window.location.href = url;
+  };
+
+  const onReplay = async () => {
+    setReplay({ status: 'submitting', message: '' });
+    try {
+      if (!selectedCorrelationId) throw new Error('Select a correlation ID.');
+      const response = await fetch('/api/mt5/execution-audit/replay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ correlationId: selectedCorrelationId }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error ?? `Replay failed with HTTP ${response.status}`);
+      setReplay({ status: 'ok', message: 'Replay triggered (retry enqueued).' });
+    } catch (error) {
+      setReplay({ status: 'error', message: error instanceof Error ? error.message : 'Replay failed.' });
+    }
+  };
+
+  const summary = state.summary?.totals ?? { total: 0, errors: 0, warnings: 0, executionEvents: 0, eaEvents: 0, riskEvents: 0 };
+  const incidents = Array.isArray(state.summary?.incidents) ? state.summary.incidents : [];
+  const brokerDiagnostics = Array.isArray(state.summary?.brokerDiagnostics) ? state.summary.brokerDiagnostics : [];
+  const terminalDiagnostics = Array.isArray(state.summary?.terminalDiagnostics) ? state.summary.terminalDiagnostics : [];
+
+  return (
+    <div className="space-y-6">
+      <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+        <OpsSummaryCard icon={Database} title="Audit events" value={String(summary.total)} detail={`Window ${filters.windowMinutes}m`} tone="blue" />
+        <OpsSummaryCard icon={AlertTriangle} title="Incidents" value={String(summary.errors + summary.warnings)} detail="Errors + warnings" tone={summary.errors ? 'red' : summary.warnings ? 'amber' : 'green'} />
+        <OpsSummaryCard icon={Server} title="Bridge queue" value={String(Number(props.commandSummary?.queued ?? 0))} detail="Execution queue depth" tone="blue" />
+        <OpsSummaryCard icon={Gauge} title="Ack latency p95" value={`${latencyStats.p95}ms`} detail={`Avg ${latencyStats.avg}ms`} tone={latencyStats.p95 > 1000 ? 'amber' : 'green'} />
+        <OpsSummaryCard icon={ShieldCheck} title="Audit integrity" value={`${auditIntegrity.score}%`} detail="Timeline lifecycle checks" tone={auditIntegrity.score >= 90 ? 'green' : auditIntegrity.score >= 70 ? 'amber' : 'red'} />
+        <OpsSummaryCard icon={ClipboardCheck} title="Correlation ID" value={selectedCorrelationId ? 'SET' : 'NONE'} detail={selectedCorrelationId || 'Select an event'} tone={selectedCorrelationId ? 'green' : 'slate'} />
+        <OpsSummaryCard icon={Globe2} title="Slippage avg" value={`${slippageSpread.avgSlip}pt`} detail={`Spread ${slippageSpread.avgSpr}pt`} tone={slippageSpread.avgSlip > 8 ? 'amber' : 'green'} />
+        <OpsSummaryCard icon={Wifi} title="Bridge online" value={state.bridgeOnline ? 'YES' : 'NO'} detail="Broker/bridge layer" tone={state.bridgeOnline ? 'green' : 'red'} />
+      </section>
+
+      <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+        <CardHeader className="border-b border-slate-200 py-4">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Search className="w-4 h-4 text-slate-700" /> Search / Filtering / Export
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="p-4 space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-8 gap-2">
+            <select className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs" value={String(filters.windowMinutes)} onChange={(e) => setFilters((c) => ({ ...c, windowMinutes: Number(e.target.value) }))}>
+              <option value="15">15m</option>
+              <option value="60">1h</option>
+              <option value="240">4h</option>
+              <option value="1440">24h</option>
+            </select>
+            <select className="md:col-span-2 h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs" value={filters.terminalId} onChange={(e) => setFilters((c) => ({ ...c, terminalId: e.target.value }))}>
+              <option value="ALL">ALL TERMINALS</option>
+              {(props.terminals ?? []).map((t: any) => (
+                <option key={t.terminalId} value={t.terminalId}>{t.terminalId}</option>
+              ))}
+            </select>
+            <select className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs" value={filters.environment} onChange={(e) => setFilters((c) => ({ ...c, environment: e.target.value }))}>
+              <option value="ALL">ALL ENV</option>
+              <option value="DEMO">DEMO</option>
+              <option value="LIVE">LIVE</option>
+              <option value="PROP">PROP</option>
+              <option value="MARKET_DATA_MONITOR">MARKET_DATA_MONITOR</option>
+              <option value="FAILOVER_RESERVE">FAILOVER_RESERVE</option>
+            </select>
+            <select className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs" value={filters.sourceSystem} onChange={(e) => setFilters((c) => ({ ...c, sourceSystem: e.target.value }))}>
+              <option value="ALL">ALL SRC</option>
+              <option value="EXECUTION">EXECUTION</option>
+              <option value="EA_COMM">EA_COMM</option>
+              <option value="RISK">RISK</option>
+            </select>
+            <select className="h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs" value={filters.severity} onChange={(e) => setFilters((c) => ({ ...c, severity: e.target.value }))}>
+              <option value="ALL">ALL SEV</option>
+              <option value="DEBUG">DEBUG</option>
+              <option value="INFO">INFO</option>
+              <option value="SUCCESS">SUCCESS</option>
+              <option value="WARNING">WARNING</option>
+              <option value="ERROR">ERROR</option>
+            </select>
+            <input className="md:col-span-2 h-9 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs" placeholder="Search message/eventType/correlationId…" value={filters.query} onChange={(e) => setFilters((c) => ({ ...c, query: e.target.value }))} />
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs text-slate-600">
+              <span className="font-mono">{auditEvents.length}</span> event(s) loaded • view {filters.windowMinutes}m • {state.loaded ? 'live' : 'loading'}
+            </div>
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => onExport('json')}>Export JSON</Button>
+              <Button size="sm" variant="outline" onClick={() => onExport('csv')}>Export CSV</Button>
+              <Button size="sm" variant="outline" onClick={onReplay} disabled={!selectedCorrelationId || replay.status === 'submitting'}>Event replay</Button>
+            </div>
+          </div>
+          <div className={cn('text-xs font-mono', replay.status === 'ok' && 'text-teal-700', replay.status === 'error' && 'text-rose-700', replay.status === 'submitting' && 'text-slate-500')}>
+            {replay.message}
+          </div>
+          {state.error ? <div className="text-xs font-mono text-rose-700">{state.error}</div> : null}
+        </CardContent>
+      </Card>
+
+      <section className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_430px] gap-6">
+        <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+          <CardHeader className="border-b border-slate-200 py-4">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Radio className="w-4 h-4 text-blue-700" /> Real-Time Execution Audit Feed
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            <ScrollArea className="h-[620px]">
+              <Table>
+                <TableHeader className="bg-slate-50 sticky top-0 backdrop-blur-sm z-10">
+                  <TableRow className="border-slate-200 hover:bg-transparent">
+                    <TableHead className="text-xs font-mono text-slate-500">Time</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Source</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Severity</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Correlation</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Terminal</TableHead>
+                    <TableHead className="text-xs font-mono text-slate-500">Event</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {auditEvents.length === 0 ? (
+                    <TableRow className="border-slate-100 hover:bg-transparent">
+                      <TableCell colSpan={6} className="h-40 text-center text-sm text-slate-500">No audit events available.</TableCell>
+                    </TableRow>
+                  ) : auditEvents.slice(0, 120).map((event) => (
+                    <TableRow
+                      key={event.key}
+                      className={cn(
+                        'border-slate-100 hover:bg-blue-50/40 cursor-pointer',
+                        selectedEventKey === event.key && 'bg-blue-50/60',
+                        event.severity === 'ERROR' && 'bg-rose-50/30',
+                        event.severity === 'WARNING' && 'bg-amber-50/30',
+                      )}
+                      onClick={() => setSelectedEventKey(event.key)}
+                    >
+                      <TableCell className="font-mono text-xs text-slate-700">{formatTime(event.occurredAt)}</TableCell>
+                      <TableCell className="font-mono text-xs text-slate-700">{event.sourceSystem}</TableCell>
+                      <TableCell><ExecutionBadge state={event.severity === 'ERROR' ? 'FAILED' : event.severity === 'WARNING' ? 'SENT' : event.severity === 'SUCCESS' ? 'EXECUTED' : 'ACKNOWLEDGED'} /></TableCell>
+                      <TableCell className="font-mono text-xs text-slate-700">{String(event.correlationId ?? '').slice(0, 22)}</TableCell>
+                      <TableCell className="font-mono text-xs text-slate-700">{event.terminalId ?? ''}</TableCell>
+                      <TableCell className="text-xs text-slate-700">
+                        {event.eventType}
+                        <div className="mt-1 text-[11px] text-slate-500">{event.message}</div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          </CardContent>
+        </Card>
+
+        <div className="space-y-6">
+          <OpsPanel title="Incident Investigation Tools" icon={AlertTriangle}>
+            <div className="space-y-3">
+              {incidents.length === 0 ? (
+                <EmptyPanel title="No incidents" detail="Error/warning correlation IDs will appear here for fast investigation." />
+              ) : (
+                incidents.slice(0, 10).map((incident: any) => (
+                  <button
+                    key={String(incident.correlationId)}
+                    type="button"
+                    className="w-full text-left rounded-md border border-slate-200 bg-white p-3 hover:bg-slate-50"
+                    onClick={() => setSelectedCorrelationId(String(incident.correlationId))}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-xs font-semibold text-slate-900">{String(incident.correlationId)}</span>
+                      <ExecutionBadge state={Number(incident.errorCount ?? 0) ? 'FAILED' : 'SENT'} />
+                    </div>
+                    <div className="mt-2 text-xs text-slate-600">
+                      {Number(incident.errorCount ?? 0)} error • {Number(incident.warningCount ?? 0)} warn • last {formatTime(String(incident.lastSeenAt ?? ''))}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </OpsPanel>
+
+          <OpsPanel title="Broker Execution Diagnostics" icon={Server}>
+            <div className="space-y-2">
+              {brokerDiagnostics.length === 0 ? (
+                <EmptyPanel title="No broker diagnostics" detail="Broker-level breakdown appears when audit events have broker attribution." />
+              ) : (
+                brokerDiagnostics.slice(0, 8).map((row: any) => (
+                  <div key={String(row.brokerName)} className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-3">
+                    <div>
+                      <div className="text-xs font-semibold text-slate-900">{String(row.brokerName)}</div>
+                      <div className="mt-1 text-[11px] text-slate-500">{Number(row.total ?? 0)} total</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-mono text-xs text-rose-700">{Number(row.errors ?? 0)} err</div>
+                      <div className="font-mono text-xs text-amber-700">{Number(row.warnings ?? 0)} warn</div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </OpsPanel>
+
+          <OpsPanel title="Terminal Execution Diagnostics" icon={TerminalSquare}>
+            <div className="space-y-2">
+              {terminalDiagnostics.length === 0 ? (
+                <EmptyPanel title="No terminal diagnostics" detail="Terminal-level breakdown appears when audit events have terminal attribution." />
+              ) : (
+                terminalDiagnostics.slice(0, 8).map((row: any) => (
+                  <div key={String(row.terminalId)} className="flex items-center justify-between rounded-md border border-slate-200 bg-white p-3">
+                    <div>
+                      <div className="font-mono text-xs font-semibold text-slate-900">{String(row.terminalId)}</div>
+                      <div className="mt-1 text-[11px] text-slate-500">{Number(row.total ?? 0)} total</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-mono text-xs text-rose-700">{Number(row.errors ?? 0)} err</div>
+                      <div className="font-mono text-xs text-amber-700">{Number(row.warnings ?? 0)} warn</div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </OpsPanel>
+        </div>
+      </section>
+
+      <section className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+          <CardHeader className="border-b border-slate-200 py-4">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <ClipboardCheck className="w-4 h-4 text-indigo-700" /> Timeline View (Correlation ID)
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-4 space-y-3">
+            {!selectedCorrelationId ? (
+              <EmptyPanel title="No correlation selected" detail="Select an audit event to open its correlated execution timeline." />
+            ) : timelineError ? (
+              <div className="text-xs font-mono text-rose-700">{timelineError}</div>
+            ) : (
+              <div className="space-y-3">
+                <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="font-mono text-xs font-semibold text-slate-900">{selectedCorrelationId}</span>
+                    <ExecutionBadge state={auditIntegrity.state} />
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    {auditIntegrity.checks.map((check) => (
+                      <div key={check.label} className="flex items-center justify-between rounded-md border border-slate-200 bg-white px-3 py-2">
+                        <span className="text-[11px] text-slate-700">{check.label}</span>
+                        <span className={cn('font-mono text-[11px]', check.ok ? 'text-emerald-700' : 'text-rose-700')}>{check.ok ? 'OK' : 'MISS'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  {timelineRows.slice(0, 70).map((event) => (
+                    <div key={event.key} className="rounded-md border border-slate-200 bg-white p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <ExecutionBadge state={event.severity === 'ERROR' ? 'FAILED' : event.severity === 'WARNING' ? 'SENT' : event.severity === 'SUCCESS' ? 'EXECUTED' : 'ACKNOWLEDGED'} />
+                        <span className="font-mono text-[11px] text-slate-500">{formatTime(event.occurredAt)}</span>
+                      </div>
+                      <div className="mt-2 text-xs text-slate-800">{event.sourceSystem} • {event.eventType}</div>
+                      <div className="mt-1 text-[11px] text-slate-600">{event.message}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
+          <CardHeader className="border-b border-slate-200 py-4">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Database className="w-4 h-4 text-slate-700" /> Event Details / Payload
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-4 space-y-3">
+            {!selectedEvent ? (
+              <EmptyPanel title="Select an audit event" detail="Click any audit feed row to inspect fields and payload." />
+            ) : (
+              <div className="space-y-3">
+                <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-900">{selectedEvent.eventType}</span>
+                    <ExecutionBadge state={selectedEvent.severity === 'ERROR' ? 'FAILED' : selectedEvent.severity === 'WARNING' ? 'SENT' : selectedEvent.severity === 'SUCCESS' ? 'EXECUTED' : 'ACKNOWLEDGED'} />
+                  </div>
+                  <div className="mt-2 font-mono text-[11px] text-slate-600">
+                    {selectedEvent.sourceSystem} • {selectedEvent.correlationId ?? ''} • {selectedEvent.terminalId ?? ''} • {selectedEvent.environment ?? ''}
+                  </div>
+                </div>
+                <div className="rounded-md border border-slate-200 bg-white p-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-900">Payload</span>
+                    <span className="font-mono text-[11px] text-slate-500">{formatTime(selectedEvent.occurredAt)}</span>
+                  </div>
+                  <pre className="mt-3 max-h-[420px] overflow-auto rounded-md bg-slate-950 p-3 text-[11px] text-slate-100">
+{safePrettyJson(selectedEvent.payload)}
+                  </pre>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </section>
+
+      <section className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+        <ArchitectureCard title="Complete Audit Dashboard" lines={AUDIT_DASHBOARD_LINES} />
+        <ArchitectureCard title="Backend Audit Architecture" lines={AUDIT_BACKEND_LINES} />
+        <ArchitectureCard title="PostgreSQL Schema" lines={AUDIT_SCHEMA_LINES} />
+        <ArchitectureCard title="Event Model" lines={AUDIT_EVENT_MODEL_LINES} />
+        <ArchitectureCard title="Filtering System" lines={AUDIT_FILTER_LINES} />
+        <ArchitectureCard title="Export & Investigation" lines={AUDIT_WORKFLOW_LINES} />
+      </section>
+    </div>
+  );
+}
+
+const AUDIT_DASHBOARD_LINES = [
+  'Real-time audit feed tails execution, EA comms, and risk decisions into a unified stream',
+  'Timeline view reconstructs correlated events by correlationId (commandId / intentId)',
+  'Incident queue prioritizes error/warning correlation IDs with fast drill-down',
+  'Broker and terminal diagnostics aggregate severity distribution for investigation',
+];
+
+const AUDIT_BACKEND_LINES = [
+  'Audit events are append-only source tables: execution_command_events, ea_comm_events, risk_decisions',
+  'Unified read model is provided by a Postgres view (execution_audit_journal) and filtered APIs',
+  'SSE stream provides near-real-time updates without websocket infrastructure',
+  'Replay triggers controlled retry for correlated execution commands (local-only gate)',
+];
+
+const AUDIT_SCHEMA_LINES = [
+  'execution_command_events: { command_id, lifecycle_state, event_type, severity, payload, created_at }',
+  'ea_comm_events: { terminal_id, direction, channel, event_type, severity, payload, created_at }',
+  'risk_decisions: { account_number, intent_id, allowed, code, message, created_at }',
+  'execution_audit_journal view normalizes { source_system, occurred_at, severity, event_type, message, payload, correlation_id }',
+];
+
+const AUDIT_EVENT_MODEL_LINES = [
+  'correlationId: commandId (execution) or intentId (risk) or terminalId fallback (EA comm)',
+  'severity levels: DEBUG/INFO/SUCCESS/WARNING/ERROR mapped to operational outcomes',
+  'payload keeps raw event data for forensic inspection (slippage/spread/latency/ticket/errors)',
+  'timeline ordering: occurredAt ASC with stable per-source ordering by sourceId',
+];
+
+const AUDIT_FILTER_LINES = [
+  'Window filter (15m/1h/4h/24h) sets sinceTs cursor for state + stream',
+  'Filters: terminalId, brokerName, environment, sourceSystem, severity, query',
+  'Search targets: message, eventType, correlationId, terminal/account/broker',
+  'Export reuses server-side filters for consistent forensic snapshots',
+];
+
+const AUDIT_WORKFLOW_LINES = [
+  'Export logs as JSON or CSV for incident tickets and external analysis',
+  'Select an audit event -> open correlated timeline -> validate lifecycle integrity checks',
+  'Use broker/terminal diagnostics to isolate systemic issues (bridge failures, WebRequest blocks, timeouts)',
+  'Replay supports controlled retry by correlationId (command retry) for reproducibility',
+];
+
+const EA_COMM_FRONTEND_LINES = [
+  'EA Communication Engine renders live comm feed, terminal matrix, and diagnostics panels',
+  'Uses SSE stream for low-latency updates and periodic state snapshots for reconciliation',
+  'Supports per-terminal filtering, channel/severity filters, and payload inspection',
+  'Surfaces handshake/auth readiness, JSON validation, tick sync drift, and queue health',
+];
+
+const EA_COMM_BACKEND_LINES = [
+  'Comm ingestion runs on heartbeat, command poll, ack routes and persists events to Postgres',
+  'State endpoint composes terminal snapshots plus comm events plus bridge health',
+  'Event stream endpoint tails comm events for operational dashboards',
+  'Policies gate local-only admin tooling and redact sensitive secrets',
+];
+
+const EA_COMM_WS_LINES = [
+  'ea.comm.event { id, terminalId, direction, channel, eventType, severity, payload }',
+  'ea.comm.summary { windowMinutes, totals, breakdown }',
+  'ea.comm.terminal.status { terminalId, heartbeatAgeMs, latencyMs, version }',
+  'ea.comm.bridge.health { online, latencyMs, errors }',
+];
+
+const EA_COMM_EVENT_LINES = [
+  'INBOUND heartbeat -> validate -> persist -> forward-to-bridge -> record forward result',
+  'INBOUND command poll -> bridge lease -> persist delivery -> await ack',
+  'INBOUND ack -> validate -> persist -> update execution lifecycle -> forward-to-bridge',
+  'Diagnostics aggregate by severity, channel, and terminal to detect failures and reconnections',
+];
+
+const EA_COMM_SCHEMA_LINES = [
+  'HeartbeatPayload: terminalId, accountNumber, brokerName, serverName, lastTickTime, latencyMs, version',
+  'Command: commandId, terminalId, type, payload, createdAt, expiresAt',
+  'Ack: commandId, terminalId, status, ticket, brokerMessage, latencyMs, slippagePoints, spreadPoints',
+  'CommEvent: id, terminalId, direction, channel, eventType, severity, payload, createdAt',
+];
+
+const EA_COMM_RETRY_LINES = [
+  'Retry engine uses idempotent command IDs + dedupe keys to prevent duplicates',
+  'Command delivery retries are driven by lease timeout and max-attempts safeguards',
+  'Reconnection tracking is inferred from heartbeat continuity + bridge forward failures',
+  'Operators can isolate by terminal and inspect payloads to diagnose WebRequest blocks and JSON errors',
+];
+
+function safePrettyJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    return '{}';
+  }
 }
 
 const EXECUTION_ARCH_LINES = [
@@ -4376,36 +6665,237 @@ const EXECUTION_RECOVERY_LINES = [
   'Fault tolerance keeps execution state recoverable from command log plus ack stream',
 ];
 
+type CanonicalExecutionLifecycleState =
+  | 'QUEUED'
+  | 'ROUTING'
+  | 'SENT'
+  | 'ACKNOWLEDGED'
+  | 'EXECUTED'
+  | 'FAILED'
+  | 'TIMEOUT'
+  | 'CANCELLED';
+
+const CANONICAL_EXECUTION_LIFECYCLE = new Set<CanonicalExecutionLifecycleState>([
+  'QUEUED',
+  'ROUTING',
+  'SENT',
+  'ACKNOWLEDGED',
+  'EXECUTED',
+  'FAILED',
+  'TIMEOUT',
+  'CANCELLED',
+]);
+
+function isCanonicalLifecycleState(value: unknown): value is CanonicalExecutionLifecycleState {
+  return CANONICAL_EXECUTION_LIFECYCLE.has(value as CanonicalExecutionLifecycleState);
+}
+
+function mapBridgeStatusToLifecycle(status: unknown): CanonicalExecutionLifecycleState {
+  const normalized = String(status ?? '').toLowerCase();
+  if (normalized === 'queued') return 'QUEUED';
+  if (normalized === 'routing') return 'ROUTING';
+  if (normalized === 'leased' || normalized === 'sent') return 'SENT';
+  if (normalized === 'acknowledged') return 'ACKNOWLEDGED';
+  if (normalized === 'expired') return 'TIMEOUT';
+  if (normalized === 'dead') return 'FAILED';
+  if (normalized === 'cancelled' || normalized === 'canceled') return 'CANCELLED';
+  return 'QUEUED';
+}
+
+function mapAckStatusToLifecycle(status: unknown): CanonicalExecutionLifecycleState {
+  const normalized = String(status ?? '').toLowerCase();
+  if (normalized === 'filled' || normalized === 'executed') return 'EXECUTED';
+  if (normalized === 'failed') return 'FAILED';
+  if (normalized === 'rejected') return 'CANCELLED';
+  if (normalized === 'accepted' || normalized === 'acknowledged') return 'ACKNOWLEDGED';
+  if (normalized === 'sent') return 'SENT';
+  if (normalized === 'queued') return 'QUEUED';
+  return 'ACKNOWLEDGED';
+}
+
+function mergeExecutionCommandSources(bridgeCommands: any[], dbCommands: any[]): any[] {
+  const byId = new Map<string, any>();
+
+  for (const command of Array.isArray(bridgeCommands) ? bridgeCommands : []) {
+    const commandId = String(command?.commandId ?? '').trim();
+    if (!commandId) continue;
+    byId.set(commandId, { ...command, source: 'bridge' });
+  }
+
+  for (const record of Array.isArray(dbCommands) ? dbCommands : []) {
+    const commandId = String(record?.commandId ?? record?.command_id ?? '').trim();
+    if (!commandId) continue;
+    const mapped = {
+      commandId,
+      terminalId: String(record?.terminalId ?? record?.terminal_id ?? ''),
+      type: String(record?.type ?? ''),
+      payload: record?.payload ?? {},
+      createdAt: String(record?.createdAt ?? record?.created_at ?? ''),
+      expiresAt: String(record?.expiresAt ?? record?.expires_at ?? ''),
+      lifecycleState: String(record?.lifecycleState ?? record?.lifecycle_state ?? ''),
+      environment: String(record?.environment ?? 'DEMO'),
+      sandboxMode: Boolean(record?.sandboxMode ?? record?.sandbox_mode ?? false),
+      dedupeKey: record?.dedupeKey ?? record?.dedupe_key ?? null,
+      maxAttempts: Number(record?.maxAttempts ?? record?.max_attempts ?? 3),
+      attemptCount: Number(record?.attemptCount ?? record?.attempt_count ?? 0),
+      routedTerminalId: record?.routedTerminalId ?? record?.routed_terminal_id ?? null,
+      routedAt: record?.routedAt ?? record?.routed_at ?? null,
+      sentAt: record?.sentAt ?? record?.sent_at ?? null,
+      ackStatus: record?.ackStatus ?? record?.ack_status ?? null,
+      brokerMessage: record?.brokerMessage ?? record?.broker_message ?? null,
+      ticket: record?.ticket ?? null,
+      executedPrice: record?.executedPrice ?? record?.executed_price ?? null,
+      executedVolumeLots: record?.executedVolumeLots ?? record?.executed_volume_lots ?? null,
+      slippagePoints: record?.slippagePoints ?? record?.slippage_points ?? null,
+      spreadPoints: record?.spreadPoints ?? record?.spread_points ?? null,
+      symbol: record?.symbol ?? null,
+      side: record?.side ?? null,
+      lastError: record?.lastError ?? record?.last_error ?? null,
+      lastUpdatedAt: record?.lastUpdatedAt ?? record?.last_updated_at ?? null,
+      source: 'db',
+    };
+
+    const existing = byId.get(commandId);
+    if (!existing) {
+      byId.set(commandId, mapped);
+      continue;
+    }
+
+    byId.set(commandId, {
+      ...existing,
+      ...mapped,
+      ack: existing.ack ?? null,
+      leasedAt: existing.leasedAt ?? existing.lastDispatchedAt ?? null,
+      leasedUntil: existing.leasedUntil ?? null,
+      lastDispatchedAt: existing.lastDispatchedAt ?? null,
+      lastAckAt: existing.lastAckAt ?? null,
+    });
+  }
+
+  return Array.from(byId.values()).sort((a, b) => Date.parse(String(b.createdAt ?? '')) - Date.parse(String(a.createdAt ?? '')));
+}
+
+function mergeExecutionAckSources(recentAcks: any[], dbCommands: any[]): any[] {
+  const byId = new Map<string, any>();
+
+  for (const ack of Array.isArray(recentAcks) ? recentAcks : []) {
+    const commandId = String(ack?.commandId ?? '').trim();
+    if (!commandId) continue;
+    byId.set(commandId, { ...ack, source: 'bridge' });
+  }
+
+  for (const command of Array.isArray(dbCommands) ? dbCommands : []) {
+    const commandId = String(command?.commandId ?? '').trim();
+    if (!commandId) continue;
+    const ackStatus = command?.ackStatus ?? command?.ack_status ?? null;
+    if (!ackStatus && !['ACKNOWLEDGED', 'EXECUTED', 'FAILED', 'TIMEOUT', 'CANCELLED'].includes(String(command?.lifecycleState ?? ''))) continue;
+    if (byId.has(commandId)) continue;
+    const createdAt = String(command?.createdAt ?? '');
+    const sentAt = String(command?.sentAt ?? '');
+    const receivedAt = String(command?.lastUpdatedAt ?? command?.lastUpdatedAt ?? command?.last_updated_at ?? '');
+    const createdAtMs = Date.parse(createdAt);
+    const sentAtMs = Date.parse(sentAt);
+    const receivedAtMs = Date.parse(receivedAt);
+    const latencyMs =
+      Number.isFinite(receivedAtMs) && Number.isFinite(sentAtMs)
+        ? Math.max(0, receivedAtMs - sentAtMs)
+        : Number.isFinite(receivedAtMs) && Number.isFinite(createdAtMs)
+          ? Math.max(0, receivedAtMs - createdAtMs)
+          : 0;
+
+    byId.set(commandId, {
+      commandId,
+      terminalId: String(command?.terminalId ?? ''),
+      status: String(ackStatus ?? command?.lifecycleState ?? ''),
+      ticket: command?.ticket ?? null,
+      brokerMessage: command?.brokerMessage ?? null,
+      executedPrice: command?.executedPrice ?? null,
+      executedVolumeLots: command?.executedVolumeLots ?? null,
+      slippagePoints: command?.slippagePoints ?? null,
+      spreadPoints: command?.spreadPoints ?? null,
+      latencyMs,
+      receivedAt: receivedAt || new Date().toISOString(),
+      source: 'db',
+    });
+  }
+
+  return Array.from(byId.values()).sort((a, b) => Date.parse(String(b.receivedAt ?? '')) - Date.parse(String(a.receivedAt ?? '')));
+}
+
+function buildDbExecutionLogs(events: any[]) {
+  const rows = (Array.isArray(events) ? events : [])
+    .map((event) => {
+      const time = String(event?.createdAt ?? event?.created_at ?? '');
+      const lifecycleState = isCanonicalLifecycleState(event?.lifecycleState) ? event.lifecycleState : mapBridgeStatusToLifecycle(event?.lifecycleState);
+      const eventType = String(event?.eventType ?? event?.event_type ?? '').toUpperCase();
+      const message = String(event?.message ?? '');
+      const commandId = String(event?.commandId ?? '').trim();
+      return {
+        time: time || new Date().toISOString(),
+        state: lifecycleState,
+        message: `${eventType || 'EVENT'}${commandId ? ` ${commandId}` : ''}: ${message || 'Execution event'}`,
+      };
+    })
+    .sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
+
+  return rows.length ? rows : [{ time: new Date().toISOString(), state: 'QUEUED', message: 'Execution bridge standing by for validated commands' }];
+}
+
 function enrichExecutionCommand(command: any, terminals: any[], acknowledgements: any[]) {
   const terminal = terminals.find((item) => item.terminalId === command.terminalId);
   const ack = acknowledgements.find((item) => item.commandId === command.commandId) ?? command.ack;
   const createdAtMs = Date.parse(command.createdAt ?? '');
   const now = Date.now();
-  const dispatchLatencyMs = ack?.receivedAt && Number.isFinite(createdAtMs)
-    ? Math.max(0, Date.parse(ack.receivedAt) - createdAtMs)
-    : Number.isFinite(createdAtMs) ? Math.max(0, now - createdAtMs) : 0;
+  const sentAt = command.sentAt ?? command.lastDispatchedAt ?? command.leasedAt ?? '';
+  const sentAtMs = Date.parse(String(sentAt ?? ''));
+  const ackAt = ack?.receivedAt ?? command.lastAckAt ?? command.lastUpdatedAt ?? '';
+  const ackAtMs = Date.parse(String(ackAt ?? ''));
+  const dispatchLatencyMs =
+    Number.isFinite(sentAtMs) && Number.isFinite(createdAtMs)
+      ? Math.max(0, sentAtMs - createdAtMs)
+      : Number.isFinite(createdAtMs)
+        ? Math.max(0, now - createdAtMs)
+        : 0;
+  const ackLatencyMs =
+    Number.isFinite(ackAtMs) && Number.isFinite(sentAtMs)
+      ? Math.max(0, ackAtMs - sentAtMs)
+      : Number.isFinite(ackAtMs) && Number.isFinite(createdAtMs)
+        ? Math.max(0, ackAtMs - createdAtMs)
+        : 0;
+
   const duplicateRisk = command.commandId && acknowledgements.filter((item) => item.commandId === command.commandId).length > 1;
-  const expired = command.status === 'expired' || (command.expiresAt && Date.parse(command.expiresAt) < now && command.status !== 'acknowledged');
-  const lifecycleState = command.status === 'acknowledged'
-    ? 'ACKED'
-    : expired || command.status === 'dead'
-      ? 'FAILED'
-      : Number(command.attempt ?? 0) > 1 || command.status === 'leased'
-        ? 'RETRYING'
-        : 'QUEUED';
+  const expiresAt = command.expiresAt ? Date.parse(String(command.expiresAt)) : NaN;
+  const expired = command.status === 'expired' || (Number.isFinite(expiresAt) && expiresAt < now && !['acknowledged', 'cancelled', 'canceled'].includes(String(command.status ?? '').toLowerCase()));
+  const rawLifecycle = command.lifecycleState ?? command.lifecycle_state ?? null;
+  const ackStatus = ack?.status ?? command.ackStatus ?? command.ack_status ?? null;
+  const baseLifecycle = isCanonicalLifecycleState(rawLifecycle)
+    ? rawLifecycle
+    : ackStatus
+      ? mapAckStatusToLifecycle(ackStatus)
+      : mapBridgeStatusToLifecycle(command.status);
+  const lifecycleState: CanonicalExecutionLifecycleState = expired && ['QUEUED', 'ROUTING', 'SENT'].includes(baseLifecycle) ? 'TIMEOUT' : baseLifecycle;
+  const attempt = Number(command.attemptCount ?? command.attempt ?? 0);
+
   const integrityScore = clampScore(
     100
     - (duplicateRisk ? 35 : 0)
     - (expired ? 30 : 0)
-    - Math.min(25, Number(command.attempt ?? 0) * 5)
+    - Math.min(25, attempt * 5)
     - (terminal?.status === 'disconnected' ? 20 : 0),
   );
   const payload = command.payload ?? {};
   return {
     ...command,
-    symbol: payload.symbol ?? payload?.order?.symbol ?? '--',
+    environment: command.environment ?? 'DEMO',
+    sandboxMode: Boolean(command.sandboxMode ?? false),
+    dedupeKey: command.dedupeKey ?? null,
+    maxAttempts: Number(command.maxAttempts ?? 3),
+    attempt,
+    symbol: payload.symbol ?? command.symbol ?? payload?.order?.symbol ?? '--',
+    side: payload.side ?? command.side ?? payload?.order?.side ?? '--',
     lifecycleState,
     dispatchLatencyMs,
+    ackLatencyMs,
     duplicateRisk,
     expired,
     integrityScore,
@@ -4416,19 +6906,24 @@ function enrichExecutionAck(ack: any) {
   const latencyMs = Number(ack.latencyMs ?? 0);
   const brokerLatencyMs = Number(ack.brokerLatencyMs ?? Math.max(5, latencyMs + (hashCode(ack.commandId ?? ack.terminalId ?? 'ack') % 80)));
   const status = String(ack.status ?? '').toLowerCase();
+  const lifecycleState = mapAckStatusToLifecycle(status);
   return {
     ...ack,
     latencyMs,
     brokerLatencyMs,
-    executionState: status === 'accepted' || status === 'filled' || status === 'sent' ? 'ACKED' : status === 'rejected' || status === 'failed' ? 'FAILED' : 'RETRYING',
+    lifecycleState,
   };
 }
 
 function summarizeExecutionBridge(commands: any[], acknowledgements: any[], summary: any, connectedTerminals: number) {
-  const queued = Number(summary?.queued ?? commands.filter((command) => command.lifecycleState === 'QUEUED').length);
-  const inFlight = Number(summary?.leased ?? commands.filter((command) => command.lifecycleState === 'RETRYING').length);
+  const queued = Number(summary?.queued ?? commands.filter((command) => ['QUEUED', 'ROUTING'].includes(command.lifecycleState)).length);
+  const inFlight = Number(summary?.leased ?? commands.filter((command) => command.lifecycleState === 'SENT').length);
   const acked = Number(summary?.acknowledged ?? acknowledgements.length);
-  const retryPressure = Number(summary?.expired ?? 0) + Number(summary?.dead ?? 0) + commands.reduce((sum, command) => sum + Math.max(0, Number(command.attempt ?? 0) - 1), 0);
+  const retryPressure =
+    Number(summary?.expired ?? 0)
+    + Number(summary?.dead ?? 0)
+    + commands.filter((command) => ['FAILED', 'TIMEOUT'].includes(command.lifecycleState)).length
+    + commands.reduce((sum, command) => sum + Math.max(0, Number(command.attempt ?? 0) - 1), 0);
   const averageLatency = acknowledgements.length
     ? Math.round(acknowledgements.reduce((sum, ack) => sum + ack.latencyMs, 0) / acknowledgements.length)
     : commands.length ? Math.round(commands.reduce((sum, command) => sum + command.dispatchLatencyMs, 0) / commands.length) : 0;
@@ -4452,11 +6947,11 @@ function buildExecutionDiagnostics(terminals: any[], commands: any[], acknowledg
   const stale = commands.some((command) => command.expired);
   const avgAck = acknowledgements.length ? Math.round(acknowledgements.reduce((sum, ack) => sum + ack.latencyMs, 0) / acknowledgements.length) : 0;
   return [
-    { label: 'Bridge connectivity', state: connected ? 'ACKED' : 'FAILED', detail: `${connected} connected terminal(s) available for execution.` },
-    { label: 'Order validation', state: commands.some((command) => command.integrityScore < 70) ? 'RETRYING' : 'ACKED', detail: 'Volume, SL/TP, symbol, and terminal eligibility checks.' },
-    { label: 'Duplicate prevention', state: duplicate ? 'RETRYING' : 'ACKED', detail: duplicate ? 'Duplicate command signature detected.' : 'No duplicate command IDs detected.' },
-    { label: 'Broker response tracking', state: avgAck > 750 ? 'RETRYING' : 'ACKED', detail: avgAck ? `Average ack latency ${avgAck}ms.` : 'Awaiting broker acknowledgement telemetry.' },
-    { label: 'Lease expiration guard', state: stale ? 'FAILED' : 'ACKED', detail: stale ? 'One or more commands expired before acknowledgement.' : 'No stale execution leases detected.' },
+    { label: 'Bridge connectivity', state: connected ? 'ACKNOWLEDGED' : 'FAILED', detail: `${connected} connected terminal(s) available for execution.` },
+    { label: 'Order validation', state: commands.some((command) => command.integrityScore < 70) ? 'SENT' : 'ACKNOWLEDGED', detail: 'Volume, SL/TP, symbol, and terminal eligibility checks.' },
+    { label: 'Duplicate prevention', state: duplicate ? 'SENT' : 'ACKNOWLEDGED', detail: duplicate ? 'Duplicate command signature detected.' : 'No duplicate command IDs detected.' },
+    { label: 'Broker response tracking', state: avgAck > 750 ? 'SENT' : 'ACKNOWLEDGED', detail: avgAck ? `Average ack latency ${avgAck}ms.` : 'Awaiting broker acknowledgement telemetry.' },
+    { label: 'Timeout detection', state: stale ? 'TIMEOUT' : 'ACKNOWLEDGED', detail: stale ? 'One or more commands expired before acknowledgement.' : 'No stale execution leases detected.' },
   ];
 }
 
@@ -4465,7 +6960,7 @@ function buildExecutionFailover(terminals: any[]) {
   if (!terminals.length) return [{ terminalId: 'No terminals', state: 'FAILED', detail: 'Execution failover requires at least one connected terminal.' }];
   return terminals.slice(0, 6).map((terminal) => ({
     terminalId: terminal.terminalId,
-    state: terminal.status === 'connected' ? 'ACKED' : terminal.status === 'degraded' ? 'RETRYING' : 'FAILED',
+    state: terminal.status === 'connected' ? 'ACKNOWLEDGED' : terminal.status === 'degraded' ? 'SENT' : 'FAILED',
     detail: terminal.status === 'connected'
       ? `Eligible for failover. Stability ${terminal.stabilityScore ?? 0}% / latency ${terminal.latencyMs ?? 0}ms.`
       : connected.length ? `Not primary; route can fail over to ${connected[0].terminalId}.` : 'No healthy failover target available.',
@@ -4474,11 +6969,12 @@ function buildExecutionFailover(terminals: any[]) {
 
 function buildOrderLifecycle(commands: any[], acknowledgements: any[]) {
   const stages = [
-    { stage: 'Validated', count: commands.length },
     { stage: 'Queued', count: commands.filter((command) => command.lifecycleState === 'QUEUED').length },
-    { stage: 'Dispatched', count: commands.filter((command) => command.status === 'leased' || command.lifecycleState === 'RETRYING').length },
-    { stage: 'Acknowledged', count: acknowledgements.length },
-    { stage: 'Failed', count: commands.filter((command) => command.lifecycleState === 'FAILED').length },
+    { stage: 'Routing', count: commands.filter((command) => command.lifecycleState === 'ROUTING').length },
+    { stage: 'Sent', count: commands.filter((command) => command.lifecycleState === 'SENT').length },
+    { stage: 'Acknowledged', count: commands.filter((command) => command.lifecycleState === 'ACKNOWLEDGED').length },
+    { stage: 'Executed', count: commands.filter((command) => command.lifecycleState === 'EXECUTED').length },
+    { stage: 'Failed/Timeout', count: commands.filter((command) => command.lifecycleState === 'FAILED' || command.lifecycleState === 'TIMEOUT').length },
   ];
   const total = Math.max(1, Math.max(...stages.map((stage) => stage.count)));
   return stages.map((stage) => ({ ...stage, percent: Math.round((stage.count / total) * 100) }));
@@ -4487,13 +6983,13 @@ function buildOrderLifecycle(commands: any[], acknowledgements: any[]) {
 function buildExecutionLogs(commands: any[], acknowledgements: any[]) {
   const ackLogs = acknowledgements.map((ack) => ({
     time: ack.receivedAt,
-    state: ack.executionState,
+    state: ack.lifecycleState,
     message: `Ack ${ack.status} for ${ack.terminalId}${ack.ticket ? ` ticket ${ack.ticket}` : ''}`,
   }));
   const commandLogs = commands.map((command) => ({
     time: command.createdAt,
     state: command.lifecycleState,
-    message: `${command.type} ${command.symbol} queued for ${command.terminalId} attempt ${command.attempt ?? 0}`,
+    message: `${command.type} ${command.symbol} ${command.lifecycleState.toLowerCase()} for ${command.terminalId} attempt ${command.attempt ?? 0}`,
   }));
   const logs = [...ackLogs, ...commandLogs].sort((a, b) => Date.parse(b.time ?? '') - Date.parse(a.time ?? ''));
   return logs.length ? logs : [{ time: new Date().toISOString(), state: 'QUEUED', message: 'Execution bridge standing by for validated commands' }];
@@ -4502,25 +6998,30 @@ function buildExecutionLogs(commands: any[], acknowledgements: any[]) {
 function buildExecutionIntegrity(commands: any[], acknowledgements: any[]) {
   const duplicate = commands.filter((command) => command.duplicateRisk).length;
   const expired = commands.filter((command) => command.expired).length;
-  const rejected = acknowledgements.filter((ack) => ack.executionState === 'FAILED').length;
-  const unmatched = commands.filter((command) => command.status === 'acknowledged' && !acknowledgements.some((ack) => ack.commandId === command.commandId)).length;
+  const rejected = acknowledgements.filter((ack) => ['FAILED', 'CANCELLED', 'TIMEOUT'].includes(String(ack.lifecycleState))).length;
+  const unmatched = commands.filter((command) => ['ACKNOWLEDGED', 'EXECUTED'].includes(command.lifecycleState) && !acknowledgements.some((ack) => ack.commandId === command.commandId)).length;
   return [
-    { label: 'Duplicate guard', value: duplicate, state: duplicate ? 'RETRYING' : 'ACKED', detail: 'Prevents repeated command IDs and duplicate order intent signatures.' },
-    { label: 'Order validation', value: commands.filter((command) => command.integrityScore >= 80).length, state: commands.some((command) => command.integrityScore < 70) ? 'RETRYING' : 'ACKED', detail: 'Validates symbol, side, volume, SL/TP, expiry, and terminal state.' },
-    { label: 'Trade sync validation', value: unmatched, state: unmatched ? 'RETRYING' : 'ACKED', detail: 'Ensures acked commands reconcile to broker ticket or terminal order state.' },
-    { label: 'Execution failures', value: expired + rejected, state: expired + rejected ? 'FAILED' : 'ACKED', detail: 'Expired leases, rejected broker responses, and failed acknowledgements.' },
+    { label: 'Duplicate guard', value: duplicate, state: duplicate ? 'SENT' : 'ACKNOWLEDGED', detail: 'Prevents repeated command IDs and duplicate order intent signatures.' },
+    { label: 'Order validation', value: commands.filter((command) => command.integrityScore >= 80).length, state: commands.some((command) => command.integrityScore < 70) ? 'SENT' : 'ACKNOWLEDGED', detail: 'Validates symbol, side, volume, SL/TP, expiry, and terminal state.' },
+    { label: 'Order synchronization', value: unmatched, state: unmatched ? 'SENT' : 'ACKNOWLEDGED', detail: 'Ensures acked commands reconcile to broker ticket or terminal order state.' },
+    { label: 'Execution failures', value: expired + rejected, state: expired + rejected ? 'FAILED' : 'ACKNOWLEDGED', detail: 'Timeouts, rejected broker responses, and failed acknowledgements.' },
   ];
 }
 
 function ExecutionBadge({ state }: { state: string }) {
+  const normalized = isCanonicalLifecycleState(state) ? state : mapAckStatusToLifecycle(state);
   return (
     <span className={cn(
       'inline-flex whitespace-nowrap rounded-md border px-2 py-1 font-mono text-[10px] font-semibold uppercase',
-      state === 'ACKED' && 'border-emerald-200 bg-emerald-50 text-emerald-700',
-      state === 'QUEUED' && 'border-blue-200 bg-blue-50 text-blue-700',
-      state === 'RETRYING' && 'border-amber-200 bg-amber-50 text-amber-700',
-      state === 'FAILED' && 'border-rose-200 bg-rose-50 text-rose-700',
-    )}>{state}</span>
+      normalized === 'QUEUED' && 'border-blue-200 bg-blue-50 text-blue-700',
+      normalized === 'ROUTING' && 'border-indigo-200 bg-indigo-50 text-indigo-700',
+      normalized === 'SENT' && 'border-amber-200 bg-amber-50 text-amber-700',
+      normalized === 'ACKNOWLEDGED' && 'border-teal-200 bg-teal-50 text-teal-800',
+      normalized === 'EXECUTED' && 'border-emerald-200 bg-emerald-50 text-emerald-700',
+      normalized === 'FAILED' && 'border-rose-200 bg-rose-50 text-rose-700',
+      normalized === 'TIMEOUT' && 'border-rose-200 bg-rose-50 text-rose-700',
+      normalized === 'CANCELLED' && 'border-slate-200 bg-slate-50 text-slate-700',
+    )}>{normalized}</span>
   );
 }
 

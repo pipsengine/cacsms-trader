@@ -4,4 +4,3 @@ export default async function TerminalOperationsPage(props: { params: Promise<{ 
   const params = await props.params;
   return <TerminalOperationsClientPage page={params.page} />;
 }
-

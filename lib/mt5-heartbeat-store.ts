@@ -1,4 +1,5 @@
 import { queryPostgres } from '@/lib/postgres';
+import { appendEaCommEvent } from '@/lib/ea-communication-store';
 
 type HeartbeatPayload = Record<string, unknown>;
 
@@ -106,6 +107,21 @@ export async function recordTerminalHeartbeat(payload: HeartbeatPayload) {
 
   if (!terminalId) throw new Error('terminalId is required.');
   if (!accountNumber) throw new Error('accountNumber is required.');
+
+  const previousTerminal = await queryPostgres(
+    `SELECT connection_status, last_heartbeat_at, version FROM mt5_terminals WHERE terminal_id = $1`,
+    [terminalId],
+  );
+  const previousHeartbeat = await queryPostgres(
+    `SELECT sequence, received_at FROM mt5_heartbeats WHERE terminal_id = $1 ORDER BY received_at DESC LIMIT 1`,
+    [terminalId],
+  );
+  const prevTerminalRow = previousTerminal.rows[0] as any;
+  const prevHeartbeatRow = previousHeartbeat.rows[0] as any;
+  const prevStatus = prevTerminalRow?.connection_status ? String(prevTerminalRow.connection_status) : '';
+  const prevHeartbeatAt = prevTerminalRow?.last_heartbeat_at ? new Date(prevTerminalRow.last_heartbeat_at).toISOString() : '';
+  const prevVersion = prevTerminalRow?.version ? String(prevTerminalRow.version) : '';
+  const prevSequence = prevHeartbeatRow?.sequence == null ? null : Number(prevHeartbeatRow.sequence);
 
   await queryPostgres(
     `
@@ -242,6 +258,63 @@ export async function recordTerminalHeartbeat(payload: HeartbeatPayload) {
       payload,
     ],
   );
+  await queryPostgres(
+    `
+      UPDATE mt5_terminal_registrations
+      SET approval_status = 'approved',
+          updated_at = now()
+      WHERE terminal_id = $1
+        AND account_number = $2
+        AND approval_status = 'pending_heartbeat'
+    `,
+    [terminalId, accountNumber],
+  );
+
+  const gapMs = prevHeartbeatAt ? Math.max(0, Date.parse(receivedAt) - Date.parse(prevHeartbeatAt)) : 0;
+  if (gapMs >= 60_000 && prevHeartbeatAt) {
+    await appendEaCommEvent({
+      terminalId,
+      direction: 'INBOUND',
+      channel: 'HEARTBEAT',
+      eventType: 'HEARTBEAT_GAP',
+      severity: 'WARNING',
+      message: `Heartbeat gap detected (${Math.round(gapMs / 1000)}s).`,
+      payload: { prevHeartbeatAt, receivedAt, gapMs },
+    }).catch(() => null);
+  }
+  if (prevStatus && prevStatus !== status) {
+    await appendEaCommEvent({
+      terminalId,
+      direction: 'INBOUND',
+      channel: 'HANDSHAKE',
+      eventType: status === 'connected' ? 'RECONNECTED' : 'CONNECTION_STATE_CHANGED',
+      severity: status === 'connected' ? 'SUCCESS' : status === 'degraded' ? 'WARNING' : 'ERROR',
+      message: `Connection state ${prevStatus} -> ${status}.`,
+      payload: { prevStatus, status, receivedAt },
+    }).catch(() => null);
+  }
+  if (prevVersion && prevVersion !== version) {
+    await appendEaCommEvent({
+      terminalId,
+      direction: 'INBOUND',
+      channel: 'HANDSHAKE',
+      eventType: 'EA_VERSION_CHANGED',
+      severity: 'INFO',
+      message: `EA version changed ${prevVersion} -> ${version}.`,
+      payload: { prevVersion, version, receivedAt },
+    }).catch(() => null);
+  }
+  if (prevSequence != null && Number.isFinite(prevSequence) && sequence < prevSequence) {
+    await appendEaCommEvent({
+      terminalId,
+      direction: 'INBOUND',
+      channel: 'HEARTBEAT',
+      eventType: 'SEQUENCE_RESET',
+      severity: 'WARNING',
+      message: `Heartbeat sequence reset ${prevSequence} -> ${sequence}.`,
+      payload: { prevSequence, sequence, receivedAt },
+    }).catch(() => null);
+  }
 
   const terminal = await getTerminalSnapshot(terminalId);
   return terminal;
@@ -286,6 +359,7 @@ export async function listTerminalSnapshots() {
       WHERE terminal_id = t.terminal_id
         AND received_at > now() - interval '1 hour'
     ) stats ON true
+    WHERE t.terminal_id NOT LIKE 'TEST-%'
     ORDER BY t.last_heartbeat_at DESC
   `);
 
@@ -293,6 +367,7 @@ export async function listTerminalSnapshots() {
 }
 
 export async function getTerminalSnapshot(terminalId: string) {
+  if (String(terminalId).startsWith('TEST-')) return null;
   const result = await queryPostgres(
     `
       SELECT
@@ -342,6 +417,7 @@ export async function getTerminalSnapshot(terminalId: string) {
 }
 
 export async function getTerminalHeartbeatHistory(terminalId: string, limit = 100) {
+  if (String(terminalId).startsWith('TEST-')) return [];
   const result = await queryPostgres(
     `
       SELECT
@@ -366,6 +442,17 @@ export async function getTerminalHeartbeatHistory(terminalId: string, limit = 10
   );
 
   return result.rows.map((row) => mapHistory(row as HeartbeatRow)).reverse();
+}
+
+export async function purgeTestTerminals(): Promise<number> {
+  const result = await queryPostgres(
+    `
+      DELETE FROM mt5_terminals
+      WHERE terminal_id LIKE 'TEST-%'
+      RETURNING terminal_id
+    `,
+  );
+  return result.rows.length;
 }
 
 function mapTerminal(row: TerminalRow) {
