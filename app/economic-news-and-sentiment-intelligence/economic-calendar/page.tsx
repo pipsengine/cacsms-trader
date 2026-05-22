@@ -37,7 +37,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 
 type Impact = 'Low' | 'Medium' | 'High' | 'Critical';
-type Status = 'UPCOMING' | 'SCHEDULED' | 'PRE_MONITORING' | 'WATCHING' | 'RELEASED' | 'ANALYZED' | 'ARCHIVED' | 'FAILED' | 'CONFLICTED';
+type Status = 'UPCOMING' | 'SCHEDULED' | 'PRE_MONITORING' | 'WATCHING' | 'RELEASED' | 'ANALYZED' | 'ARCHIVED' | 'FAILED' | 'CONFLICTED' | 'SOURCE_CONFLICT';
 type Bias = 'Strong Bullish' | 'Mild Bullish' | 'Neutral' | 'Mild Bearish' | 'Strong Bearish' | 'Conflicted' | 'Not Enough Data';
 type Tone = 'emerald' | 'amber' | 'rose' | 'cyan' | 'violet' | 'slate';
 
@@ -59,6 +59,12 @@ type EconomicEvent = {
   utcEventTime: string | null;
   brokerEventTime: string | null;
   actualValue: string | null;
+  actualSource: string | null;
+  actualCaptureStatus: string | null;
+  actualCapturedAt: string | null;
+  websiteActualValue: string | null;
+  xmlActualValue: string | null;
+  sourcePriorityUsed: string | null;
   forecastValue: string | null;
   previousValue: string | null;
   revisedPreviousValue: string | null;
@@ -147,14 +153,17 @@ const emptyDashboard: DashboardPayload = {
 const monitoredCurrencies = ['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'JPY', 'NZD', 'USD'];
 const currencies = ['All', ...monitoredCurrencies];
 const impacts = ['All', 'Low', 'Medium', 'High', 'Critical'];
-const statuses = ['All', 'UPCOMING', 'SCHEDULED', 'PRE_MONITORING', 'WATCHING', 'RELEASED', 'ANALYZED', 'ARCHIVED', 'FAILED', 'CONFLICTED'];
+const statuses = ['All', 'UPCOMING', 'SCHEDULED', 'PRE_MONITORING', 'WATCHING', 'RELEASED', 'ANALYZED', 'ARCHIVED', 'FAILED', 'SOURCE_CONFLICT', 'CONFLICTED'];
 const biases = ['All', 'Strong Bullish', 'Mild Bullish', 'Neutral', 'Mild Bearish', 'Strong Bearish', 'Conflicted', 'Not Enough Data'];
 const dateRanges = ['All', 'Today', 'Tomorrow', 'This Week', 'Next Week'];
 
 const actions = [
-  { label: 'Refresh Calendar', endpoint: '/api/economic-calendar/refresh', icon: RefreshCw },
+  { label: 'Run Hybrid Sync', endpoint: '/api/economic-calendar/forex-factory/hybrid-sync', icon: RefreshCw },
+  { label: 'Run XML Sync', endpoint: '/api/economic-calendar/forex-factory/xml-sync', icon: ListChecks },
+  { label: 'Run Website Browser Sync', endpoint: '/api/economic-calendar/forex-factory/browser-sync', icon: Eye },
+  { label: 'Browser Actual Sync', endpoint: '/api/economic-calendar/forex-factory/browser-actual-sync', icon: CheckCircle2 },
   { label: 'Discover Upcoming Events', endpoint: '/api/economic-calendar/discover', icon: Search },
-  { label: 'Validate Sources', endpoint: '/api/economic-calendar/sources/validate', icon: ListChecks },
+  { label: 'Refresh Calendar', endpoint: '/api/economic-calendar/refresh', icon: RefreshCw },
   { label: 'Start Monitoring', endpoint: '/api/economic-calendar/monitor/start', icon: Play },
   { label: 'Stop Monitoring', endpoint: '/api/economic-calendar/monitor/stop', icon: Square },
   { label: 'Retry Failed Events', endpoint: '/api/economic-calendar/failed/retry', icon: RotateCcw },
@@ -179,6 +188,8 @@ export default function EconomicCalendarIntelligencePage() {
   const [bias, setBias] = useState('All');
   const [restrictionOnly, setRestrictionOnly] = useState(false);
   const [selectedEventId, setSelectedEventId] = useState('');
+  const [activeTab, setActiveTab] = useState('table');
+  const [comparisonOpen, setComparisonOpen] = useState(false);
 
   const loadDashboard = async () => {
     setLoading(true);
@@ -251,6 +262,18 @@ export default function EconomicCalendarIntelligencePage() {
       await loadDashboard();
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : `${label} failed.`);
+    }
+  };
+
+  const captureActual = async (eventId: string) => {
+    setActionMessage('Fetching actual from website...');
+    try {
+      const response = await fetch(`/api/economic-calendar/events/${encodeURIComponent(eventId)}/capture-actual`, { method: 'POST' });
+      const payload = (await response.json()) as { ok: boolean; message?: string };
+      setActionMessage(payload.message || (payload.ok ? 'Captured.' : 'Capture failed.'));
+      await loadDashboard();
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : 'Capture failed.');
     }
   };
 
@@ -336,6 +359,12 @@ export default function EconomicCalendarIntelligencePage() {
                   <button type="button" className="flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" onClick={() => exportJson('economic-history', dashboard)}>
                     <History className="h-4 w-4" /> Export History
                   </button>
+                  <button type="button" className="flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" onClick={() => setActiveTab('conflict')}>
+                    <ShieldAlert className="h-4 w-4" /> View Conflicts
+                  </button>
+                  <button type="button" className="flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" onClick={() => setActiveTab('source')}>
+                    <Database className="h-4 w-4" /> View Sources
+                  </button>
                 </div>
               </Panel>
 
@@ -369,7 +398,7 @@ export default function EconomicCalendarIntelligencePage() {
               </label>
             </Panel>
 
-            <Tabs defaultValue="table" className="rounded-lg border border-slate-200 bg-white">
+            <Tabs value={activeTab} onValueChange={setActiveTab} className="rounded-lg border border-slate-200 bg-white">
               <div className="flex flex-col gap-3 border-b border-slate-200 p-4 xl:flex-row xl:items-center xl:justify-between">
                 <div>
                   <h2 className="text-sm font-semibold text-slate-950">Economic Event Intelligence Views</h2>
@@ -388,7 +417,7 @@ export default function EconomicCalendarIntelligencePage() {
               </div>
               <CardContent className="p-0">
                 <TabsContent value="table" className="m-0">
-                  <EventTable events={filteredEvents} loading={loading} selectedId={selectedEvent?.id ?? ''} onSelect={setSelectedEventId} />
+                  <EventTable events={filteredEvents} loading={loading} selectedId={selectedEvent?.id ?? ''} onSelect={setSelectedEventId} onCaptureActual={captureActual} />
                 </TabsContent>
                 <TabsContent value="timeline" className="m-0 p-4">
                   <TimelineView events={filteredEvents} onSelect={setSelectedEventId} />
@@ -415,7 +444,7 @@ export default function EconomicCalendarIntelligencePage() {
             </Tabs>
 
             <section className="grid grid-cols-1 gap-4 xl:grid-cols-[0.95fr_1.05fr]">
-              <EventDetailPanel event={selectedEvent} />
+              <EventDetailPanel event={selectedEvent} onOpenComparison={() => setComparisonOpen(true)} />
               <div className="grid gap-4">
                 <SourceLogsPanel logs={dashboard.sourceLogs} providerStatuses={dashboard.providerStatuses} />
                 <SettingsPanel />
@@ -424,16 +453,18 @@ export default function EconomicCalendarIntelligencePage() {
           </main>
         </div>
       </div>
+      <SourceComparisonModal open={comparisonOpen} onClose={() => setComparisonOpen(false)} event={selectedEvent} />
     </div>
   );
 }
 
-function EventTable(props: { events: EconomicEvent[]; loading: boolean; selectedId: string; onSelect: (id: string) => void }) {
+function EventTable(props: { events: EconomicEvent[]; loading: boolean; selectedId: string; onSelect: (id: string) => void; onCaptureActual: (id: string) => Promise<void> }) {
   return (
-    <Table>
+    <div className="w-full overflow-x-auto">
+      <Table>
       <TableHeader className="bg-slate-50">
         <TableRow className="hover:bg-transparent">
-          {['Date', 'Time', 'Local Time', 'Currency', 'Country', 'Event Name', 'Impact', 'Actual', 'Forecast', 'Previous', 'Surprise', 'Bias', 'Status', 'Source', 'Reliability', 'Trade Restriction', 'Last Checked', 'Actions'].map((column) => (
+          {['Date', 'Time', 'Local Time', 'Currency', 'Country', 'Event Name', 'Impact', 'Actual', 'Actual Source', 'Capture', 'Forecast', 'Previous', 'Surprise', 'Bias', 'Status', 'Data Source', 'Reliability', 'Trade Restriction', 'Last Checked', 'Actions'].map((column) => (
             <TableHead key={column} className="whitespace-nowrap px-3 py-3 text-[11px] uppercase tracking-wider text-slate-500">{column}</TableHead>
           ))}
         </TableRow>
@@ -454,28 +485,58 @@ function EventTable(props: { events: EconomicEvent[]; loading: boolean; selected
             <TableCell className="px-3 text-xs text-slate-700">{event.country}</TableCell>
             <TableCell className="min-w-[260px] px-3">
               <div className="text-sm font-semibold text-slate-950">{event.eventName}</div>
+              <div className="mt-1 flex flex-wrap gap-1">
+                <SourceIndicators event={event} />
+              </div>
               <div className="text-xs text-slate-500">{event.normalizedEventName}</div>
             </TableCell>
             <TableCell className="px-3"><ImpactBadge impact={event.impactLevel} /></TableCell>
-            <TableCell className="px-3 font-mono text-xs">{event.actualValue ?? valueState(event.status)}</TableCell>
+            <TableCell className="px-3 font-mono text-xs">
+              {actualDisplayValue(event)}
+            </TableCell>
+            <TableCell className="px-3 text-xs"><Badge className="border border-slate-200 bg-slate-50 text-slate-700">{event.actualSource ?? 'NONE'}</Badge></TableCell>
+            <TableCell className="px-3 text-xs"><Badge className="border border-slate-200 bg-slate-50 text-slate-700">{event.actualCaptureStatus ?? 'PENDING'}</Badge></TableCell>
             <TableCell className="px-3 font-mono text-xs">{event.forecastValue ?? '--'}</TableCell>
             <TableCell className="px-3 font-mono text-xs">{event.revisedPreviousValue ?? event.previousValue ?? '--'}</TableCell>
             <TableCell className="px-3 font-mono text-xs">{event.surprisePercentage == null ? 'Pending' : `${event.surprisePercentage}%`}</TableCell>
             <TableCell className="px-3"><BiasBadge bias={event.bias} /></TableCell>
             <TableCell className="px-3"><StatusBadge status={event.status} /></TableCell>
-            <TableCell className="px-3 text-xs">{event.sourceName}</TableCell>
+            <TableCell className="px-3 text-xs">{event.sourcePriorityUsed ?? (String(event.validationStatus ?? '').toUpperCase().includes('WEBSITE') ? 'WEBSITE' : 'XML')}</TableCell>
             <TableCell className="px-3 font-mono text-xs">{event.sourceReliabilityScore}/100</TableCell>
             <TableCell className="px-3">{event.tradeRestrictionRequired ? <Badge className="bg-rose-50 text-rose-700 border border-rose-200">Restricted</Badge> : <Badge className="bg-slate-50 text-slate-600 border border-slate-200">None</Badge>}</TableCell>
             <TableCell className="px-3 font-mono text-xs">{formatDateTime(event.lastCheckedAt)}</TableCell>
-            <TableCell className="px-3"><button className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700">Open</button></TableCell>
+            <TableCell className="px-3">
+              <button
+                type="button"
+                className="mr-2 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 disabled:opacity-50"
+                disabled={Boolean(event.actualValue) || !String(event.validationStatus ?? '').toUpperCase().includes('WEBSITE')}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  await props.onCaptureActual(event.id);
+                }}
+              >
+                Fetch Actual
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (event.sourceUrl) window.open(event.sourceUrl, '_blank', 'noopener,noreferrer');
+                }}
+              >
+                Open
+              </button>
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>
-    </Table>
+      </Table>
+    </div>
   );
 }
 
-function EventDetailPanel({ event }: { event: EconomicEvent | null }) {
+function EventDetailPanel({ event, onOpenComparison }: { event: EconomicEvent | null; onOpenComparison: () => void }) {
   return (
     <Panel title="Event Detail Drawer" icon={Eye}>
       {!event ? (
@@ -504,6 +565,11 @@ function EventDetailPanel({ event }: { event: EconomicEvent | null }) {
             <Info label="Reliability" value={`${event.sourceReliabilityScore}/100`} />
           </div>
           <Info label="Source URL" value={event.sourceUrl ?? 'No source URL recorded'} />
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" onClick={onOpenComparison}>
+              Compare Sources
+            </button>
+          </div>
           <Info label="Affected Pairs" value={event.affectedPairs.length ? event.affectedPairs.join(', ') : 'No affected pairs computed yet'} />
           <Info label="Trading Risk Instruction" value={tradeInstruction(event)} />
           <Info label="AI Interpretation" value={event.aiSummary ?? 'AI can interpret only after actual value is collected or manually confirmed.'} />
@@ -514,6 +580,98 @@ function EventDetailPanel({ event }: { event: EconomicEvent | null }) {
         </div>
       )}
     </Panel>
+  );
+}
+
+function SourceIndicators({ event }: { event: EconomicEvent }) {
+  const tags: Array<{ label: string; cls: string }> = [];
+  const validation = String(event.validationStatus ?? '').toUpperCase();
+  if (validation.includes('PROVISIONAL') || validation.includes('XML')) tags.push({ label: 'XML', cls: 'border-slate-200 bg-slate-50 text-slate-700' });
+  if (validation.includes('WEBSITE')) tags.push({ label: 'WEB', cls: 'border-indigo-200 bg-indigo-50 text-indigo-700' });
+  if (validation.includes('PREFERRED')) tags.push({ label: 'WEB PREFERRED', cls: 'border-emerald-200 bg-emerald-50 text-emerald-700' });
+  const conflict = String(event.conflictStatus ?? '').toUpperCase();
+  if (event.status === 'SOURCE_CONFLICT' || conflict.includes('CONFLICT')) tags.push({ label: 'CONFLICT', cls: 'border-rose-200 bg-rose-50 text-rose-700' });
+  if (!event.actualValue && (event.status === 'WATCHING' || event.status === 'PRE_MONITORING')) tags.push({ label: 'ACTUAL PENDING', cls: 'border-amber-200 bg-amber-50 text-amber-700' });
+  if (event.actualValue) tags.push({ label: 'ACTUAL CAPTURED', cls: 'border-emerald-200 bg-emerald-50 text-emerald-700' });
+  if (event.status === 'ANALYZED') tags.push({ label: 'ANALYZED', cls: 'border-emerald-200 bg-emerald-50 text-emerald-700' });
+  if (event.status === 'ARCHIVED') tags.push({ label: 'ARCHIVED', cls: 'border-slate-200 bg-slate-50 text-slate-700' });
+  return tags.length ? tags.map((tag) => <Badge key={tag.label} className={cn('rounded-md border px-2 py-0.5 text-[10px] font-mono', tag.cls)}>{tag.label}</Badge>) : null;
+}
+
+function SourceComparisonModal(props: { open: boolean; onClose: () => void; event: EconomicEvent | null }) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [snapshots, setSnapshots] = useState<Array<{ id: string; source_name: string; raw_payload: unknown; captured_at: string }>>([]);
+  const [conflicts, setConflicts] = useState<Array<{ id: string; conflict_type: string; field_name: string; source_a: string; value_a: string | null; source_b: string; value_b: string | null; created_at: string }>>([]);
+
+  useEffect(() => {
+    if (!props.open || !props.event?.id) return;
+    let cancelled = false;
+    setLoading(true);
+    setError('');
+    fetch(`/api/economic-calendar/event-sources?eventId=${encodeURIComponent(props.event.id)}`, { cache: 'no-store' })
+      .then(async (res) => {
+        const body = await res.json();
+        if (!res.ok) throw new Error(body?.error ?? `HTTP ${res.status}`);
+        if (cancelled) return;
+        setSnapshots(body.snapshots ?? []);
+        setConflicts(body.conflicts ?? []);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : 'Failed to load sources.');
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [props.event?.id, props.open]);
+
+  if (!props.open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4" onClick={props.onClose}>
+      <div className="w-full max-w-4xl rounded-lg border border-slate-200 bg-white shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+          <div className="text-sm font-semibold text-slate-950">Source Comparison</div>
+          <button type="button" className="rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-50" onClick={props.onClose}>Close</button>
+        </div>
+        <div className="space-y-4 p-4">
+          {loading ? <div className="text-sm text-slate-600">Loading...</div> : null}
+          {error ? <AlertBanner tone="rose" icon={AlertTriangle}>{error}</AlertBanner> : null}
+          {!loading && !error ? (
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <div className="space-y-2">
+                <div className="text-xs font-mono uppercase tracking-wider text-slate-500">Snapshots</div>
+                {snapshots.length ? snapshots.map((snap) => (
+                  <div key={snap.id} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-sm font-semibold text-slate-900">{snap.source_name}</div>
+                      <div className="text-[11px] font-mono text-slate-500">{snap.captured_at}</div>
+                    </div>
+                    <pre className="mt-2 max-h-48 overflow-auto rounded bg-white p-2 text-[11px] text-slate-700">{JSON.stringify(snap.raw_payload, null, 2)}</pre>
+                  </div>
+                )) : <EmptyState text="No source snapshots stored yet. Run XML Sync or Website Browser Sync." />}
+              </div>
+              <div className="space-y-2">
+                <div className="text-xs font-mono uppercase tracking-wider text-slate-500">Conflicts</div>
+                {conflicts.length ? conflicts.map((conflict) => (
+                  <div key={conflict.id} className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
+                    <div className="font-semibold">{conflict.field_name}</div>
+                    <div className="mt-1 text-xs">{conflict.source_a}: {conflict.value_a ?? '--'}</div>
+                    <div className="text-xs">{conflict.source_b}: {conflict.value_b ?? '--'}</div>
+                    <div className="mt-1 text-[11px] font-mono text-rose-700">{conflict.created_at}</div>
+                  </div>
+                )) : <EmptyState text="No conflicts recorded for this event." />}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -735,7 +893,7 @@ function ImpactBadge({ impact }: { impact: Impact }) {
 }
 
 function StatusBadge({ status }: { status: Status }) {
-  const cls = status === 'FAILED' || status === 'CONFLICTED' ? 'border-rose-200 bg-rose-50 text-rose-700'
+  const cls = status === 'FAILED' || status === 'CONFLICTED' || status === 'SOURCE_CONFLICT' ? 'border-rose-200 bg-rose-50 text-rose-700'
     : status === 'ANALYZED' || status === 'ARCHIVED' ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
       : status === 'WATCHING' || status === 'PRE_MONITORING' ? 'border-violet-200 bg-violet-50 text-violet-700'
         : 'border-slate-200 bg-slate-50 text-slate-600';
@@ -803,15 +961,21 @@ function sessionForEvent(event: EconomicEvent): string {
 }
 
 function valueState(status: Status): string {
-  if (status === 'RELEASED' || status === 'ANALYZED' || status === 'ARCHIVED') return 'Source Not Updated';
-  if (status === 'WATCHING') return 'Awaiting Confirmation';
-  return 'Not Released';
+  if (status === 'UPCOMING' || status === 'SCHEDULED' || status === 'PRE_MONITORING' || status === 'WATCHING') return 'Pending';
+  return 'Not Available';
 }
 
 function tradeInstruction(event: EconomicEvent): string {
-  if (event.conflictStatus !== 'NONE' || event.status === 'CONFLICTED') return 'Conflict protection active. Do not grant automatic trade permission.';
+  if (event.conflictStatus !== 'NONE' || event.status === 'CONFLICTED' || event.status === 'SOURCE_CONFLICT') return 'Conflict protection active. Do not grant automatic trade permission.';
   if (!event.tradeRestrictionRequired) return 'No automatic restriction recorded for this event.';
   return `Restrict new trades from ${formatDateTime(event.restrictionStartTime)} to ${formatDateTime(event.restrictionEndTime)}. Allow trading only after spread and volatility normalize.`;
+}
+
+function actualDisplayValue(event: EconomicEvent): string {
+  if (event.actualValue) return event.actualValue;
+  if (String(event.actualCaptureStatus ?? '').toUpperCase() === 'FAILED') return 'Failed';
+  if (event.status === 'UPCOMING' || event.status === 'SCHEDULED' || event.status === 'PRE_MONITORING' || event.status === 'WATCHING') return 'Pending';
+  return 'Not Available';
 }
 
 function buildDailySummary(dashboard: DashboardPayload): string {

@@ -5155,6 +5155,38 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
     return Array.from(buckets.values()).sort((a, b) => b.count - a.count).slice(0, 8);
   }, [commandRows]);
 
+  const auditEvents = useMemo(() => (dbState.events.length ? [...dbState.events].slice(-80).reverse() : []), [dbState.events]);
+  const auditEventKeys = useMemo(() => {
+    const seen = new Map<string, number>();
+    return auditEvents.map((event: any) => {
+      const explicitKey = String(event?.key ?? '').trim();
+      const terminalId = String(event?.terminalId ?? event?.terminal_id ?? '').trim();
+      const eventType = String(event?.eventType ?? event?.event_type ?? '').trim();
+      const lifecycleState = String(event?.lifecycleState ?? '').trim();
+      const commandId = String(event?.commandId ?? '').trim();
+      const createdAt = String(event?.createdAt ?? event?.created_at ?? '').trim();
+      const id = String(event?.id ?? '').trim();
+      const message = String(event?.message ?? '');
+      const messagePart = message.length > 160 ? message.slice(0, 160) : message;
+      const base =
+        explicitKey
+        || [
+          'exec',
+          terminalId || 'no-terminal',
+          commandId || 'no-command',
+          eventType || 'no-type',
+          lifecycleState || 'no-state',
+          createdAt || 'no-time',
+          id || 'no-id',
+          messagePart || 'no-message',
+        ].join('|');
+
+      const next = (seen.get(base) ?? 0) + 1;
+      seen.set(base, next);
+      return next === 1 ? base : `${base}#${next}`;
+    });
+  }, [auditEvents]);
+
   const onRetry = async (commandId: string) => {
     setActions({ status: 'submitting', message: '' });
     try {
@@ -5655,8 +5687,8 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
         <OpsPanel title="Execution Audit Logs" icon={Database}>
           <ScrollArea className="h-[420px]">
             <div className="space-y-2 pr-3">
-              {(dbState.events.length ? [...dbState.events].slice(-80).reverse() : []).map((event: any) => (
-                <div key={String(event.id ?? `${event.createdAt}-${event.message}`)} className="rounded-md border border-slate-200 bg-white p-3">
+              {auditEvents.map((event: any, index: number) => (
+                <div key={auditEventKeys[index]} className="rounded-md border border-slate-200 bg-white p-3">
                   <div className="flex items-center justify-between gap-3">
                     <ExecutionBadge state={String(event.lifecycleState ?? 'QUEUED')} />
                     <span className="font-mono text-[11px] text-slate-500">{formatTime(String(event.createdAt ?? ''))}</span>
