@@ -1,4 +1,6 @@
 import { queryPostgres } from '@/lib/postgres';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 export type EconomicImpactLevel = 'Low' | 'Medium' | 'High' | 'Critical';
 export type EconomicEventStatus =
@@ -142,6 +144,12 @@ type CollectedEconomicEvent = {
 };
 
 const tableMissingCodes = new Set(['42P01', '42703']);
+const REQUIRED_CURRENCIES = ['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'JPY', 'NZD', 'USD'] as const;
+const requiredCurrencySet = new Set<string>(REQUIRED_CURRENCIES);
+const forexFactoryCalendarUrl = 'https://www.forexfactory.com/calendar?week=this';
+const forexFactoryXmlUrl = 'https://nfs.faireconomy.media/ff_calendar_thisweek.xml';
+const browserUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36';
+const execFileAsync = promisify(execFile);
 
 export class EconomicCalendarIntelligenceService {
   async getDashboard(): Promise<EconomicCalendarDashboard> {
@@ -251,7 +259,7 @@ export class EconomicCalendarIntelligenceService {
         const collection = await this.collectForexFactoryThisWeek(resolved.jobType);
         return {
           ok: true,
-          message: `${resolved.message} ForexFactory public XML collector stored ${collection.stored} real event(s). ${collection.lifecycle.watching} released event(s) without actual values are being watched, ${collection.lifecycle.failed} stale missing releases are marked failed for retry, and ${collection.lifecycle.watcherJobsQueued} watcher job(s) are queued.`,
+          message: `${resolved.message} ForexFactory collector stored ${collection.stored} required-currency event(s). ${collection.lifecycle.watching} released event(s) without actual values are being watched, ${collection.lifecycle.failed} stale missing releases are marked failed for retry, and ${collection.lifecycle.watcherJobsQueued} watcher job(s) are queued.`,
         };
       }
 
@@ -271,14 +279,14 @@ export class EconomicCalendarIntelligenceService {
 
   private async collectForexFactoryThisWeek(jobType: string): Promise<{ stored: number; lifecycle: LifecycleReconciliation }> {
     const sourceName = 'ForexFactory';
-    const sourceUrl = 'https://nfs.faireconomy.media/ff_calendar_thisweek.xml';
+    const sourceUrl = forexFactoryCalendarUrl;
     const startedAt = Date.now();
 
     await queryPostgres(
       `UPDATE economic_sources
        SET enabled = true,
            source_url = $2,
-           robots_policy = 'public_xml_feed',
+           robots_policy = 'public_calendar_page',
            terms_policy = 'autonomous_collection_allowed',
            last_checked_at = now(),
            updated_at = now()
@@ -287,20 +295,23 @@ export class EconomicCalendarIntelligenceService {
     );
 
     try {
-      const response = await fetch(sourceUrl, {
-        headers: {
-          Accept: 'application/xml,text/xml,*/*',
-          'User-Agent': 'CacsmsTrader/1.0 economic-calendar-intelligence',
-        },
-      });
+      const response = await fetchForexFactoryCalendarPage();
 
       if (!response.ok) {
+        const fallback = await this.collectForexFactoryXmlFallback(jobType, startedAt, response.status);
+        if (fallback.stored > 0) return fallback;
         await this.logSourceFetch(sourceName, jobType, 'FAILED', `HTTP ${response.status} from ${sourceUrl}`, Date.now() - startedAt, response.status);
-        return { stored: 0, lifecycle: await this.reconcileReleaseLifecycle() };
+        return fallback;
       }
 
-      const xml = await response.text();
-      const events = parseForexFactoryXml(xml);
+      const html = response.text;
+      const events = parseForexFactoryCalendarHtml(html);
+
+      if (events.length === 0) {
+        const fallback = await this.collectForexFactoryXmlFallback(jobType, startedAt, response.status);
+        if (fallback.stored > 0) return fallback;
+      }
+
       let stored = 0;
 
       for (const event of events) {
@@ -318,7 +329,7 @@ export class EconomicCalendarIntelligenceService {
          WHERE source_name = $1`,
         [sourceName],
       );
-      await this.logSourceFetch(sourceName, jobType, 'SUCCESS', `Collected ${stored} event(s) from public XML feed.`, Date.now() - startedAt, response.status);
+      await this.logSourceFetch(sourceName, jobType, 'SUCCESS', `Collected ${stored} required-currency event(s) from ForexFactory calendar page via ${response.via}.`, Date.now() - startedAt, response.status);
       return { stored, lifecycle: await this.reconcileReleaseLifecycle() };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown collector error.';
@@ -340,6 +351,33 @@ export class EconomicCalendarIntelligenceService {
       );
       return { stored: 0, lifecycle: await this.reconcileReleaseLifecycle() };
     }
+  }
+
+  private async collectForexFactoryXmlFallback(jobType: string, startedAt: number, firstHttpStatus?: number): Promise<{ stored: number; lifecycle: LifecycleReconciliation }> {
+    const sourceName = 'ForexFactory';
+    const response = await fetch(forexFactoryXmlUrl, {
+      headers: {
+        Accept: 'application/xml,text/xml,*/*',
+        'User-Agent': 'CacsmsTrader/1.0 economic-calendar-intelligence',
+      },
+    });
+
+    if (!response.ok) {
+      await this.logSourceFetch(sourceName, jobType, 'FAILED', `HTML collector unavailable${firstHttpStatus ? ` (HTTP ${firstHttpStatus})` : ''}; XML fallback returned HTTP ${response.status}.`, Date.now() - startedAt, response.status);
+      return { stored: 0, lifecycle: await this.reconcileReleaseLifecycle() };
+    }
+
+    const xml = await response.text();
+    const events = parseForexFactoryXml(xml);
+    let stored = 0;
+
+    for (const event of events) {
+      await this.upsertCollectedEvent(event);
+      stored += 1;
+    }
+
+    await this.logSourceFetch(sourceName, jobType, 'DEGRADED', `Collected ${stored} required-currency event(s) from XML fallback; released actual values may be unavailable in this feed.`, Date.now() - startedAt, response.status);
+    return { stored, lifecycle: await this.reconcileReleaseLifecycle() };
   }
 
   private async upsertCollectedEvent(event: CollectedEconomicEvent): Promise<void> {
@@ -586,10 +624,11 @@ export class EconomicCalendarIntelligenceService {
         updated_at::text AS updated_at,
         archived_at::text AS archived_at
       FROM economic_events
-      WHERE utc_event_time IS NULL OR utc_event_time >= now() - interval '14 days'
+      WHERE currency = ANY($1::text[])
+        AND (utc_event_time IS NULL OR utc_event_time >= now() - interval '14 days')
       ORDER BY COALESCE(utc_event_time, created_at) ASC
       LIMIT 500
-    `);
+    `, [[...REQUIRED_CURRENCIES]]);
 
     return result.rows.map((row) => ({
       id: String(row.id),
@@ -761,8 +800,6 @@ export function affectedPairsForCurrency(currency: string): string[] {
     CAD: ['USDCAD', 'EURCAD', 'GBPCAD', 'CADJPY'],
     AUD: ['AUDUSD', 'EURAUD', 'GBPAUD', 'AUDJPY'],
     NZD: ['NZDUSD', 'AUDNZD', 'EURNZD'],
-    CNY: ['USDCNH', 'AUDUSD', 'XAUUSD'],
-    XAU: ['XAUUSD'],
   };
   return mapping[currency.toUpperCase()] ?? [];
 }
@@ -828,9 +865,53 @@ function biasFromScore(score: number): EconomicBias {
   return 'Neutral';
 }
 
+async function fetchForexFactoryCalendarPage(): Promise<{ ok: boolean; status?: number; text: string; via: 'node-fetch' | 'powershell' }> {
+  const response = await fetch(forexFactoryCalendarUrl, {
+    headers: {
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Cache-Control': 'no-cache',
+      'User-Agent': browserUserAgent,
+    },
+  });
+  const text = await response.text();
+
+  if (response.ok && text.includes('window.calendarComponentStates')) {
+    return { ok: true, status: response.status, text, via: 'node-fetch' };
+  }
+
+  if (process.platform !== 'win32') {
+    return { ok: response.ok, status: response.status, text, via: 'node-fetch' };
+  }
+
+  const powershellText = await fetchForexFactoryCalendarPageWithPowerShell();
+  return { ok: true, status: response.status, text: powershellText, via: 'powershell' };
+}
+
+async function fetchForexFactoryCalendarPageWithPowerShell(): Promise<string> {
+  const url = powershellSingleQuoted(forexFactoryCalendarUrl);
+  const userAgent = powershellSingleQuoted(browserUserAgent);
+  const command = [
+    "$ProgressPreference = 'SilentlyContinue'",
+    `$headers = @{ 'User-Agent' = ${userAgent}; Accept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'; 'Accept-Language' = 'en-US,en;q=0.9' }`,
+    `(Invoke-WebRequest -Uri ${url} -Headers $headers -UseBasicParsing).Content`,
+  ].join('; ');
+  const encodedCommand = Buffer.from(command, 'utf16le').toString('base64');
+  const { stdout } = await execFileAsync(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encodedCommand],
+    { maxBuffer: 8 * 1024 * 1024 },
+  );
+  return stdout;
+}
+
+function powershellSingleQuoted(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 function parseForexFactoryXml(xml: string): CollectedEconomicEvent[] {
   const sourceName = 'ForexFactory';
-  const sourceUrl = 'https://nfs.faireconomy.media/ff_calendar_thisweek.xml';
+  const sourceUrl = forexFactoryXmlUrl;
   const eventBlocks = Array.from(xml.matchAll(/<event>([\s\S]*?)<\/event>/gi)).map((match) => match[1]);
 
   return eventBlocks
@@ -892,7 +973,146 @@ function parseForexFactoryXml(xml: string): CollectedEconomicEvent[] {
         aiReasoning: actual ? 'Generated by deterministic economic surprise rule engine from real collected actual/forecast/previous values.' : null,
       };
     })
-    .filter((event) => event.eventName && event.currency);
+    .filter((event) => event.eventName && isRequiredCurrency(event.currency));
+}
+
+type ForexFactoryHtmlEvent = {
+  id?: number;
+  name?: string;
+  currency?: string;
+  dateline?: number;
+  impactName?: string;
+  actual?: string;
+  forecast?: string;
+  previous?: string;
+  revision?: string;
+  url?: string;
+  soloUrl?: string;
+};
+
+function parseForexFactoryCalendarHtml(html: string): CollectedEconomicEvent[] {
+  const days = extractForexFactoryDays(html);
+  if (!days.length) return [];
+
+  return days
+    .flatMap((day) => Array.isArray(day.events) ? day.events : [])
+    .map((event) => normalizeForexFactoryHtmlEvent(event))
+    .filter((event): event is CollectedEconomicEvent => Boolean(event));
+}
+
+function normalizeForexFactoryHtmlEvent(event: ForexFactoryHtmlEvent): CollectedEconomicEvent | null {
+  const sourceName = 'ForexFactory';
+  const sourceUrl = forexFactoryCalendarUrl;
+  const title = cleanValue(event.name ?? '') ?? '';
+  const currency = cleanCurrency(event.currency);
+  if (!title || !isRequiredCurrency(currency)) return null;
+
+  const scheduled = typeof event.dateline === 'number' ? new Date(event.dateline * 1000) : null;
+  const eventDate = scheduled ? scheduled.toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+  const eventTime = scheduled ? scheduled.toISOString().slice(11, 19) : null;
+  const keyDate = scheduled ? formatForexFactoryKeyDate(scheduled) : eventDate;
+  const keyTime = scheduled ? formatForexFactoryKeyTime(scheduled) : '';
+  const impact = normalizeImpact(event.impactName ?? null);
+  const actual = cleanValue(event.actual ?? null);
+  const forecast = cleanValue(event.forecast ?? null);
+  const previous = cleanValue(event.previous ?? null);
+  const revision = cleanValue(event.revision ?? null);
+  const normalizedEventName = normalizeEventName(title, currency);
+  const eventKey = stableKey([sourceName, keyDate, keyTime, currency, normalizedEventName]);
+  const surprise = computeSurprise(actual, forecast, title);
+  const bias = classifyBias(title, surprise);
+  const biasStrength = biasScore(bias);
+  const restriction = restrictionWindowForImpact(impact);
+  const restrictionStartTime = scheduled && restriction.beforeMinutes > 0
+    ? new Date(scheduled.getTime() - restriction.beforeMinutes * 60_000).toISOString()
+    : null;
+  const restrictionEndTime = scheduled && restriction.afterMinutes > 0
+    ? new Date(scheduled.getTime() + restriction.afterMinutes * 60_000).toISOString()
+    : null;
+  const status = lifecycleStatusForCollectedEvent(scheduled, actual);
+
+  return {
+    id: `evt_${eventKey}`,
+    sourceName,
+    sourceUrl,
+    eventKey,
+    eventName: title,
+    normalizedEventName,
+    country: countryForCurrency(currency),
+    currency,
+    impactLevel: impact,
+    eventDate,
+    eventTime,
+    eventTimezone: 'UTC',
+    utcEventTime: scheduled?.toISOString() ?? null,
+    actualValue: actual,
+    forecastValue: forecast,
+    previousValue: previous,
+    revisedPreviousValue: revision,
+    status,
+    surpriseValue: surprise,
+    surprisePercentage: surprise,
+    surpriseDirection: surprise == null ? null : surprise > 0 ? 'positive' : surprise < 0 ? 'negative' : 'neutral',
+    bias,
+    biasStrength,
+    affectedPairs: affectedPairsForCurrency(currency),
+    tradeRestrictionRequired: impact === 'High' || impact === 'Critical' || impact === 'Medium',
+    restrictionStartTime,
+    restrictionEndTime,
+    aiSummary: actual ? aiSummaryForEvent(title, currency, actual, forecast, revision ?? previous, bias) : pendingSummaryForStatus(status),
+    aiReasoning: actual ? 'Generated by deterministic economic surprise rule engine from real collected actual/forecast/previous values.' : null,
+  };
+}
+
+function extractForexFactoryDays(html: string): Array<{ events?: ForexFactoryHtmlEvent[] }> {
+  const stateMatches = html.matchAll(/window\.calendarComponentStates\[\d+\]\s*=\s*\{\s*days\s*:/g);
+  for (const match of stateMatches) {
+    const arrayStart = html.indexOf('[', (match.index ?? 0) + match[0].length);
+    if (arrayStart < 0) continue;
+
+    const arrayText = extractBalancedJsonArray(html, arrayStart);
+    if (!arrayText) continue;
+
+    try {
+      const parsed = JSON.parse(arrayText) as unknown;
+      if (Array.isArray(parsed)) return parsed as Array<{ events?: ForexFactoryHtmlEvent[] }>;
+    } catch {
+      continue;
+    }
+  }
+
+  return [];
+}
+
+function extractBalancedJsonArray(text: string, start: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+    } else if (char === '[') {
+      depth += 1;
+    } else if (char === ']') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, index + 1);
+    }
+  }
+
+  return null;
 }
 
 function lifecycleStatusForCollectedEvent(scheduled: Date | null, actual: string | null): EconomicEventStatus {
@@ -940,6 +1160,28 @@ function decodeXml(value: string): string {
 function cleanValue(value: string | null): string | null {
   if (!value || value.trim() === '') return null;
   return value.trim();
+}
+
+function cleanCurrency(value: string | null | undefined): string {
+  return String(value ?? '').trim().toUpperCase();
+}
+
+function isRequiredCurrency(currency: string): boolean {
+  return requiredCurrencySet.has(cleanCurrency(currency));
+}
+
+function formatForexFactoryKeyDate(date: Date): string {
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${month}-${day}-${date.getUTCFullYear()}`;
+}
+
+function formatForexFactoryKeyTime(date: Date): string {
+  const hour24 = date.getUTCHours();
+  const minute = String(date.getUTCMinutes()).padStart(2, '0');
+  const suffix = hour24 >= 12 ? 'pm' : 'am';
+  const hour12 = hour24 % 12 || 12;
+  return `${hour12}:${minute}${suffix}`;
 }
 
 function parseForexFactoryDateTime(dateText: string, timeText: string): Date | null {

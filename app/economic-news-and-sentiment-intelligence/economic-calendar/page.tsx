@@ -144,7 +144,8 @@ const emptyDashboard: DashboardPayload = {
   providerStatuses: [],
 };
 
-const currencies = ['All', 'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD', 'CNY', 'XAU'];
+const monitoredCurrencies = ['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'JPY', 'NZD', 'USD'];
+const currencies = ['All', ...monitoredCurrencies];
 const impacts = ['All', 'Low', 'Medium', 'High', 'Critical'];
 const statuses = ['All', 'UPCOMING', 'SCHEDULED', 'PRE_MONITORING', 'WATCHING', 'RELEASED', 'ANALYZED', 'ARCHIVED', 'FAILED', 'CONFLICTED'];
 const biases = ['All', 'Strong Bullish', 'Mild Bullish', 'Neutral', 'Mild Bearish', 'Strong Bearish', 'Conflicted', 'Not Enough Data'];
@@ -458,7 +459,7 @@ function EventTable(props: { events: EconomicEvent[]; loading: boolean; selected
             <TableCell className="px-3"><ImpactBadge impact={event.impactLevel} /></TableCell>
             <TableCell className="px-3 font-mono text-xs">{event.actualValue ?? valueState(event.status)}</TableCell>
             <TableCell className="px-3 font-mono text-xs">{event.forecastValue ?? '--'}</TableCell>
-            <TableCell className="px-3 font-mono text-xs">{event.previousValue ?? '--'}</TableCell>
+            <TableCell className="px-3 font-mono text-xs">{event.revisedPreviousValue ?? event.previousValue ?? '--'}</TableCell>
             <TableCell className="px-3 font-mono text-xs">{event.surprisePercentage == null ? 'Pending' : `${event.surprisePercentage}%`}</TableCell>
             <TableCell className="px-3"><BiasBadge bias={event.bias} /></TableCell>
             <TableCell className="px-3"><StatusBadge status={event.status} /></TableCell>
@@ -497,7 +498,7 @@ function EventDetailPanel({ event }: { event: EconomicEvent | null }) {
             <Info label="Broker Time" value={formatDateTime(event.brokerEventTime)} />
             <Info label="Actual" value={event.actualValue ?? valueState(event.status)} />
             <Info label="Forecast" value={event.forecastValue ?? '--'} />
-            <Info label="Previous" value={event.previousValue ?? '--'} />
+            <Info label="Previous" value={event.revisedPreviousValue ?? event.previousValue ?? '--'} />
             <Info label="Revised Previous" value={event.revisedPreviousValue ?? '--'} />
             <Info label="Surprise" value={event.surprisePercentage == null ? 'Pending' : `${event.surprisePercentage}%`} />
             <Info label="Reliability" value={`${event.sourceReliabilityScore}/100`} />
@@ -529,7 +530,7 @@ function TimelineView(props: { events: EconomicEvent[]; onSelect: (id: string) =
               <button key={event.id} type="button" className="block w-full rounded-md border border-slate-200 bg-white p-3 text-left hover:border-indigo-200 hover:bg-indigo-50" onClick={() => props.onSelect(event.id)}>
                 <div className="flex items-center justify-between gap-3"><CurrencyBadge currency={event.currency} /><ImpactBadge impact={event.impactLevel} /></div>
                 <div className="mt-2 text-sm font-semibold text-slate-950">{event.eventName}</div>
-                <div className="mt-1 text-xs text-slate-500">{formatDateTime(event.localEventTime)} / Forecast {event.forecastValue ?? '--'} / Previous {event.previousValue ?? '--'}</div>
+                <div className="mt-1 text-xs text-slate-500">{formatDateTime(event.localEventTime)} / Forecast {event.forecastValue ?? '--'} / Previous {event.revisedPreviousValue ?? event.previousValue ?? '--'}</div>
                 <div className="mt-2"><StatusBadge status={event.status} /> {event.tradeRestrictionRequired ? <Badge className="ml-2 border border-rose-200 bg-rose-50 text-rose-700">Restriction</Badge> : null}</div>
               </button>
             )) : <EmptyState text="No events in this session." />}
@@ -541,7 +542,7 @@ function TimelineView(props: { events: EconomicEvent[]; onSelect: (id: string) =
 }
 
 function CurrencyView(props: { events: EconomicEvent[]; currencyBias: DashboardPayload['currencyBias'] }) {
-  const allCurrencies = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD', 'CNY', 'XAU'];
+  const allCurrencies = monitoredCurrencies;
   return (
     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
       {allCurrencies.map((currency) => {
