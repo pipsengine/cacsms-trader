@@ -131,3 +131,59 @@
     @apply font-sans;
     }
 }
+
+@layer components {
+  .macro-light .bg-zinc-950,
+  .macro-light .bg-zinc-950\/70,
+  .macro-light .bg-zinc-900,
+  .macro-light .bg-zinc-900\/80,
+  .macro-light .bg-black\/25,
+  .macro-light .bg-black\/30 {
+    background-color: white !important;
+  }
+
+  .macro-light .border-zinc-800,
+  .macro-light .border-zinc-700 {
+    border-color: rgb(226 232 240) !important;
+  }
+
+  .macro-light .text-white,
+  .macro-light .text-zinc-100,
+  .macro-light .text-zinc-200,
+  .macro-light .text-zinc-300 {
+    color: rgb(15 23 42) !important;
+  }
+
+  .macro-light .text-zinc-400,
+  .macro-light .text-zinc-500 {
+    color: rgb(100 116 139) !important;
+  }
+
+  .macro-light .shadow-2xl {
+    box-shadow: 0 12px 28px rgb(15 23 42 / 0.08) !important;
+  }
+
+  .macro-light .bg-transparent::placeholder {
+    color: rgb(148 163 184);
+  }
+
+  .macro-light .bg-cyan-500\/10 {
+    background-color: rgb(236 254 255) !important;
+  }
+
+  .macro-light .bg-emerald-500\/10 {
+    background-color: rgb(236 253 245) !important;
+  }
+
+  .macro-light .bg-amber-500\/10 {
+    background-color: rgb(255 251 235) !important;
+  }
+
+  .macro-light .bg-rose-500\/10 {
+    background-color: rgb(255 241 242) !important;
+  }
+
+  .macro-light .bg-violet-500\/10 {
+    background-color: rgb(245 243 255) !important;
+  }
+}

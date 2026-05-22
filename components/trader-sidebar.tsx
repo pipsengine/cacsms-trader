@@ -349,36 +349,21 @@ const navigationModules: NavigationModule[] = [
     ], "engine"),
   ]),
   navModule("Economic, News & Sentiment Intelligence", Landmark, [
-    page("Macro intelligence overview"),
-    group("Economic Data", [
-      "Economic calendar",
-      "COT report synchronization",
-      "Interest rate history",
-      "Inflation data",
-      "Employment data",
-      "GDP events",
-      "CPI/NFP events",
-      "Central bank calendar",
-      "Central bank speech analysis",
+    page("Macro Intelligence Overview"),
+    group("Economic Calendar", [
+      "Economic Calendar Overview",
+      "CPI / Inflation Events",
+      "NFP / Employment Events",
+      "GDP / Growth Events",
+      "Central Bank Meetings",
+      "High-Impact Events",
     ], "integration"),
-    group("News & Volatility", [
-      "News volatility filter",
-      "News impact scoring",
-      "Event blackout windows",
-      "Volatility forecasting",
-      "Reuters/Bloomberg integrations",
-      "ForexFactory integrations",
-    ], "engine"),
-    group("Sentiment & Fundamentals", [
-      "Fundamental bias scoring",
-      "USD strength analysis",
-      "Gold correlation analysis",
-      "Bond yield analysis",
-      "Macro sentiment engine",
-      "AI sentiment analysis",
-      "Fear & greed intelligence",
-      "Global macroeconomic intelligence",
-    ], "engine"),
+    page("COT & Institutional Positioning", "engine"),
+    page("Monetary Policy & Interest Rates", "engine"),
+    page("News Risk & Blackout Windows", "engine"),
+    page("Fundamental Bias Scoring", "engine"),
+    page("USD Strength Analysis", "engine"),
+    page("Gold & Intermarket Analysis", "engine"),
   ]),
   navModule("MT5 Infrastructure & Broker Connectivity", Network, [
     page("Infrastructure overview"),
@@ -1416,6 +1401,8 @@ function slug(value: string): string {
 function hrefForPageId(pageId: string): string | null {
   if (pageId === "trading-operations") return "/";
   if (pageId === "executive-overview") return "/";
+  if (pageId === "macro-intelligence-overview") return "/economic-news-and-sentiment-intelligence";
+  if (pageId === "economic-calendar-overview") return "/economic-news-and-sentiment-intelligence/economic-calendar";
   if (pageId === "infrastructure-overview") return "/mt5-infrastructure";
   if (pageId === "connected-terminals") return "/mt5-infrastructure/terminal-operations/connected-terminals";
   if (pageId === "terminal-registration") return "/mt5-infrastructure/terminal-operations/terminal-registration";
@@ -1436,6 +1423,8 @@ function hrefForPageId(pageId: string): string | null {
 
 function pageIdForPathname(pathname: string): string | null {
   if (pathname === "/") return "executive-overview";
+  if (pathname === "/economic-news-and-sentiment-intelligence") return "macro-intelligence-overview";
+  if (pathname === "/economic-news-and-sentiment-intelligence/economic-calendar") return "economic-calendar-overview";
   if (pathname === "/mt5-infrastructure") return "infrastructure-overview";
   const match = pathname.match(/^\/mt5-infrastructure\/terminal-operations\/([^/]+)$/);
   if (match?.[1]) {
