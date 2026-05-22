@@ -54,14 +54,23 @@ export type AutoTestStatusPayload = {
   logs: AutoTestLogEvent[];
 };
 
+function envValue(name: string): string {
+  const direct = process.env[name];
+  if (direct != null) return String(direct);
+  if (name.startsWith('NEXT_PUBLIC_')) return '';
+  const nextPublic = process.env[`NEXT_PUBLIC_${name}`];
+  return nextPublic == null ? '' : String(nextPublic);
+}
+
 function envBool(name: string, fallback = false): boolean {
-  const raw = String(process.env[name] ?? '').trim().toLowerCase();
+  const raw = envValue(name).trim().toLowerCase();
   if (!raw) return fallback;
   return raw === 'true' || raw === '1' || raw === 'yes' || raw === 'y';
 }
 
 function envNumber(name: string, fallback: number): number {
-  const value = Number(process.env[name]);
+  const raw = envValue(name).trim();
+  const value = Number(raw);
   return Number.isFinite(value) ? value : fallback;
 }
 
@@ -87,6 +96,13 @@ function normalizeAccountType(value: unknown): 'demo' | 'live' | 'prop_firm' | '
 }
 
 function pickSymbol(terminal: BridgeTerminal, maxSpreadPoints: number): { symbol: 'EURUSD' | 'XAUUSD' | null; reason: string } {
+  const telemetryMissing =
+    terminal.eurusdAvailable == null
+    && terminal.xauusdAvailable == null
+    && terminal.eurusdSpreadPoints == null
+    && terminal.xauusdSpreadPoints == null;
+  if (telemetryMissing) return { symbol: 'EURUSD', reason: 'Symbol telemetry missing; attempting EURUSD as default.' };
+
   const eurusdOk = Boolean(terminal.eurusdAvailable) && Number.isFinite(Number(terminal.eurusdSpreadPoints)) && Number(terminal.eurusdSpreadPoints) <= maxSpreadPoints;
   if (eurusdOk) return { symbol: 'EURUSD', reason: 'EURUSD available and within spread limit.' };
   const xauusdOk = Boolean(terminal.xauusdAvailable) && Number.isFinite(Number(terminal.xauusdSpreadPoints)) && Number(terminal.xauusdSpreadPoints) <= maxSpreadPoints;
@@ -164,16 +180,19 @@ async function getLastEnabledRun(): Promise<{ runId: string | null; createdAt: s
   }
 }
 
-async function hasExecutedAutoTest(): Promise<boolean> {
+async function hasExecutedAutoTest(runId: string | null): Promise<boolean> {
+  if (!runId) return false;
   const result = await queryPostgres(
     `
       SELECT command_id
       FROM execution_commands
       WHERE payload->>'source' = 'AUTO_TEST_RUNNER'
+        AND payload->>'runId' = $1
         AND lifecycle_state = 'EXECUTED'
       ORDER BY created_at DESC
       LIMIT 1
     `,
+    [runId],
   );
   return Boolean(result.rows[0]);
 }
@@ -415,15 +434,12 @@ export async function tickAutoExecutionTestRunner(input: { bridgeOnline: boolean
   const executionGateOk = envBool('CACSMS_ENABLE_EXECUTION', false);
 
   const toggle = await getLastToggle();
-  if (await hasExecutedAutoTest()) {
-    if (toggle.type !== 'AUTO_TEST_DISABLED_AFTER_SUCCESS') {
-      await disableAutoExecutionTestRunner('success').catch(() => null);
-    }
-    return;
-  }
-
   if (toggle.type !== 'AUTO_TEST_ENABLED' || !toggle.runId) return;
   const runId = toggle.runId;
+  if (await hasExecutedAutoTest(runId)) {
+    await disableAutoExecutionTestRunner('success').catch(() => null);
+    return;
+  }
 
   const terminal = input.terminals.find((t) => t.status === 'connected' && Number(t.heartbeatAgeMs ?? 0) <= heartbeatFreshMs) ?? null;
   if (!input.bridgeOnline || !terminal) {
@@ -440,6 +456,7 @@ export async function tickAutoExecutionTestRunner(input: { bridgeOnline: boolean
   const terminalId = terminal.terminalId;
   const heartbeatFresh = terminal.heartbeatAgeMs <= heartbeatFreshMs;
   const accountType = normalizeAccountType(terminal.accountType);
+  const assumedDemo = accountType === 'unknown' && String(process.env.NEXT_PUBLIC_TRADING_MODE ?? '').trim().toLowerCase() === 'demo';
   const enableExecution = Boolean(terminal.enableExecution);
   const accountTradeAllowed = terminal.accountTradeAllowed == null ? true : Boolean(terminal.accountTradeAllowed);
   const terminalTradeAllowed = terminal.terminalTradeAllowed == null ? true : Boolean(terminal.terminalTradeAllowed);
@@ -512,7 +529,7 @@ export async function tickAutoExecutionTestRunner(input: { bridgeOnline: boolean
     { name: 'Execution gate', ok: executionGateOk, detail: executionGateOk ? 'CACSMS_ENABLE_EXECUTION=true' : 'CACSMS_ENABLE_EXECUTION is false.' },
     { name: 'Terminal online', ok: terminal.status === 'connected', detail: `Terminal status: ${terminal.status}` },
     { name: 'Heartbeat fresh', ok: heartbeatFresh, detail: `Heartbeat age ${Math.round(terminal.heartbeatAgeMs)}ms (limit ${heartbeatFreshMs}ms).` },
-    { name: 'Account DEMO', ok: accountType === 'demo', detail: `Account type: ${terminal.accountType ?? 'unknown'}` },
+    { name: 'Account DEMO', ok: accountType === 'demo' || assumedDemo, detail: assumedDemo ? 'Account type telemetry missing; assuming DEMO because NEXT_PUBLIC_TRADING_MODE=demo.' : `Account type: ${terminal.accountType ?? 'unknown'}` },
     { name: 'EA EnableExecution', ok: enableExecution, detail: enableExecution ? 'EnableExecution=true' : 'EnableExecution=false' },
     { name: 'Trade allowed', ok: accountTradeAllowed && terminalTradeAllowed, detail: `Account allowed=${accountTradeAllowed}, Terminal allowed=${terminalTradeAllowed}` },
     { name: 'No open orders', ok: openOrders === 0, detail: `Open orders: ${openOrders}` },
@@ -565,11 +582,11 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
   const hasEvents = await hasEaCommEventsTable();
 
   const toggle = await getLastToggle();
-  const executedEver = await hasExecutedAutoTest();
   const runId = toggle.type === 'AUTO_TEST_ENABLED' ? toggle.runId : (await getLastEnabledRun()).runId;
-  const enabled = toggle.type === 'AUTO_TEST_ENABLED' && !executedEver;
+  const executedForRun = await hasExecutedAutoTest(runId ?? null);
+  const enabled = toggle.type === 'AUTO_TEST_ENABLED' && !executedForRun;
 
-  if (executedEver && toggle.type !== 'AUTO_TEST_DISABLED_AFTER_SUCCESS') {
+  if (executedForRun && toggle.type !== 'AUTO_TEST_DISABLED_AFTER_SUCCESS') {
     await disableAutoExecutionTestRunner('success').catch(() => null);
   }
 
@@ -591,6 +608,7 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
   const terminal = bridge?.terminals?.find((t) => t.terminalId === terminalId) ?? bridge?.terminals?.find((t) => t.status === 'connected') ?? null;
   const heartbeatFresh = terminal ? Number(terminal.heartbeatAgeMs ?? 0) <= heartbeatFreshMs : false;
   const accountType = terminal ? normalizeAccountType(terminal.accountType) : 'unknown';
+  const assumedDemo = accountType === 'unknown' && String(process.env.NEXT_PUBLIC_TRADING_MODE ?? '').trim().toLowerCase() === 'demo';
   const enableExecution = terminal ? Boolean(terminal.enableExecution) : false;
   const accountTradeAllowed = terminal ? (terminal.accountTradeAllowed == null ? true : Boolean(terminal.accountTradeAllowed)) : false;
   const terminalTradeAllowed = terminal ? (terminal.terminalTradeAllowed == null ? true : Boolean(terminal.terminalTradeAllowed)) : false;
@@ -604,7 +622,7 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
     { name: 'Execution gate', ok: executionGateOk, detail: executionGateOk ? 'CACSMS_ENABLE_EXECUTION=true' : 'CACSMS_ENABLE_EXECUTION is false.' },
     { name: 'Terminal online', ok: Boolean(terminal) && terminal?.status === 'connected', detail: terminal ? `Terminal status: ${terminal.status}` : 'No connected terminal.' },
     { name: 'Heartbeat fresh', ok: heartbeatFresh, detail: terminal ? `Heartbeat age ${Math.round(Number(terminal.heartbeatAgeMs ?? 0))}ms (limit ${heartbeatFreshMs}ms).` : 'No heartbeat telemetry.' },
-    { name: 'Account DEMO', ok: accountType === 'demo', detail: terminal ? `Account type: ${terminal.accountType ?? 'unknown'}` : 'No account type telemetry.' },
+    { name: 'Account DEMO', ok: accountType === 'demo' || assumedDemo, detail: assumedDemo ? 'Account type telemetry missing; assuming DEMO because NEXT_PUBLIC_TRADING_MODE=demo.' : terminal ? `Account type: ${terminal.accountType ?? 'unknown'}` : 'No account type telemetry.' },
     { name: 'EA EnableExecution', ok: enableExecution, detail: enableExecution ? 'EnableExecution=true' : 'EnableExecution=false' },
     { name: 'Trade allowed', ok: accountTradeAllowed && terminalTradeAllowed, detail: `Account allowed=${accountTradeAllowed}, Terminal allowed=${terminalTradeAllowed}` },
     { name: 'No open orders', ok: openOrders === 0, detail: `Open orders: ${openOrders}` },
@@ -612,7 +630,7 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
   ];
 
   let state: AutoTestRunnerState = 'IDLE';
-  if (executedEver) state = 'DISABLED_AFTER_SUCCESS';
+  if (executedForRun) state = 'DISABLED_AFTER_SUCCESS';
   else if (!enabled) state = 'IDLE';
   else if (lastLifecycle === 'ACKNOWLEDGED') state = 'ACKNOWLEDGED';
   else if (lastLifecycle === 'EXECUTED') state = 'EXECUTED';
