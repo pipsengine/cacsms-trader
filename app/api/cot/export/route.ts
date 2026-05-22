@@ -37,7 +37,7 @@ export async function GET(request: Request) {
       clauses.push(`report_date <= $${params.length}::date`);
     }
     if (currency && currency !== 'All') {
-      params.push(currency);
+      params.push(currency === 'USD Index' ? 'USD' : currency);
       clauses.push(`currency = $${params.length}`);
     }
     if (bias && bias !== 'All') {
@@ -57,7 +57,7 @@ export async function GET(request: Request) {
     const result = await queryPostgres(
       `
         SELECT
-          report_date,
+          report_date::date::text AS report_date,
           currency,
           long_positions,
           short_positions,
@@ -74,7 +74,7 @@ export async function GET(request: Request) {
           source_url
         FROM cot_institutional_positions
         ${where}
-        ORDER BY report_date DESC, currency ASC
+        ORDER BY report_date::date DESC, currency ASC
       `,
       params,
     );
@@ -101,7 +101,7 @@ export async function GET(request: Request) {
     for (const row of result.rows as any[]) {
       lines.push(
         [
-          csvEscape(row.report_date ? String(row.report_date).slice(0, 10) : ''),
+          csvEscape(row.report_date ?? ''),
           csvEscape(row.currency ?? ''),
           csvEscape(row.long_positions ?? ''),
           csvEscape(row.short_positions ?? ''),

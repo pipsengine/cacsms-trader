@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
   AlertTriangle,
   Archive,
@@ -129,6 +130,66 @@ type DashboardPayload = {
   providerStatuses: Array<{ provider: string; status: string; message: string }>;
 };
 
+type RateDecisionRecord = {
+  id: string;
+  source_name: string;
+  source_page_id: number;
+  source_url: string;
+  country: string | null;
+  currency: string;
+  central_bank: string | null;
+  event_name: string;
+  normalized_event_name: string;
+  release_date: string;
+  release_time: string | null;
+  actual_rate: number | string | null;
+  forecast_rate: number | string | null;
+  previous_rate: number | string | null;
+  rate_change_bps: number | string | null;
+  decision_type: string | null;
+  surprise_direction: string | null;
+  policy_bias: string | null;
+  captured_at: string | null;
+};
+
+type RateHistoryPayload = {
+  ok: boolean;
+  generatedAt: string;
+  total: number;
+  limit: number;
+  offset: number;
+  records: RateDecisionRecord[];
+  error?: string;
+};
+
+type RateHistorySummaryPayload = {
+  ok: boolean;
+  generatedAt: string;
+  summary: {
+    totalHistoricalRateRecords: number;
+    rateHikesLast3Years: number;
+    rateCutsLast3Years: number;
+    holdsLast3Years: number;
+    mostHawkishCurrency: string | null;
+    mostDovishCurrency: string | null;
+    lastCapturedRateEvent: { releaseDate: string; currency: string | null; centralBank: string | null } | null;
+    lastCapturedAt: string | null;
+    lastSyncStatus: string;
+    lastSyncAt: string | null;
+  };
+  error?: string;
+};
+
+type RateHistoryLog = {
+  id: string;
+  job_type: string;
+  source_page_id: number | null;
+  status: string;
+  message: string;
+  details: any;
+  fetched_at: string;
+};
+
 const emptyDashboard: DashboardPayload = {
   ok: false,
   generatedAt: '',
@@ -178,6 +239,10 @@ export default function EconomicCalendarIntelligencePage() {
   const [loadError, setLoadError] = useState('');
   const [actionMessage, setActionMessage] = useState('');
   const [now, setNow] = useState('');
+  const [rateSummary, setRateSummary] = useState<RateHistorySummaryPayload | null>(null);
+  const [rateHistory, setRateHistory] = useState<RateHistoryPayload | null>(null);
+  const [rateLogs, setRateLogs] = useState<RateHistoryLog[]>([]);
+  const [rateLoading, setRateLoading] = useState({ summary: false, history: false, action: false, logs: false });
   const [query, setQuery] = useState('');
   const [dateRange, setDateRange] = useState('All');
   const [currency, setCurrency] = useState('All');
@@ -190,6 +255,26 @@ export default function EconomicCalendarIntelligencePage() {
   const [selectedEventId, setSelectedEventId] = useState('');
   const [activeTab, setActiveTab] = useState('table');
   const [comparisonOpen, setComparisonOpen] = useState(false);
+  const [rateFilters, setRateFilters] = useState({
+    from: '',
+    to: '',
+    currency: 'All',
+    country: 'All',
+    centralBank: 'All',
+    decisionType: 'All',
+    surprise: 'All',
+    sourcePageId: 'All',
+    search: '',
+  });
+  const searchParams = useSearchParams();
+
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (!tab) return;
+    const allowed = new Set(['table', 'timeline', 'currency', 'impact', 'source', 'history', 'rates', 'conflict', 'restriction']);
+    if (!allowed.has(tab)) return;
+    setActiveTab(tab);
+  }, [searchParams]);
 
   const loadDashboard = async () => {
     setLoading(true);
@@ -208,6 +293,129 @@ export default function EconomicCalendarIntelligencePage() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const toNumber = (value: unknown): number | null => {
+    if (value == null) return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    const raw = String(value).trim();
+    if (!raw) return null;
+    const cleaned = raw.replaceAll(',', '').replaceAll(' ', '');
+    const n = Number(cleaned);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const formatRate = (value: unknown): string => {
+    const n = toNumber(value);
+    if (n == null) return 'N/A';
+    return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 3 }).format(n)}%`;
+  };
+
+  const formatBps = (value: unknown): string => {
+    const n = toNumber(value);
+    if (n == null) return 'N/A';
+    return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(n)} bp`;
+  };
+
+  const refreshRateSummary = async () => {
+    setRateLoading((s) => ({ ...s, summary: true }));
+    try {
+      const response = await fetch('/api/economic-calendar/rate-history/summary', { cache: 'no-store' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error ?? `Rate summary failed with HTTP ${response.status}`);
+      if (payload?.ok !== true) {
+        setRateSummary(null);
+        return;
+      }
+      setRateSummary(payload as RateHistorySummaryPayload);
+    } catch (error) {
+      setRateSummary(null);
+      setActionMessage(error instanceof Error ? error.message : 'Rate summary failed.');
+    } finally {
+      setRateLoading((s) => ({ ...s, summary: false }));
+    }
+  };
+
+  const refreshRateHistory = async () => {
+    setRateLoading((s) => ({ ...s, history: true }));
+    try {
+      const url = new URL('/api/economic-calendar/rate-history', window.location.origin);
+      if (rateFilters.from) url.searchParams.set('from', rateFilters.from);
+      if (rateFilters.to) url.searchParams.set('to', rateFilters.to);
+      if (rateFilters.currency !== 'All') url.searchParams.set('currency', rateFilters.currency);
+      if (rateFilters.country !== 'All') url.searchParams.set('country', rateFilters.country);
+      if (rateFilters.centralBank !== 'All') url.searchParams.set('centralBank', rateFilters.centralBank);
+      if (rateFilters.decisionType !== 'All') url.searchParams.set('decisionType', rateFilters.decisionType);
+      if (rateFilters.surprise !== 'All') url.searchParams.set('surprise', rateFilters.surprise);
+      if (rateFilters.sourcePageId !== 'All') url.searchParams.set('sourcePageId', rateFilters.sourcePageId);
+      if (rateFilters.search.trim()) url.searchParams.set('search', rateFilters.search.trim());
+      url.searchParams.set('limit', '800');
+      const response = await fetch(url.toString(), { cache: 'no-store' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error ?? `Rate history failed with HTTP ${response.status}`);
+      if (payload?.ok !== true) {
+        setRateHistory(null);
+        return;
+      }
+      setRateHistory(payload as RateHistoryPayload);
+    } catch (error) {
+      setRateHistory(null);
+      setActionMessage(error instanceof Error ? error.message : 'Rate history failed.');
+    } finally {
+      setRateLoading((s) => ({ ...s, history: false }));
+    }
+  };
+
+  const refreshRateLogs = async () => {
+    setRateLoading((s) => ({ ...s, logs: true }));
+    try {
+      const url = new URL('/api/economic-calendar/rate-history/logs', window.location.origin);
+      url.searchParams.set('limit', '200');
+      if (rateFilters.sourcePageId !== 'All') url.searchParams.set('sourcePageId', rateFilters.sourcePageId);
+      const response = await fetch(url.toString(), { cache: 'no-store' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error ?? `Rate logs failed with HTTP ${response.status}`);
+      if (payload?.ok !== true) {
+        setRateLogs([]);
+        return;
+      }
+      setRateLogs(Array.isArray(payload?.logs) ? payload.logs : []);
+    } catch (error) {
+      setRateLogs([]);
+      setActionMessage(error instanceof Error ? error.message : 'Rate history logs failed.');
+    } finally {
+      setRateLoading((s) => ({ ...s, logs: false }));
+    }
+  };
+
+  const runRateAction = async (endpoint: string, label: string) => {
+    setRateLoading((s) => ({ ...s, action: true }));
+    setActionMessage(`${label} requested...`);
+    try {
+      const response = await fetch(endpoint, { method: 'POST' });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload?.error ?? `${label} failed with HTTP ${response.status}`);
+      setActionMessage(payload?.message ?? `${label} completed.`);
+      await refreshRateSummary();
+      await refreshRateHistory();
+      await refreshRateLogs();
+    } catch (error) {
+      setActionMessage(error instanceof Error ? error.message : `${label} failed.`);
+    } finally {
+      setRateLoading((s) => ({ ...s, action: false }));
+    }
+  };
+
+  const exportRateHistory = () => {
+    const url = new URL('/api/economic-calendar/rate-history/export', window.location.origin);
+    if (rateFilters.from) url.searchParams.set('from', rateFilters.from);
+    if (rateFilters.to) url.searchParams.set('to', rateFilters.to);
+    if (rateFilters.currency !== 'All') url.searchParams.set('currency', rateFilters.currency);
+    if (rateFilters.decisionType !== 'All') url.searchParams.set('decisionType', rateFilters.decisionType);
+    if (rateFilters.surprise !== 'All') url.searchParams.set('surprise', rateFilters.surprise);
+    if (rateFilters.sourcePageId !== 'All') url.searchParams.set('sourcePageId', rateFilters.sourcePageId);
+    if (rateFilters.search.trim()) url.searchParams.set('search', rateFilters.search.trim());
+    window.open(url.toString(), '_blank', 'noopener,noreferrer');
   };
 
   useEffect(() => {
@@ -231,8 +439,23 @@ export default function EconomicCalendarIntelligencePage() {
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    if (activeTab !== 'rates') return;
+    if (!rateSummary) refreshRateSummary();
+    if (!rateHistory) refreshRateHistory();
+    if (!rateLogs.length) refreshRateLogs();
+  }, [activeTab]);
+
   const countries = useMemo(() => ['All', ...Array.from(new Set(dashboard.events.map((event) => event.country).filter(Boolean))).sort()], [dashboard.events]);
   const sources = useMemo(() => ['All', ...Array.from(new Set(dashboard.events.map((event) => event.sourceName).filter(Boolean))).sort()], [dashboard.events]);
+
+  const rateRows = useMemo(() => rateHistory?.records ?? [], [rateHistory?.records]);
+  const rateCountries = useMemo(() => ['All', ...Array.from(new Set(rateRows.map((r) => r.country).filter((v): v is string => Boolean(v)))).sort()], [rateRows]);
+  const rateCurrencies = useMemo(() => ['All', ...Array.from(new Set(rateRows.map((r) => r.currency).filter(Boolean))).sort()], [rateRows]);
+  const rateCentralBanks = useMemo(() => ['All', ...Array.from(new Set(rateRows.map((r) => r.central_bank).filter((v): v is string => Boolean(v)))).sort()], [rateRows]);
+  const ratePageIds = useMemo(() => ['All', ...[164, 165, 166, 167, 168, 169, 170, 171, 172].map(String)], []);
+  const rateDecisionTypes = useMemo(() => ['All', 'HIKE', 'CUT', 'HOLD'], []);
+  const rateSurprises = useMemo(() => ['All', 'HAWKISH_SURPRISE', 'DOVISH_SURPRISE', 'AS_EXPECTED'], []);
 
   const filteredEvents = useMemo(() => {
     return dashboard.events.filter((event) => {
@@ -411,6 +634,7 @@ export default function EconomicCalendarIntelligencePage() {
                   <TabsTrigger value="impact">Impact</TabsTrigger>
                   <TabsTrigger value="source">Source</TabsTrigger>
                   <TabsTrigger value="history">History</TabsTrigger>
+                  <TabsTrigger value="rates">Historical Rates</TabsTrigger>
                   <TabsTrigger value="conflict">Conflict</TabsTrigger>
                   <TabsTrigger value="restriction">Restrictions</TabsTrigger>
                 </TabsList>
@@ -433,6 +657,168 @@ export default function EconomicCalendarIntelligencePage() {
                 </TabsContent>
                 <TabsContent value="history" className="m-0 p-4">
                   <GroupedCards events={filteredEvents.filter((event) => event.status === 'ARCHIVED')} groupBy={(event) => event.currency} empty="No archived economic events have been recorded yet." />
+                </TabsContent>
+                <TabsContent value="rates" className="m-0 p-4">
+                  <div className="space-y-4">
+                    <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      <SummaryCard icon={Database} label="Total Historical Rate Records" value={rateSummary?.summary.totalHistoricalRateRecords ?? 0} detail="Investing.com historical rate decision records." tone="violet" />
+                      <SummaryCard icon={TrendingUp} label="Rate Hikes (3Y)" value={rateSummary?.summary.rateHikesLast3Years ?? 0} detail="Count of hikes over the last 3 years." tone="emerald" />
+                      <SummaryCard icon={TrendingDown} label="Rate Cuts (3Y)" value={rateSummary?.summary.rateCutsLast3Years ?? 0} detail="Count of cuts over the last 3 years." tone="rose" />
+                      <SummaryCard icon={ListChecks} label="Holds (3Y)" value={rateSummary?.summary.holdsLast3Years ?? 0} detail="Count of holds over the last 3 years." tone="slate" />
+                      <SummaryCard icon={Zap} label="Most Hawkish Currency" value={rateSummary?.summary.mostHawkishCurrency ?? '—'} detail="Highest hawkishness score (3Y)." tone="emerald" />
+                      <SummaryCard icon={AlertTriangle} label="Most Dovish Currency" value={rateSummary?.summary.mostDovishCurrency ?? '—'} detail="Lowest hawkishness score (3Y)." tone="amber" />
+                      <SummaryCard icon={CalendarClock} label="Last Captured Rate Event" value={rateSummary?.summary.lastCapturedRateEvent ? `${rateSummary.summary.lastCapturedRateEvent.currency ?? '—'} • ${rateSummary.summary.lastCapturedRateEvent.releaseDate}` : '—'} detail={rateSummary?.summary.lastSyncStatus ?? 'UNKNOWN'} tone="violet" />
+                      <SummaryCard icon={Clock} label="Last Captured At" value={rateSummary?.summary.lastCapturedAt ? new Date(rateSummary.summary.lastCapturedAt).toLocaleString() : '—'} detail={rateSummary?.summary.lastSyncAt ? `sync ${new Date(rateSummary.summary.lastSyncAt).toLocaleString()}` : 'no sync time recorded'} tone="cyan" />
+                    </section>
+
+                    <Panel title="Monetary Policy & Interest Rates" icon={Landmark}>
+                      <div className="grid grid-cols-1 gap-2 md:grid-cols-12">
+                        <input className="md:col-span-2 h-10 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs text-slate-700" placeholder="From (YYYY-MM-DD)" value={rateFilters.from} onChange={(e) => setRateFilters((c) => ({ ...c, from: e.target.value }))} />
+                        <input className="md:col-span-2 h-10 rounded-md border border-slate-200 bg-white px-2 font-mono text-xs text-slate-700" placeholder="To (YYYY-MM-DD)" value={rateFilters.to} onChange={(e) => setRateFilters((c) => ({ ...c, to: e.target.value }))} />
+                        <select className="md:col-span-2 h-10 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={rateFilters.currency} onChange={(e) => setRateFilters((c) => ({ ...c, currency: e.target.value }))}>
+                          {rateCurrencies.map((item) => <option key={item} value={item}>{item}</option>)}
+                        </select>
+                        <select className="md:col-span-2 h-10 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={rateFilters.country} onChange={(e) => setRateFilters((c) => ({ ...c, country: e.target.value }))}>
+                          {rateCountries.map((item) => <option key={item} value={item}>{item}</option>)}
+                        </select>
+                        <select className="md:col-span-2 h-10 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={rateFilters.centralBank} onChange={(e) => setRateFilters((c) => ({ ...c, centralBank: e.target.value }))}>
+                          {rateCentralBanks.map((item) => <option key={item} value={item}>{item}</option>)}
+                        </select>
+                        <select className="md:col-span-2 h-10 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={rateFilters.decisionType} onChange={(e) => setRateFilters((c) => ({ ...c, decisionType: e.target.value }))}>
+                          {rateDecisionTypes.map((item) => <option key={item} value={item}>{item}</option>)}
+                        </select>
+                        <select className="md:col-span-2 h-10 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={rateFilters.surprise} onChange={(e) => setRateFilters((c) => ({ ...c, surprise: e.target.value }))}>
+                          {rateSurprises.map((item) => <option key={item} value={item}>{item}</option>)}
+                        </select>
+                        <select className="md:col-span-2 h-10 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={rateFilters.sourcePageId} onChange={(e) => setRateFilters((c) => ({ ...c, sourcePageId: e.target.value }))}>
+                          {ratePageIds.map((item) => <option key={item} value={item}>{item === 'All' ? 'All Pages' : `Page ${item}`}</option>)}
+                        </select>
+                        <div className="md:col-span-4 flex items-center gap-2 rounded-md border border-slate-200 bg-white px-2">
+                          <Search className="h-4 w-4 text-slate-400" />
+                          <input className="min-w-0 flex-1 bg-transparent text-xs text-slate-900 outline-none placeholder:text-slate-400" placeholder="Search event/country/bank…" value={rateFilters.search} onChange={(e) => setRateFilters((c) => ({ ...c, search: e.target.value }))} />
+                        </div>
+                        <div className="md:col-span-4 flex flex-wrap gap-2">
+                          <button type="button" className="flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" disabled={rateLoading.history} onClick={refreshRateHistory}>
+                            <Filter className="h-4 w-4" /> Apply
+                          </button>
+                          <button type="button" className="flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" disabled={rateLoading.summary} onClick={refreshRateSummary}>
+                            <RefreshCw className="h-4 w-4" /> Refresh Summary
+                          </button>
+                          <button type="button" className="flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" disabled={rateLoading.logs} onClick={refreshRateLogs}>
+                            <Database className="h-4 w-4" /> View Rate History Logs
+                          </button>
+                          <button type="button" className="flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" onClick={exportRateHistory}>
+                            <Download className="h-4 w-4" /> Export Rate History
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <button type="button" className="flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" disabled={rateLoading.action} onClick={() => runRateAction('/api/economic-calendar/investing/rate-history/sync-all', 'Sync last 3 years rate history')}>
+                          <RefreshCw className="h-4 w-4" /> Sync Last 3 Years Rate History
+                        </button>
+                        {[164, 165, 166, 167, 168, 169, 170, 171, 172].map((id) => (
+                          <button key={id} type="button" className="flex h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50" disabled={rateLoading.action} onClick={() => runRateAction(`/api/economic-calendar/investing/rate-history/sync-page/${id}`, `Sync page ${id}`)}>
+                            <Eye className="h-4 w-4" /> Sync {id}
+                          </button>
+                        ))}
+                      </div>
+                    </Panel>
+
+                    <div className="rounded-lg border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+                      <div className="border-b border-slate-200 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-slate-950">Historical Rates</div>
+                            <div className="mt-1 text-xs text-slate-500">Official values as displayed on Investing.com historical release table. No invented values.</div>
+                          </div>
+                          <div className="text-xs font-mono text-slate-600">{rateHistory?.total ?? 0} rows</div>
+                        </div>
+                      </div>
+                      <div className="w-full overflow-x-auto">
+                        <Table>
+                          <TableHeader className="bg-slate-50">
+                            <TableRow className="hover:bg-transparent">
+                              {['Date', 'Country', 'Currency', 'Central Bank', 'Actual Rate', 'Forecast Rate', 'Previous Rate', 'Change BPS', 'Decision Type', 'Surprise', 'Policy Bias', 'Source Page ID', 'Source', 'Captured At'].map((column) => (
+                                <TableHead key={column} className="whitespace-nowrap px-3 py-3 text-[11px] uppercase tracking-wider text-slate-500">{column}</TableHead>
+                              ))}
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {rateLoading.history || rateRows.length === 0 ? (
+                              <TableRow className="hover:bg-transparent">
+                                <TableCell colSpan={14} className="h-32 text-center text-sm text-slate-600">
+                                  {rateLoading.history ? 'Loading historical rates...' : 'No historical rate decision records yet. Run “Sync Last 3 Years Rate History”.'}
+                                </TableCell>
+                              </TableRow>
+                            ) : rateRows.map((row) => (
+                              <TableRow key={row.id} className="hover:bg-slate-50">
+                                <TableCell className="px-3 font-mono text-xs">{row.release_date}</TableCell>
+                                <TableCell className="px-3 text-xs text-slate-700">{row.country ?? '--'}</TableCell>
+                                <TableCell className="px-3"><CurrencyBadge currency={row.currency} /></TableCell>
+                                <TableCell className="px-3 text-xs text-slate-700">{row.central_bank ?? '--'}</TableCell>
+                                <TableCell className="px-3 font-mono text-xs text-slate-700">{formatRate(row.actual_rate)}</TableCell>
+                                <TableCell className="px-3 font-mono text-xs text-slate-700">{formatRate(row.forecast_rate)}</TableCell>
+                                <TableCell className="px-3 font-mono text-xs text-slate-700">{formatRate(row.previous_rate)}</TableCell>
+                                <TableCell className="px-3 font-mono text-xs text-slate-700">{formatBps(row.rate_change_bps)}</TableCell>
+                                <TableCell className="px-3 text-xs">
+                                  <Badge className={cn('border', toneBadgeClass(decisionTone(row.decision_type)))}>{row.decision_type ?? 'N/A'}</Badge>
+                                </TableCell>
+                                <TableCell className="px-3 text-xs">
+                                  <Badge className={cn('border', toneBadgeClass(surpriseTone(row.surprise_direction)))}>{row.surprise_direction ?? 'N/A'}</Badge>
+                                </TableCell>
+                                <TableCell className="px-3 text-xs">
+                                  <Badge className={cn('border', toneBadgeClass(policyBiasTone(row.policy_bias)))}>{row.policy_bias ?? 'N/A'}</Badge>
+                                </TableCell>
+                                <TableCell className="px-3 font-mono text-xs text-slate-700">{row.source_page_id}</TableCell>
+                                <TableCell className="px-3 text-xs text-slate-700">{row.source_name}</TableCell>
+                                <TableCell className="px-3 font-mono text-xs text-slate-700">{row.captured_at ? new Date(row.captured_at).toLocaleString() : '--'}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+                      <div className="border-b border-slate-200 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-semibold text-slate-950">Rate History Logs</div>
+                          <div className="text-xs font-mono text-slate-600">{rateLogs.length} entries</div>
+                        </div>
+                      </div>
+                      <div className="w-full overflow-x-auto">
+                        <Table>
+                          <TableHeader className="bg-slate-50">
+                            <TableRow className="hover:bg-transparent">
+                              {['Time', 'Page', 'Status', 'Job', 'Message'].map((column) => (
+                                <TableHead key={column} className="whitespace-nowrap px-3 py-3 text-[11px] uppercase tracking-wider text-slate-500">{column}</TableHead>
+                              ))}
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {rateLoading.logs || rateLogs.length === 0 ? (
+                              <TableRow className="hover:bg-transparent">
+                                <TableCell colSpan={5} className="h-24 text-center text-sm text-slate-600">
+                                  {rateLoading.logs ? 'Loading logs...' : 'No rate history logs yet.'}
+                                </TableCell>
+                              </TableRow>
+                            ) : rateLogs.map((log) => (
+                              <TableRow key={log.id} className="hover:bg-slate-50">
+                                <TableCell className="px-3 font-mono text-xs text-slate-700">{new Date(log.fetched_at).toLocaleString()}</TableCell>
+                                <TableCell className="px-3 font-mono text-xs text-slate-700">{log.source_page_id ?? '--'}</TableCell>
+                                <TableCell className="px-3 text-xs">
+                                  <Badge className={cn('border', toneBadgeClass(log.status === 'success' ? 'emerald' : log.status === 'error' ? 'rose' : log.status === 'warning' ? 'amber' : 'slate'))}>{String(log.status).toUpperCase()}</Badge>
+                                </TableCell>
+                                <TableCell className="px-3 font-mono text-xs text-slate-700">{log.job_type}</TableCell>
+                                <TableCell className="px-3 text-xs text-slate-700">{log.message}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  </div>
                 </TabsContent>
                 <TabsContent value="conflict" className="m-0 p-4">
                   <ConflictPanel conflicts={dashboard.conflicts} />
@@ -1018,4 +1404,34 @@ function toneText(tone: Tone): string {
     violet: 'text-violet-700',
     slate: 'text-slate-700',
   }[tone];
+}
+
+function toneBadgeClass(tone: Tone): string {
+  return `${toneBorder(tone)} ${toneBg(tone)} ${toneText(tone)}`;
+}
+
+function policyBiasTone(value: string | null): Tone {
+  const raw = String(value ?? '');
+  if (raw.includes('Strong Bullish')) return 'emerald';
+  if (raw.includes('Mild Bullish')) return 'cyan';
+  if (raw.includes('Strong Bearish')) return 'rose';
+  if (raw.includes('Mild Bearish')) return 'amber';
+  if (raw.includes('Neutral')) return 'slate';
+  return 'slate';
+}
+
+function decisionTone(value: string | null): Tone {
+  const raw = String(value ?? '').toUpperCase();
+  if (raw === 'HIKE') return 'emerald';
+  if (raw === 'CUT') return 'rose';
+  if (raw === 'HOLD') return 'slate';
+  return 'slate';
+}
+
+function surpriseTone(value: string | null): Tone {
+  const raw = String(value ?? '').toUpperCase();
+  if (raw === 'HAWKISH_SURPRISE') return 'emerald';
+  if (raw === 'DOVISH_SURPRISE') return 'rose';
+  if (raw === 'AS_EXPECTED') return 'slate';
+  return 'slate';
 }

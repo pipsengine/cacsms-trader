@@ -27,17 +27,19 @@ import { cn } from '@/lib/utils';
 
 type Tone = 'emerald' | 'amber' | 'rose' | 'cyan' | 'violet' | 'slate';
 
+type CotNumeric = number | string | null;
+
 type CotPosition = {
   report_date: string;
   currency: string;
-  long_positions: number | null;
-  short_positions: number | null;
-  change_long: number | null;
-  change_short: number | null;
-  percent_change: number | null;
-  net_positions: number | null;
+  long_positions: CotNumeric;
+  short_positions: CotNumeric;
+  change_long: CotNumeric;
+  change_short: CotNumeric;
+  percent_change: CotNumeric;
+  net_positions: CotNumeric;
   bias: string | null;
-  net_change: number | null;
+  net_change: CotNumeric;
   market_name: string | null;
   cftc_market_code: string | null;
   exchange: string | null;
@@ -81,18 +83,40 @@ type CotLog = {
   fetched_at: string;
 };
 
-const currencies = ['All', 'USD Index', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'];
+type CotFiltersState = {
+  dateRange: string;
+  from: string;
+  to: string;
+  currency: string;
+  bias: string;
+  reportYear: string;
+  search: string;
+};
+
+const currencies = ['All', 'USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD', 'XAU'];
 const biases = ['All', 'Strong Bullish', 'Bullish but weakening', 'Strong Bearish', 'Bearish but improving', 'Neutral'];
 const dateRanges = ['Last 3 Months', 'Last 6 Months', 'Last 12 Months', 'Last 2 Years', 'All'];
 
-function formatNumber(value: number | null): string {
-  if (value == null || !Number.isFinite(value)) return 'N/A';
-  return new Intl.NumberFormat('en-US').format(value);
+function toNumber(value: unknown): number | null {
+  if (value == null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  const cleaned = raw.replaceAll(',', '').replaceAll(' ', '');
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
 }
 
-function formatPercent(value: number | null): string {
-  if (value == null || !Number.isFinite(value)) return 'N/A';
-  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(value)}%`;
+function formatNumber(value: unknown): string {
+  const n = toNumber(value);
+  if (n == null) return 'N/A';
+  return new Intl.NumberFormat('en-US').format(n);
+}
+
+function formatPercent(value: unknown): string {
+  const n = toNumber(value);
+  if (n == null) return 'N/A';
+  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n)}%`;
 }
 
 function biasTone(bias: string | null): Tone {
@@ -111,6 +135,80 @@ function toneClass(tone: Tone): string {
     cyan: 'text-cyan-700 bg-cyan-50 border-cyan-200',
     violet: 'text-violet-700 bg-violet-50 border-violet-200',
     slate: 'text-slate-700 bg-slate-50 border-slate-200',
+  };
+  return map[tone];
+}
+
+function cardAccentClass(tone: Tone): string {
+  const map: Record<Tone, string> = {
+    emerald: 'border-emerald-300 bg-gradient-to-br from-emerald-200/55 via-emerald-50/25 to-white',
+    amber: 'border-amber-300 bg-gradient-to-br from-amber-200/55 via-amber-50/25 to-white',
+    rose: 'border-rose-300 bg-gradient-to-br from-rose-200/55 via-rose-50/25 to-white',
+    cyan: 'border-cyan-300 bg-gradient-to-br from-cyan-200/55 via-cyan-50/25 to-white',
+    violet: 'border-violet-300 bg-gradient-to-br from-violet-200/55 via-violet-50/25 to-white',
+    slate: 'border-slate-300 bg-gradient-to-br from-slate-200/45 via-slate-50/20 to-white',
+  };
+  return map[tone];
+}
+
+function cardHeaderTintClass(tone: Tone): string {
+  const map: Record<Tone, string> = {
+    emerald: 'bg-emerald-50/55',
+    amber: 'bg-amber-50/55',
+    rose: 'bg-rose-50/55',
+    cyan: 'bg-cyan-50/55',
+    violet: 'bg-violet-50/55',
+    slate: 'bg-slate-50/55',
+  };
+  return map[tone];
+}
+
+function toneIconClass(tone: Tone): string {
+  const map: Record<Tone, string> = {
+    emerald: 'text-emerald-700',
+    amber: 'text-amber-700',
+    rose: 'text-rose-700',
+    cyan: 'text-cyan-700',
+    violet: 'text-violet-700',
+    slate: 'text-slate-700',
+  };
+  return map[tone];
+}
+
+function currencyChipTone(currency: string): Tone {
+  if (currency === 'All') return 'slate';
+  if (currency === 'USD') return 'cyan';
+  if (currency === 'EUR') return 'violet';
+  if (currency === 'GBP') return 'emerald';
+  if (currency === 'JPY') return 'rose';
+  if (currency === 'CHF') return 'slate';
+  if (currency === 'CAD') return 'amber';
+  if (currency === 'AUD') return 'cyan';
+  if (currency === 'NZD') return 'emerald';
+  if (currency === 'XAU') return 'amber';
+  return 'slate';
+}
+
+function chipClass(tone: Tone): string {
+  const map: Record<Tone, string> = {
+    emerald: 'border-emerald-300 bg-emerald-100/80 text-emerald-950 hover:bg-emerald-50',
+    amber: 'border-amber-300 bg-amber-100/80 text-amber-950 hover:bg-amber-50',
+    rose: 'border-rose-300 bg-rose-100/80 text-rose-950 hover:bg-rose-50',
+    cyan: 'border-cyan-300 bg-cyan-100/80 text-cyan-950 hover:bg-cyan-50',
+    violet: 'border-violet-300 bg-violet-100/80 text-violet-950 hover:bg-violet-50',
+    slate: 'border-slate-300 bg-slate-100/80 text-slate-950 hover:bg-slate-50',
+  };
+  return map[tone];
+}
+
+function chipClassInactive(tone: Tone): string {
+  const map: Record<Tone, string> = {
+    emerald: 'border-emerald-200 bg-white text-slate-800 hover:bg-emerald-50/60',
+    amber: 'border-amber-200 bg-white text-slate-800 hover:bg-amber-50/60',
+    rose: 'border-rose-200 bg-white text-slate-800 hover:bg-rose-50/60',
+    cyan: 'border-cyan-200 bg-white text-slate-800 hover:bg-cyan-50/60',
+    violet: 'border-violet-200 bg-white text-slate-800 hover:bg-violet-50/60',
+    slate: 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50',
   };
   return map[tone];
 }
@@ -135,7 +233,7 @@ export default function CotInstitutionalPositioningPage() {
   const [logs, setLogs] = useState<CotLog[]>([]);
   const [loading, setLoading] = useState({ summary: false, positions: false, action: false, logs: false });
   const [toast, setToast] = useState<{ tone: Tone; message: string } | null>(null);
-  const [filters, setFilters] = useState({
+  const [filters, setFilters] = useState<CotFiltersState>({
     dateRange: 'Last 2 Years',
     from: '',
     to: '',
@@ -188,19 +286,20 @@ export default function CotInstitutionalPositioningPage() {
     }
   };
 
-  const refreshPositions = async () => {
+  const refreshPositions = async (override?: Partial<CotFiltersState>) => {
     setLoading((s) => ({ ...s, positions: true }));
     try {
+      const activeFilters = { ...filters, ...(override ?? {}) };
       const url = new URL('/api/cot/positions', window.location.origin);
-      const range = buildDateRange(filters.dateRange);
-      const from = filters.from || range.from;
-      const to = filters.to || range.to;
+      const range = buildDateRange(activeFilters.dateRange);
+      const from = activeFilters.from || range.from;
+      const to = activeFilters.to || range.to;
       if (from) url.searchParams.set('from', from);
       if (to) url.searchParams.set('to', to);
-      if (filters.currency !== 'All') url.searchParams.set('currency', filters.currency);
-      if (filters.bias !== 'All') url.searchParams.set('bias', filters.bias);
-      if (filters.reportYear !== 'All') url.searchParams.set('year', filters.reportYear);
-      if (filters.search.trim()) url.searchParams.set('search', filters.search.trim());
+      if (activeFilters.currency !== 'All') url.searchParams.set('currency', activeFilters.currency);
+      if (activeFilters.bias !== 'All') url.searchParams.set('bias', activeFilters.bias);
+      if (activeFilters.reportYear !== 'All') url.searchParams.set('year', activeFilters.reportYear);
+      if (activeFilters.search.trim()) url.searchParams.set('search', activeFilters.search.trim());
       url.searchParams.set('limit', '800');
       const response = await fetch(url.toString(), { cache: 'no-store' });
       const payload = await response.json().catch(() => ({}));
@@ -241,7 +340,7 @@ export default function CotInstitutionalPositioningPage() {
     for (const row of [...rows].reverse()) {
       const dateKey = String(row.report_date).slice(0, 10);
       const existing = byDate.get(dateKey) ?? { date: dateKey };
-      existing[row.currency] = row.net_positions ?? null;
+      existing[row.currency] = toNumber(row.net_positions);
       byDate.set(dateKey, existing);
     }
     const netTrend = Array.from(byDate.values()).sort((a, b) => String(a.date).localeCompare(String(b.date))).slice(-60);
@@ -251,9 +350,9 @@ export default function CotInstitutionalPositioningPage() {
       .filter((r) => r.currency === selected)
       .map((r) => ({
         date: String(r.report_date).slice(0, 10),
-        long: r.long_positions ?? null,
-        short: r.short_positions ?? null,
-        netChange: r.net_change ?? null,
+        long: toNumber(r.long_positions),
+        short: toNumber(r.short_positions),
+        netChange: toNumber(r.net_change),
         bias: r.bias ?? '',
       }))
       .sort((a, b) => String(a.date).localeCompare(String(b.date)))
@@ -269,7 +368,14 @@ export default function CotInstitutionalPositioningPage() {
     })();
 
     const ranking = (() => {
-      const latest = summary?.summary.latestCotReportDate ? String(summary.summary.latestCotReportDate).slice(0, 10) : null;
+      const latestFromSummary = summary?.summary.latestCotReportDate ? String(summary.summary.latestCotReportDate).slice(0, 10) : null;
+      const latestFromRows = rows.reduce<string | null>((max, r) => {
+        const k = String(r.report_date).slice(0, 10);
+        if (!k) return max;
+        if (!max) return k;
+        return k > max ? k : max;
+      }, null);
+      const latest = latestFromSummary ?? latestFromRows;
       const latestRows = latest ? rows.filter((r) => String(r.report_date).slice(0, 10) === latest) : [];
       return latestRows
         .map((r) => ({ currency: r.currency, strength: Math.abs(Number(r.net_positions ?? 0)), net: Number(r.net_positions ?? 0) }))
@@ -311,6 +417,16 @@ export default function CotInstitutionalPositioningPage() {
     window.open(url.toString(), '_blank', 'noopener,noreferrer');
   };
 
+  const lastSyncTone: Tone = useMemo(() => {
+    const status = String(summary?.summary.lastSyncStatus ?? '').toUpperCase();
+    if (!status) return 'slate';
+    if (status.includes('SUCCESS')) return 'emerald';
+    if (status.includes('ERROR') || status.includes('FAILED')) return 'rose';
+    if (status.includes('WARNING') || status.includes('PARTIAL')) return 'amber';
+    if (status.includes('MISSING')) return 'amber';
+    return 'slate';
+  }, [summary?.summary.lastSyncStatus]);
+
   const summaryCards = [
     { icon: CalendarClock, label: 'Latest COT Report Date', value: summary?.summary.latestCotReportDate ? String(summary.summary.latestCotReportDate).slice(0, 10) : '—', tone: 'violet' as Tone },
     { icon: TrendingUp, label: 'Strongest Bullish Currency', value: summary?.summary.strongestBullishCurrency ?? '—', tone: 'emerald' as Tone },
@@ -319,7 +435,7 @@ export default function CotInstitutionalPositioningPage() {
     { icon: Activity, label: 'Largest Short Increase', value: summary?.summary.largestShortIncrease ? `${summary.summary.largestShortIncrease.currency} • ${formatNumber(summary.summary.largestShortIncrease.value)}` : '—', tone: 'amber' as Tone },
     { icon: BarChart3, label: 'Biggest Net Position Change', value: summary?.summary.biggestNetPositionChange ? `${summary.summary.biggestNetPositionChange.currency} • ${formatNumber(summary.summary.biggestNetPositionChange.value)}` : '—', tone: 'violet' as Tone },
     { icon: Database, label: 'Total Records Synced', value: String(summary?.summary.totalRecordsSynced ?? 0), tone: 'slate' as Tone },
-    { icon: ShieldAlert, label: 'Last Sync Status', value: summary?.summary.lastSyncStatus ?? '—', tone: 'slate' as Tone },
+    { icon: ShieldAlert, label: 'Last Sync Status', value: summary?.summary.lastSyncStatus ?? '—', tone: lastSyncTone },
   ];
 
   return (
@@ -363,19 +479,21 @@ export default function CotInstitutionalPositioningPage() {
               </div>
             ) : null}
 
-            <section className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <section className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
               {summaryCards.map((card) => (
-                <Card key={card.label} className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
-                  <CardHeader className="border-b border-slate-200 py-3">
-                    <CardTitle className="text-xs font-semibold flex items-center gap-2 text-slate-800">
-                      <card.icon className={cn('h-4 w-4', card.tone === 'violet' ? 'text-violet-700' : card.tone === 'emerald' ? 'text-emerald-700' : card.tone === 'rose' ? 'text-rose-700' : card.tone === 'amber' ? 'text-amber-700' : card.tone === 'cyan' ? 'text-cyan-700' : 'text-slate-700')} />
+                <Card key={card.label} className={cn('border shadow-sm shadow-slate-900/5', cardAccentClass(card.tone))}>
+                  <CardHeader className={cn('border-b py-2', card.tone === 'slate' ? 'border-slate-200' : 'border-slate-200/70', cardHeaderTintClass(card.tone))}>
+                    <CardTitle className="text-[11px] font-semibold flex items-center gap-2 text-slate-800">
+                      <card.icon className={cn('h-3.5 w-3.5', toneIconClass(card.tone))} />
                       {card.label}
                     </CardTitle>
                   </CardHeader>
-                  <CardContent className="p-4">
-                    <div className="text-sm font-mono text-slate-900">{card.value}</div>
+                  <CardContent className="p-3">
+                    <div className={cn('text-[13px] font-mono', card.tone === 'rose' ? 'text-rose-900' : card.tone === 'emerald' ? 'text-emerald-900' : card.tone === 'amber' ? 'text-amber-900' : card.tone === 'cyan' ? 'text-cyan-900' : card.tone === 'violet' ? 'text-violet-900' : 'text-slate-900')}>
+                      {card.value}
+                    </div>
                     {card.label === 'Last Sync Status' && summary?.summary.lastSyncAt ? (
-                      <div className="mt-1 text-[11px] font-mono text-slate-500">at {new Date(summary.summary.lastSyncAt).toLocaleString()}</div>
+                      <div className="mt-0.5 text-[10px] font-mono text-slate-500">at {new Date(summary.summary.lastSyncAt).toLocaleString()}</div>
                     ) : null}
                   </CardContent>
                 </Card>
@@ -443,7 +561,7 @@ export default function CotInstitutionalPositioningPage() {
                         onChange={(e) => setFilters((c) => ({ ...c, search: e.target.value }))}
                       />
                     </div>
-                    <Button size="sm" variant="secondary" disabled={loading.positions} onClick={refreshPositions}>
+                    <Button size="sm" variant="secondary" disabled={loading.positions} onClick={() => refreshPositions()}>
                       Apply
                     </Button>
                   </div>
@@ -598,6 +716,30 @@ export default function CotInstitutionalPositioningPage() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="p-0">
+                    <div className="border-b border-slate-200 bg-white/70 p-2">
+                      <div className="flex items-center gap-2 overflow-x-auto">
+                        {currencies.map((currency) => {
+                          const active = filters.currency === currency;
+                          const tone = currencyChipTone(currency);
+                          return (
+                            <button
+                              key={currency}
+                              type="button"
+                              onClick={() => {
+                                setFilters((c) => ({ ...c, currency }));
+                                refreshPositions({ currency });
+                              }}
+                              className={cn(
+                                'shrink-0 rounded-lg border px-3 py-2 text-left shadow-sm shadow-slate-900/5 transition-colors',
+                                active ? chipClass(tone) : chipClassInactive(tone),
+                              )}
+                            >
+                              <div className="font-mono text-[12px] font-semibold">{currency}</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
                     <ScrollArea className="h-[520px]">
                       <Table>
                         <TableHeader>

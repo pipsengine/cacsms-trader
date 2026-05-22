@@ -139,23 +139,30 @@ export class CftcCotCurrencyNormalizerService {
   private readonly enabled: Set<string>;
 
   constructor(enabledCurrencies?: string[]) {
-    const defaults = ['USD Index', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD'];
+    const defaults = ['USD', 'EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'NZD', 'XAU'];
     this.enabled = new Set((enabledCurrencies?.length ? enabledCurrencies : defaults).map((c) => c.trim()).filter(Boolean));
   }
 
   normalize(rawContractMarketName: string): { currency: string | null; marketName: string | null; exchange: string | null } {
     const upper = rawContractMarketName.toUpperCase();
     const { marketName, exchange } = splitMarketName(rawContractMarketName);
+    const isCrossRate =
+      upper.includes('XRATE')
+      || upper.includes('X-RATE')
+      || upper.includes('CROSS')
+      || upper.includes('/');
+
     const currency =
-      upper.includes('U.S. DOLLAR INDEX') ? 'USD Index'
-        : upper.includes('EURO FX') ? 'EUR'
-          : upper.includes('BRITISH POUND') ? 'GBP'
-            : upper.includes('JAPANESE YEN') ? 'JPY'
-              : upper.includes('SWISS FRANC') ? 'CHF'
-                : upper.includes('CANADIAN DOLLAR') ? 'CAD'
-                  : upper.includes('AUSTRALIAN DOLLAR') ? 'AUD'
-                    : upper.includes('NEW ZEALAND DOLLAR') ? 'NZD'
-                      : null;
+      (upper.includes('U.S. DOLLAR INDEX') || upper.includes('US DOLLAR INDEX') || upper.startsWith('USD INDEX')) ? 'USD'
+        : (!isCrossRate && upper.startsWith('EURO FX')) ? 'EUR'
+          : (!isCrossRate && (upper.startsWith('BRITISH POUND') || upper.startsWith('BRITISH POUND STERLING'))) ? 'GBP'
+            : (!isCrossRate && upper.startsWith('JAPANESE YEN')) ? 'JPY'
+              : (!isCrossRate && upper.startsWith('SWISS FRANC')) ? 'CHF'
+                : (!isCrossRate && upper.startsWith('CANADIAN DOLLAR')) ? 'CAD'
+                  : (!isCrossRate && upper.startsWith('AUSTRALIAN DOLLAR')) ? 'AUD'
+                    : (!isCrossRate && (upper.startsWith('NEW ZEALAND DOLLAR') || upper.startsWith('NZ DOLLAR'))) ? 'NZD'
+                      : (upper.startsWith('GOLD')) ? 'XAU'
+                        : null;
 
     if (!currency) return { currency: null, marketName, exchange };
     if (!this.enabled.has(currency)) return { currency: null, marketName, exchange };
@@ -395,6 +402,29 @@ export class CotHistoricalSyncService {
     return years;
   }
 
+  private async normalizeUsdCurrencyLabel(): Promise<void> {
+    await queryPostgres(
+      `
+        DELETE FROM cot_institutional_positions a
+        USING cot_institutional_positions b
+        WHERE a.report_type = 'FUTURES_ONLY'
+          AND b.report_type = 'FUTURES_ONLY'
+          AND a.currency = 'USD Index'
+          AND b.currency = 'USD'
+          AND a.report_date = b.report_date
+      `,
+    ).catch(() => null);
+
+    await queryPostgres(
+      `
+        UPDATE cot_institutional_positions
+        SET currency = 'USD', updated_at = now()
+        WHERE report_type = 'FUTURES_ONLY'
+          AND currency = 'USD Index'
+      `,
+    ).catch(() => null);
+  }
+
   async syncLast2Years(): Promise<SyncResult> {
     const years = this.requiredYearsForLast2Years(new Date());
     return this.syncYears(years, 'sync_last_2_years');
@@ -565,6 +595,87 @@ export class CotHistoricalSyncService {
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,now(),now())
             ON CONFLICT (report_date, currency, report_type)
             DO UPDATE SET
+              market_name = CASE
+                WHEN cot_institutional_positions.market_name IS NULL
+                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.market_name LIKE '%/%'
+                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
+                THEN EXCLUDED.market_name
+                ELSE cot_institutional_positions.market_name
+              END,
+              cftc_market_code = CASE
+                WHEN cot_institutional_positions.market_name IS NULL
+                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.market_name LIKE '%/%'
+                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
+                THEN EXCLUDED.cftc_market_code
+                ELSE cot_institutional_positions.cftc_market_code
+              END,
+              exchange = CASE
+                WHEN cot_institutional_positions.market_name IS NULL
+                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.market_name LIKE '%/%'
+                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
+                THEN EXCLUDED.exchange
+                ELSE cot_institutional_positions.exchange
+              END,
+              long_positions = CASE
+                WHEN cot_institutional_positions.market_name IS NULL
+                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.market_name LIKE '%/%'
+                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
+                THEN EXCLUDED.long_positions
+                ELSE cot_institutional_positions.long_positions
+              END,
+              short_positions = CASE
+                WHEN cot_institutional_positions.market_name IS NULL
+                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.market_name LIKE '%/%'
+                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
+                THEN EXCLUDED.short_positions
+                ELSE cot_institutional_positions.short_positions
+              END,
+              source_url = CASE
+                WHEN cot_institutional_positions.market_name IS NULL
+                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.market_name LIKE '%/%'
+                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
+                THEN EXCLUDED.source_url
+                ELSE cot_institutional_positions.source_url
+              END,
+              source_year = CASE
+                WHEN cot_institutional_positions.market_name IS NULL
+                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.market_name LIKE '%/%'
+                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
+                THEN EXCLUDED.source_year
+                ELSE cot_institutional_positions.source_year
+              END,
+              raw_contract_market_name = CASE
+                WHEN cot_institutional_positions.market_name IS NULL
+                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.market_name LIKE '%/%'
+                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
+                THEN EXCLUDED.raw_contract_market_name
+                ELSE cot_institutional_positions.raw_contract_market_name
+              END,
+              raw_row_hash = CASE
+                WHEN cot_institutional_positions.market_name IS NULL
+                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.market_name LIKE '%/%'
+                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
+                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
+                THEN EXCLUDED.raw_row_hash
+                ELSE cot_institutional_positions.raw_row_hash
+              END,
               change_long = EXCLUDED.change_long,
               change_short = EXCLUDED.change_short,
               percent_change = EXCLUDED.percent_change,
@@ -654,6 +765,7 @@ export class CotHistoricalSyncService {
     const finalRows = Array.from(deduped.values());
 
     const upsert = await this.upsertPositions(finalRows);
+    await this.normalizeUsdCurrencyLabel();
     const ok = upsert.skipped === 0;
     const message = `Synced ${finalRows.length} records for years ${requested.join(', ')} (inserted ${upsert.inserted}, updated ${upsert.updated}, skipped ${upsert.skipped}).`;
     await this.logs.append({ jobType, status: ok ? 'success' : 'warning', message, details: { ...upsert, years: requested, cutoffIso } });

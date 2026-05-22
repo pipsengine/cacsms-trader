@@ -45,7 +45,8 @@ export async function GET(request: Request) {
       clauses.push(`report_date <= $${params.length}::date`);
     }
     if (currency && currency !== 'All') {
-      params.push(currency);
+      const normalizedCurrency = currency === 'USD Index' ? 'USD' : currency;
+      params.push(normalizedCurrency);
       clauses.push(`currency = $${params.length}`);
     }
     if (bias && bias !== 'All') {
@@ -79,7 +80,7 @@ export async function GET(request: Request) {
     const rows = await queryPostgres(
       `
         SELECT
-          report_date,
+          report_date::date::text AS report_date,
           currency,
           long_positions,
           short_positions,
@@ -100,7 +101,7 @@ export async function GET(request: Request) {
           updated_at
         FROM cot_institutional_positions
         ${where}
-        ORDER BY report_date DESC, currency ASC
+        ORDER BY report_date::date DESC, currency ASC
         LIMIT $${pageParams.length - 1}
         OFFSET $${pageParams.length}
       `,

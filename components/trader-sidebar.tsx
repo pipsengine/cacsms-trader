@@ -1404,6 +1404,7 @@ function hrefForPageId(pageId: string): string | null {
   if (pageId === "macro-intelligence-overview") return "/economic-news-and-sentiment-intelligence";
   if (pageId === "economic-calendar-overview") return "/economic-news-and-sentiment-intelligence/economic-calendar";
   if (pageId === "cot-and-institutional-positioning") return "/economic-news-and-sentiment-intelligence/cot-institutional-positioning";
+  if (pageId === "monetary-policy-and-interest-rates") return "/economic-news-and-sentiment-intelligence/economic-calendar?tab=rates";
   if (pageId === "infrastructure-overview") return "/mt5-infrastructure";
   if (pageId === "connected-terminals") return "/mt5-infrastructure/terminal-operations/connected-terminals";
   if (pageId === "terminal-registration") return "/mt5-infrastructure/terminal-operations/terminal-registration";

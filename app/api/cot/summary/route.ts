@@ -11,7 +11,7 @@ export async function GET() {
 
     const latestDateResult = await queryPostgres(
       `
-        SELECT MAX(report_date)::text AS latest_date
+        SELECT MAX(report_date::date)::text AS latest_date
         FROM cot_institutional_positions
         WHERE report_type = 'FUTURES_ONLY'
       `,
@@ -22,7 +22,7 @@ export async function GET() {
       ? await queryPostgres(
         `
           SELECT
-            report_date,
+            report_date::date::text AS report_date,
             currency,
             long_positions,
             short_positions,
@@ -35,7 +35,7 @@ export async function GET() {
             bias_strength
           FROM cot_institutional_positions
           WHERE report_type = 'FUTURES_ONLY'
-            AND report_date = $1::date
+            AND report_date::date = $1::date
           ORDER BY currency ASC
         `,
         [latestDate],
