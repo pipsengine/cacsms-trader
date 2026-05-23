@@ -34,6 +34,11 @@ async function getChromium() {
   return mod.chromium;
 }
 
+async function getEconomicCalendarIntelligenceService() {
+  const mod = await import('@/services/economic-data-service/src/economic-calendar-intelligence');
+  return mod.EconomicCalendarIntelligenceService;
+}
+
 const investingCalendarServiceUrl = 'https://www.investing.com/economic-calendar/Service/getCalendarFilteredData';
 
 const centralBankRateEventPages: Record<
@@ -49,6 +54,10 @@ const centralBankRateEventPages: Record<
   170: { currency: 'GBP', country: 'United Kingdom', centralBank: 'Bank of England (BoE)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-170' },
   171: { currency: 'AUD', country: 'Australia', centralBank: 'Reserve Bank of Australia (RBA)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-171' },
 };
+
+const centralBankEventIdByCurrency = Object.fromEntries(
+  Object.entries(centralBankRateEventPages).map(([id, meta]) => [String(meta.currency).toUpperCase(), Number(id)]),
+) as Record<string, number>;
 
 function isBotProtectionError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? '');
@@ -1247,6 +1256,146 @@ export class CentralBankRateHistoryCollectorService {
     return this.syncPagesLatest({ pageIds: [pageId], jobType, lookbackDays: 120 });
   }
 
+  async syncFromEconomicCalendar(props: { jobType: string; lookbackHours: number }): Promise<CentralBankRateSyncResult> {
+    await ensureCentralBankRateTables();
+    const startedAtIso = nowIso();
+    const interval = `${Math.max(1, Math.floor(props.lookbackHours))} hours`;
+
+    const rows = await queryPostgres(
+      `
+        SELECT
+          id,
+          currency,
+          event_name,
+          event_date::text AS event_date,
+          COALESCE(event_time::text, '') AS event_time,
+          utc_event_time::text AS utc_event_time,
+          actual_value,
+          forecast_value,
+          previous_value,
+          source_url,
+          actual_captured_at::text AS actual_captured_at,
+          updated_at::text AS updated_at
+        FROM economic_events
+        WHERE currency IS NOT NULL
+          AND event_name ILIKE '%interest rate decision%'
+          AND actual_value IS NOT NULL
+          AND btrim(actual_value) <> ''
+          AND (
+            (actual_captured_at IS NOT NULL AND actual_captured_at >= now() - $1::interval)
+            OR updated_at >= now() - $1::interval
+          )
+        ORDER BY COALESCE(actual_captured_at, updated_at) DESC
+        LIMIT 500
+      `,
+      [interval],
+    )
+      .then((r) => r.rows as Array<{
+        id: string;
+        currency: string;
+        event_name: string;
+        event_date: string | null;
+        event_time: string | null;
+        utc_event_time: string | null;
+        actual_value: string | null;
+        forecast_value: string | null;
+        previous_value: string | null;
+        source_url: string | null;
+        actual_captured_at: string | null;
+        updated_at: string | null;
+      }>)
+      .catch(() => []);
+
+    let inserted = 0;
+    let updated = 0;
+    let rowsFetched = 0;
+    let failedPages = 0;
+    const pages = new Set<number>();
+    const fetchedAtIso = nowIso();
+
+    for (const row of rows) {
+      const currency = String(row.currency ?? '').trim().toUpperCase();
+      if (!currency) continue;
+      const eventId = centralBankEventIdByCurrency[currency];
+      if (!Number.isFinite(eventId)) continue;
+      const meta = centralBankRateEventPages[eventId] ?? null;
+      if (!meta) continue;
+
+      const releaseDate = row.event_date ? parseReleaseDate(row.event_date) : null;
+      if (!releaseDate) continue;
+
+      const releaseTimeRaw = String(row.event_time ?? '').trim();
+      const releaseTime = releaseTimeRaw || (row.utc_event_time ? this.timeFromUtcIso(row.utc_event_time) : '');
+
+      const actualRate = parseRate(row.actual_value);
+      const forecastRate = parseRate(row.forecast_value);
+      const previousRate = parseRate(row.previous_value);
+
+      await this.upsertEvent({
+        eventId,
+        currency: meta.currency,
+        country: meta.country,
+        centralBank: meta.centralBank,
+        eventName: meta.eventName,
+        sourceUrl: String(row.source_url ?? meta.investingUrl),
+      });
+
+      const prepared: CentralBankRateHistoryRow = {
+        eventId,
+        currency: meta.currency,
+        country: meta.country,
+        centralBank: meta.centralBank,
+        eventName: meta.eventName,
+        sourceUrl: String(row.source_url ?? meta.investingUrl),
+        releaseDate,
+        releaseTime,
+        actualRate,
+        forecastRate,
+        previousRate,
+        fetchedAtIso,
+      };
+
+      try {
+        const upserted = await this.upsertHistory(prepared);
+        pages.add(eventId);
+        rowsFetched += 1;
+        if (upserted.inserted) inserted += 1;
+        else updated += 1;
+      } catch {
+        failedPages += 1;
+      }
+    }
+
+    await appendRateSyncLog({
+      eventId: null,
+      currency: null,
+      startedAtIso,
+      completedAtIso: nowIso(),
+      status: 'CALENDAR_MIRROR',
+      rowsFetched,
+      rowsInserted: inserted,
+      rowsUpdated: updated,
+      errorMessage: rowsFetched === 0 ? 'no_recent_calendar_rate_decisions' : null,
+    });
+
+    const pagesArr = Array.from(pages.values()).sort((a, b) => a - b);
+    return {
+      ok: failedPages === 0,
+      inserted,
+      updated,
+      pages: pagesArr,
+      rowsFetched,
+      failedPages,
+      message: `Calendar mirror stored ${inserted} inserted, ${updated} updated from economic_events (lookback ${interval}).`,
+    };
+  }
+
+  private timeFromUtcIso(value: string): string {
+    const ts = Date.parse(value);
+    if (!Number.isFinite(ts)) return '';
+    return new Date(ts).toISOString().slice(11, 16);
+  }
+
   async syncPages(props: { pageIds: number[]; jobType: string; years: number }): Promise<CentralBankRateSyncResult> {
     await ensureCentralBankRateTables();
     const startedAt = nowIso();
@@ -1773,17 +1922,6 @@ function isFiveMinuteTick(now = lagosNowUtcShifted()): boolean {
   return now.getUTCMinutes() % 5 === 0;
 }
 
-const centralBankEventIdByCurrency: Record<string, number> = {
-  EUR: 164,
-  JPY: 165,
-  CAD: 166,
-  NZD: 167,
-  USD: 168,
-  CHF: 169,
-  GBP: 170,
-  AUD: 171,
-};
-
 export class CentralBankRateSchedulerService {
   private readonly collector = new CentralBankRateHistoryCollectorService();
 
@@ -1815,7 +1953,7 @@ export class CentralBankRateSchedulerService {
       if (!already) {
         const startedAtIso = nowIso();
         try {
-          const result = await this.collector.syncAllLatest('daily_rate_check');
+          const result = await this.collector.syncFromEconomicCalendar({ jobType: 'daily_calendar_mirror', lookbackHours: 48 });
           await appendRateSyncLog({
             eventId: null,
             currency: null,
@@ -1858,7 +1996,7 @@ export class CentralBankRateSchedulerService {
       if (!already) {
         const startedAtIso = nowIso();
         try {
-          const result = await this.collector.syncAllLast3Years('weekly_full_reconciliation');
+          const result = await this.collector.syncFromEconomicCalendar({ jobType: 'weekly_calendar_mirror', lookbackHours: 24 * 90 });
           await appendRateSyncLog({
             eventId: null,
             currency: null,
@@ -1891,26 +2029,7 @@ export class CentralBankRateSchedulerService {
         globalThis.__cacsmsCentralBankRatePreEventKey = bucket;
         const startedAtIso = nowIso();
         try {
-          const due = await queryPostgres(
-            `
-              SELECT currency, utc_event_time
-              FROM economic_events
-              WHERE event_name ILIKE '%interest rate decision%'
-                AND utc_event_time IS NOT NULL
-                AND utc_event_time >= now()
-                AND utc_event_time <= now() + interval '48 hours'
-            `,
-          ).then((r) => r.rows as Array<{ currency: string; utc_event_time: string }>)
-            .catch(() => []);
-
-          const uniqueCurrencies = Array.from(new Set(due.map((d) => String(d.currency ?? '').trim().toUpperCase()).filter(Boolean)));
-          const pageIds = uniqueCurrencies
-            .map((cur) => centralBankEventIdByCurrency[cur])
-            .filter((id): id is number => Number.isFinite(id));
-
-          for (const pageId of pageIds) {
-            await this.collector.syncPageLatest(pageId, 'pre_event_sync');
-          }
+          const result = await this.collector.syncFromEconomicCalendar({ jobType: 'pre_event_calendar_mirror', lookbackHours: 72 });
 
           await appendRateSyncLog({
             eventId: null,
@@ -1918,9 +2037,9 @@ export class CentralBankRateSchedulerService {
             startedAtIso,
             completedAtIso: nowIso(),
             status: 'PRE_EVENT_SUCCESS',
-            rowsFetched: 0,
-            rowsInserted: 0,
-            rowsUpdated: 0,
+            rowsFetched: result.rowsFetched,
+            rowsInserted: result.inserted,
+            rowsUpdated: result.updated,
           });
         } catch (error) {
           await appendRateSyncLog({
@@ -1946,7 +2065,7 @@ export class CentralBankRateSchedulerService {
         try {
           const due = await queryPostgres(
             `
-              SELECT currency, utc_event_time
+              SELECT id, currency
               FROM economic_events
               WHERE event_name ILIKE '%interest rate decision%'
                 AND utc_event_time IS NOT NULL
@@ -1954,17 +2073,20 @@ export class CentralBankRateSchedulerService {
                 AND utc_event_time <= now()
                 AND (actual_value IS NULL OR btrim(actual_value) = '')
             `,
-          ).then((r) => r.rows as Array<{ currency: string; utc_event_time: string }>)
+          ).then((r) => r.rows as Array<{ id: string; currency: string }>)
             .catch(() => []);
 
-          const uniqueCurrencies = Array.from(new Set(due.map((d) => String(d.currency ?? '').trim().toUpperCase()).filter(Boolean)));
-          const pageIds = uniqueCurrencies
-            .map((cur) => centralBankEventIdByCurrency[cur])
-            .filter((id): id is number => Number.isFinite(id));
-
-          for (const pageId of pageIds) {
-            await this.collector.syncPageLatest(pageId, 'post_release_sync');
+          if (due.length) {
+            const Econ = await getEconomicCalendarIntelligenceService();
+            const service = new Econ();
+            for (const event of due) {
+              const eventId = String(event.id ?? '').trim();
+              if (!eventId) continue;
+              await service.captureActualFromWebsite(eventId).catch(() => null);
+            }
           }
+
+          const result = await this.collector.syncFromEconomicCalendar({ jobType: 'post_release_calendar_mirror', lookbackHours: 4 });
 
           await appendRateSyncLog({
             eventId: null,
@@ -1972,9 +2094,9 @@ export class CentralBankRateSchedulerService {
             startedAtIso,
             completedAtIso: nowIso(),
             status: 'POST_RELEASE_SUCCESS',
-            rowsFetched: 0,
-            rowsInserted: 0,
-            rowsUpdated: 0,
+            rowsFetched: result.rowsFetched,
+            rowsInserted: result.inserted,
+            rowsUpdated: result.updated,
           });
         } catch (error) {
           await appendRateSyncLog({
