@@ -398,6 +398,47 @@ export default function MonetaryPolicyInterestRatesPage() {
                 </Card>
               </section>
 
+              <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+                <CardHeader className="border-b border-slate-200">
+                  <div className="text-sm font-semibold text-slate-950">AI Monetary Policy Summary</div>
+                  <div className="mt-1 text-xs text-slate-500">Generated from stored rates and differentials.</div>
+                </CardHeader>
+                <CardContent className="p-4 text-sm text-slate-800">{loading.bias ? 'Loading summary…' : bias?.aiSummary ?? 'No summary yet.'}</CardContent>
+              </Card>
+
+              <Card className={cn('shadow-sm shadow-slate-900/5', toneCardClass('violet'))}>
+                <CardHeader className="border-b border-slate-200">
+                  <div className="text-sm font-semibold text-slate-950">Central Bank Bias Cards</div>
+                  <div className="mt-1 text-xs text-slate-500">Aggregated 3-year decision and surprise scoring.</div>
+                </CardHeader>
+                <CardContent className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-100 p-3">
+                    <div className="text-xs font-semibold text-emerald-900">Hawkish</div>
+                    <div className="mt-1 text-lg font-semibold text-emerald-950">{biasRows.filter((r) => r.classification === 'Hawkish').length}</div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-100 p-3">
+                    <div className="text-xs font-semibold text-slate-700">Neutral</div>
+                    <div className="mt-1 text-lg font-semibold text-slate-950">{biasRows.filter((r) => r.classification === 'Neutral').length}</div>
+                  </div>
+                  <div className="rounded-lg border border-rose-200 bg-rose-100 p-3">
+                    <div className="text-xs font-semibold text-rose-900">Dovish</div>
+                    <div className="mt-1 text-lg font-semibold text-rose-950">{biasRows.filter((r) => r.classification === 'Dovish').length}</div>
+                  </div>
+                  <div className="rounded-lg border border-emerald-200 bg-emerald-100 p-3">
+                    <div className="text-xs font-semibold text-emerald-900">Rate Hikes</div>
+                    <div className="mt-1 text-lg font-semibold text-emerald-950">{stanceCards['Rate Hike']}</div>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 bg-slate-100 p-3">
+                    <div className="text-xs font-semibold text-slate-700">Rate Holds</div>
+                    <div className="mt-1 text-lg font-semibold text-slate-950">{stanceCards['Rate Hold']}</div>
+                  </div>
+                  <div className="rounded-lg border border-rose-200 bg-rose-100 p-3">
+                    <div className="text-xs font-semibold text-rose-900">Rate Cuts</div>
+                    <div className="mt-1 text-lg font-semibold text-rose-950">{stanceCards['Rate Cut']}</div>
+                  </div>
+                </CardContent>
+              </Card>
+
               <Card className="border-slate-200 bg-white">
                 <CardHeader className="border-b border-slate-200">
                   <div className="flex items-center justify-between gap-3">
@@ -417,7 +458,7 @@ export default function MonetaryPolicyInterestRatesPage() {
                     </div>
 
                     <TabsContent value="dashboard" className="m-0 space-y-4 p-4">
-                      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                      <div className="grid grid-cols-1 items-stretch gap-4 xl:grid-cols-2">
                         <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
                           <CardHeader className="border-b border-slate-200">
                             <div className="flex items-center justify-between gap-3">
@@ -450,7 +491,7 @@ export default function MonetaryPolicyInterestRatesPage() {
                                   ) : currentRows.length === 0 ? (
                                     <TableRow className="hover:bg-transparent">
                                       <TableCell colSpan={10} className="h-24 text-center text-sm text-slate-600">
-                                        No rate history rows collected yet. Run “Sync Last 3 Years Rate History”.
+                                        No rate history rows collected yet.
                                       </TableCell>
                                     </TableRow>
                                   ) : (
@@ -491,173 +532,126 @@ export default function MonetaryPolicyInterestRatesPage() {
                           </CardContent>
                         </Card>
 
-                        <div className="space-y-4">
-                          <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
-                            <CardHeader className="border-b border-slate-200">
-                              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
-                                <div>
-                                  <div className="text-sm font-semibold text-slate-950">Currency Rate History</div>
-                                  <div className="mt-1 text-xs text-slate-500">Select a currency to view its stored policy rate history.</div>
-                                </div>
-                                <div className="text-xs font-mono text-slate-600">
-                                  {loading.chart ? 'Loading…' : chartHistory?.total != null ? `${chartHistory.total} rows` : '—'}
-                                </div>
-                              </div>
-                            </CardHeader>
-                            <CardContent className="space-y-3 p-4">
-                              <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                                {currencyCards.map((c) => {
-                                  const selected = c.currency === chartCurrency;
-                                  return (
-                                    <button
-                                      key={c.currency}
-                                      type="button"
-                                      onClick={() => {
-                                        setChartCurrency(c.currency);
-                                        void loadChart(c.currency);
-                                      }}
-                                      className={cn(
-                                        'rounded-lg border px-3 py-2 text-left shadow-sm shadow-slate-900/5 transition',
-                                        toneCardClass(c.tone),
-                                        selected ? 'ring-2 ring-indigo-500 ring-offset-2' : 'hover:bg-slate-50',
-                                      )}
-                                    >
-                                      <div className="flex items-center justify-between gap-2">
-                                        <div className="text-sm font-semibold text-slate-950">{c.currency}</div>
-                                        <ToneBadge tone={c.tone}>{c.stance}</ToneBadge>
-                                      </div>
-                                      <div className="mt-1 text-xs text-slate-700">{c.centralBank ?? '—'}</div>
-                                      <div className="mt-1 font-mono text-xs text-slate-900">{fmtRate(c.actualRate)}</div>
-                                    </button>
-                                  );
-                                })}
-                              </div>
-
-                              <div className="rounded-lg border border-slate-200 bg-white p-3">
-                                <div className="mb-2 flex items-center justify-between gap-3">
-                                  <div className="text-sm font-semibold text-slate-950">{chartCurrency} Policy Rate History</div>
-                                  <Button variant="outline" size="sm" className="gap-2" onClick={() => void loadChart(chartCurrency)} disabled={loading.chart}>
-                                    {loading.chart ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh
-                                  </Button>
-                                </div>
-                                {loading.chart ? (
-                                  <div className="h-48 text-center text-sm text-slate-600">Loading chart…</div>
-                                ) : chartData.length === 0 ? (
-                                  <div className="h-48 text-center text-sm text-slate-600">No history for {chartCurrency} yet.</div>
-                                ) : (
-                                  <div className="h-56 w-full">
-                                    <ResponsiveContainer width="100%" height="100%">
-                                      <LineChart data={chartData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
-                                        <XAxis dataKey="date" tick={{ fontSize: 10 }} minTickGap={24} />
-                                        <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${Number(v).toFixed(2)}%`} domain={['auto', 'auto']} />
-                                        <Tooltip
-                                          formatter={(value: any, name: any) => {
-                                            const n = typeof value === 'number' ? value : Number(String(value));
-                                            const label = name === 'actual' ? 'Actual' : name === 'forecast' ? 'Forecast' : name === 'previous' ? 'Previous' : String(name);
-                                            return [Number.isFinite(n) ? `${n.toFixed(2)}%` : '—', label];
-                                          }}
-                                        />
-                                        <Line type="monotone" dataKey="actual" name="Actual" stroke="#4f46e5" strokeWidth={2} dot={false} />
-                                        <Line type="monotone" dataKey="forecast" name="Forecast" stroke="#f59e0b" strokeWidth={2} dot={false} />
-                                        <Line type="monotone" dataKey="previous" name="Previous" stroke="#334155" strokeWidth={2} dot={false} />
-                                      </LineChart>
-                                    </ResponsiveContainer>
-                                  </div>
-                                )}
-                              </div>
-                            </CardContent>
-                          </Card>
-
-                          <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
-                            <CardHeader className="border-b border-slate-200">
-                              <div className="text-sm font-semibold text-slate-950">Rate Differential Matrix</div>
-                              <div className="mt-1 text-xs text-slate-500">Latest policy-rate differentials for core macro pairs.</div>
-                            </CardHeader>
-                            <CardContent className="p-0">
-                              <div className="w-full overflow-x-auto">
-                                <Table>
-                                  <TableHeader className="bg-slate-50">
+                        <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+                          <CardHeader className="border-b border-slate-200">
+                            <div className="text-sm font-semibold text-slate-950">Rate Differential Matrix</div>
+                            <div className="mt-1 text-xs text-slate-500">Latest policy-rate differentials for core macro pairs.</div>
+                          </CardHeader>
+                          <CardContent className="p-0">
+                            <div className="w-full overflow-x-auto">
+                              <Table>
+                                <TableHeader className="bg-slate-50">
+                                  <TableRow className="hover:bg-transparent">
+                                    {['Pair', 'Base', 'Quote', 'Differential'].map((h) => (
+                                      <TableHead key={h} className="whitespace-nowrap px-3 py-3 text-[11px] uppercase tracking-wider text-slate-500">
+                                        {h}
+                                      </TableHead>
+                                    ))}
+                                  </TableRow>
+                                </TableHeader>
+                                <TableBody>
+                                  {loading.diffs ? (
                                     <TableRow className="hover:bg-transparent">
-                                      {['Pair', 'Base', 'Quote', 'Differential'].map((h) => (
-                                        <TableHead key={h} className="whitespace-nowrap px-3 py-3 text-[11px] uppercase tracking-wider text-slate-500">
-                                          {h}
-                                        </TableHead>
-                                      ))}
+                                      <TableCell colSpan={4} className="h-20 text-center text-sm text-slate-600">
+                                        Loading differentials…
+                                      </TableCell>
                                     </TableRow>
-                                  </TableHeader>
-                                  <TableBody>
-                                    {loading.diffs ? (
-                                      <TableRow className="hover:bg-transparent">
-                                        <TableCell colSpan={4} className="h-20 text-center text-sm text-slate-600">
-                                          Loading differentials…
-                                        </TableCell>
+                                  ) : (diffs?.matrix ?? []).length === 0 ? (
+                                    <TableRow className="hover:bg-transparent">
+                                      <TableCell colSpan={4} className="h-20 text-center text-sm text-slate-600">
+                                        No differentials yet.
+                                      </TableCell>
+                                    </TableRow>
+                                  ) : (
+                                    (diffs?.matrix ?? []).map((row) => (
+                                      <TableRow key={`${row.base}-${row.quote}`} className="hover:bg-slate-50">
+                                        <TableCell className="px-3 py-2 font-mono text-xs font-semibold text-slate-900">{row.base}/{row.quote}</TableCell>
+                                        <TableCell className="px-3 py-2 font-mono text-xs text-slate-600">{row.baseRate == null ? '—' : `${row.baseRate.toFixed(2)}%`}</TableCell>
+                                        <TableCell className="px-3 py-2 font-mono text-xs text-slate-600">{row.quoteRate == null ? '—' : `${row.quoteRate.toFixed(2)}%`}</TableCell>
+                                        <TableCell className="px-3 py-2 font-mono text-xs">{fmtDiff(row.differential)}</TableCell>
                                       </TableRow>
-                                    ) : (diffs?.matrix ?? []).length === 0 ? (
-                                      <TableRow className="hover:bg-transparent">
-                                        <TableCell colSpan={4} className="h-20 text-center text-sm text-slate-600">
-                                          No differentials yet.
-                                        </TableCell>
-                                      </TableRow>
-                                    ) : (
-                                      (diffs?.matrix ?? []).map((row) => (
-                                        <TableRow key={`${row.base}-${row.quote}`} className="hover:bg-slate-50">
-                                          <TableCell className="px-3 py-2 font-mono text-xs font-semibold text-slate-900">{row.base}/{row.quote}</TableCell>
-                                          <TableCell className="px-3 py-2 font-mono text-xs text-slate-600">{row.baseRate == null ? '—' : `${row.baseRate.toFixed(2)}%`}</TableCell>
-                                          <TableCell className="px-3 py-2 font-mono text-xs text-slate-600">{row.quoteRate == null ? '—' : `${row.quoteRate.toFixed(2)}%`}</TableCell>
-                                          <TableCell className="px-3 py-2 font-mono text-xs">{fmtDiff(row.differential)}</TableCell>
-                                        </TableRow>
-                                      ))
-                                    )}
-                                  </TableBody>
-                                </Table>
-                              </div>
-                            </CardContent>
-                          </Card>
-
-                          <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
-                            <CardHeader className="border-b border-slate-200">
-                              <div className="text-sm font-semibold text-slate-950">Central Bank Bias Cards</div>
-                              <div className="mt-1 text-xs text-slate-500">Aggregated 3-year decision and surprise scoring.</div>
-                            </CardHeader>
-                            <CardContent className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
-                              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                <div className="text-xs font-semibold text-slate-600">Hawkish</div>
-                                <div className="mt-1 text-lg font-semibold text-slate-950">{biasRows.filter((r) => r.classification === 'Hawkish').length}</div>
-                              </div>
-                              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                <div className="text-xs font-semibold text-slate-600">Neutral</div>
-                                <div className="mt-1 text-lg font-semibold text-slate-950">{biasRows.filter((r) => r.classification === 'Neutral').length}</div>
-                              </div>
-                              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                <div className="text-xs font-semibold text-slate-600">Dovish</div>
-                                <div className="mt-1 text-lg font-semibold text-slate-950">{biasRows.filter((r) => r.classification === 'Dovish').length}</div>
-                              </div>
-                              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                <div className="text-xs font-semibold text-slate-600">Rate Hikes</div>
-                                <div className="mt-1 text-lg font-semibold text-slate-950">{stanceCards['Rate Hike']}</div>
-                              </div>
-                              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                <div className="text-xs font-semibold text-slate-600">Rate Holds</div>
-                                <div className="mt-1 text-lg font-semibold text-slate-950">{stanceCards['Rate Hold']}</div>
-                              </div>
-                              <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                                <div className="text-xs font-semibold text-slate-600">Rate Cuts</div>
-                                <div className="mt-1 text-lg font-semibold text-slate-950">{stanceCards['Rate Cut']}</div>
-                              </div>
-                            </CardContent>
-                          </Card>
-
-                          <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
-                            <CardHeader className="border-b border-slate-200">
-                              <div className="text-sm font-semibold text-slate-950">AI Monetary Policy Summary</div>
-                              <div className="mt-1 text-xs text-slate-500">Generated from stored rates and differentials.</div>
-                            </CardHeader>
-                            <CardContent className="p-4 text-sm text-slate-800">
-                              {loading.bias ? 'Loading summary…' : bias?.aiSummary ?? 'No summary yet.'}
-                            </CardContent>
-                          </Card>
-                        </div>
+                                    ))
+                                  )}
+                                </TableBody>
+                              </Table>
+                            </div>
+                          </CardContent>
+                        </Card>
                       </div>
+
+                      <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+                        <CardHeader className="border-b border-slate-200">
+                          <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                            <div>
+                              <div className="text-sm font-semibold text-slate-950">Currency Rate History</div>
+                              <div className="mt-1 text-xs text-slate-500">Select a currency to view its stored policy rate history.</div>
+                            </div>
+                            <div className="text-xs font-mono text-slate-600">{loading.chart ? 'Loading…' : chartHistory?.total != null ? `${chartHistory.total} rows` : '—'}</div>
+                          </div>
+                        </CardHeader>
+                        <CardContent className="space-y-3 p-4">
+                          <div className="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
+                            {currencyCards.map((c) => {
+                              const selected = c.currency === chartCurrency;
+                              return (
+                                <button
+                                  key={c.currency}
+                                  type="button"
+                                  onClick={() => {
+                                    setChartCurrency(c.currency);
+                                    void loadChart(c.currency);
+                                  }}
+                                  className={cn(
+                                    'rounded-lg border px-3 py-2 text-left shadow-sm shadow-slate-900/5 transition',
+                                    toneCardClass(c.tone),
+                                    selected ? 'ring-2 ring-indigo-500 ring-offset-2' : 'hover:bg-slate-50',
+                                  )}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="text-sm font-semibold text-slate-950">{c.currency}</div>
+                                    <ToneBadge tone={c.tone}>{c.stance}</ToneBadge>
+                                  </div>
+                                  <div className="mt-1 text-xs text-slate-700">{c.centralBank ?? '—'}</div>
+                                  <div className="mt-1 font-mono text-xs text-slate-900">{fmtRate(c.actualRate)}</div>
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          <div className="rounded-lg border border-slate-200 bg-white p-3">
+                            <div className="mb-2 flex items-center justify-between gap-3">
+                              <div className="text-sm font-semibold text-slate-950">{chartCurrency} Policy Rate History</div>
+                              <Button variant="outline" size="sm" className="gap-2" onClick={() => void loadChart(chartCurrency)} disabled={loading.chart}>
+                                {loading.chart ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh
+                              </Button>
+                            </div>
+                            {loading.chart ? (
+                              <div className="h-56 text-center text-sm text-slate-600">Loading chart…</div>
+                            ) : chartData.length === 0 ? (
+                              <div className="h-56 text-center text-sm text-slate-600">No history for {chartCurrency} yet.</div>
+                            ) : (
+                              <div className="h-72 w-full">
+                                <ResponsiveContainer width="100%" height="100%">
+                                  <LineChart data={chartData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+                                    <XAxis dataKey="date" tick={{ fontSize: 10 }} minTickGap={24} />
+                                    <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${Number(v).toFixed(2)}%`} domain={['auto', 'auto']} />
+                                    <Tooltip
+                                      formatter={(value: any, name: any) => {
+                                        const n = typeof value === 'number' ? value : Number(String(value));
+                                        const label = name === 'actual' ? 'Actual' : name === 'forecast' ? 'Forecast' : name === 'previous' ? 'Previous' : String(name);
+                                        return [Number.isFinite(n) ? `${n.toFixed(2)}%` : '—', label];
+                                      }}
+                                    />
+                                    <Line type="monotone" dataKey="actual" name="Actual" stroke="#4f46e5" strokeWidth={2} dot={false} />
+                                    <Line type="monotone" dataKey="forecast" name="Forecast" stroke="#f59e0b" strokeWidth={2} dot={false} />
+                                    <Line type="monotone" dataKey="previous" name="Previous" stroke="#334155" strokeWidth={2} dot={false} />
+                                  </LineChart>
+                                </ResponsiveContainer>
+                              </div>
+                            )}
+                          </div>
+                        </CardContent>
+                      </Card>
                     </TabsContent>
 
                     <TabsContent value="history" className="m-0 space-y-4 p-4">
@@ -706,7 +700,7 @@ export default function MonetaryPolicyInterestRatesPage() {
                                 ) : historyRows.length === 0 ? (
                                   <TableRow className="hover:bg-transparent">
                                     <TableCell colSpan={10} className="h-24 text-center text-sm text-slate-600">
-                                      No historical rows yet. Run “Sync Last 3 Years Rate History”.
+                                      No historical rows yet.
                                     </TableCell>
                                   </TableRow>
                                 ) : (
