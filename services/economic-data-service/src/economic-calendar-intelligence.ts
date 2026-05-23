@@ -124,7 +124,7 @@ type CollectedEconomicEvent = {
   id: string;
   sourceName: string;
   sourceUrl: string;
-  sourceType: 'xml' | 'website' | 'fallback_html';
+  sourceType: 'json' | 'xml' | 'website' | 'fallback_html';
   eventKey: string;
   eventName: string;
   normalizedEventName: string;
@@ -136,12 +136,12 @@ type CollectedEconomicEvent = {
   eventTimezone: string;
   utcEventTime: string | null;
   actualValue: string | null;
-  actualSource: 'WEBSITE' | 'OFFICIAL' | 'MANUAL' | 'NONE';
+  actualSource: 'WEBSITE' | 'OFFICIAL' | 'MANUAL' | 'INVESTING' | 'NONE';
   actualCaptureStatus: 'PENDING' | 'CAPTURED' | 'NOT_RELEASED' | 'FAILED' | 'CONFLICTED';
   actualCapturedAt: string | null;
   websiteActualValue: string | null;
   xmlActualValue: string | null;
-  sourcePriorityUsed: 'OFFICIAL' | 'WEBSITE' | 'XML' | 'UNKNOWN';
+  sourcePriorityUsed: 'OFFICIAL' | 'WEBSITE' | 'XML' | 'INVESTING' | 'FOREXFACTORY' | 'UNKNOWN';
   forecastValue: string | null;
   previousValue: string | null;
   revisedPreviousValue: string | null;
@@ -164,6 +164,8 @@ const REQUIRED_CURRENCIES = ['AUD', 'CAD', 'CHF', 'EUR', 'GBP', 'JPY', 'NZD', 'U
 const requiredCurrencySet = new Set<string>(REQUIRED_CURRENCIES);
 const forexFactoryCalendarUrl = 'https://www.forexfactory.com/calendar?week=this';
 const forexFactoryXmlUrl = 'https://nfs.faireconomy.media/ff_calendar_thisweek.xml';
+const forexFactoryJsonUrl = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
+const investingCalendarUrl = 'https://www.investing.com/economic-calendar/';
 const browserUserAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36';
 const execFileAsync = promisify(execFile);
 
@@ -275,7 +277,7 @@ export class EconomicCalendarIntelligenceService {
         const collection = await this.collectForexFactoryThisWeek(resolved.jobType);
         return {
           ok: true,
-          message: `${resolved.message} ForexFactory hybrid collector stored ${collection.stored} required-currency event(s). ${collection.lifecycle.watching} released event(s) without actual values are being watched, ${collection.lifecycle.failed} stale missing releases are marked failed for retry, and ${collection.lifecycle.watcherJobsQueued} watcher job(s) are queued.`,
+          message: `${resolved.message} Investing.com calendar collector stored ${collection.stored} required-currency event(s). ${collection.lifecycle.watching} released event(s) without actual values are being watched, ${collection.lifecycle.failed} stale missing releases are marked failed for retry, and ${collection.lifecycle.watcherJobsQueued} watcher job(s) are queued.`,
         };
       }
 
@@ -294,7 +296,7 @@ export class EconomicCalendarIntelligenceService {
   }
 
   async forexFactoryXmlSync(jobType = 'forex_factory_xml_sync') {
-    return this.runForexFactoryHybridSync({ jobType, mode: 'xml' });
+    return this.runForexFactoryHybridSync({ jobType, mode: 'json' });
   }
 
   async forexFactoryBrowserSync(jobType = 'forex_factory_browser_sync') {
@@ -307,17 +309,17 @@ export class EconomicCalendarIntelligenceService {
 
   async forexFactoryBrowserActualSync(jobType = 'forex_factory_browser_actual_sync') {
     const startedAt = Date.now();
-    const sourceName = 'ForexFactory';
+    const sourceName = 'Investing.com';
     try {
-      const result = await this.captureActualsForTodayFromWebsite();
+      const result = await this.captureActualsForTodayFromInvesting();
       await this.logSourceFetch(
         sourceName,
         jobType,
         'SUCCESS',
-        `Website actual sync matched=${result.matched} captured=${result.captured} pending=${result.pending} failed=${result.failed}.`,
+        `Investing calendar actual sync matched=${result.matched} captured=${result.captured} pending=${result.pending} failed=${result.failed}.`,
         Date.now() - startedAt,
       );
-      return { ok: true, message: `Website actual sync captured ${result.captured} actual value(s). Pending ${result.pending}. Failed ${result.failed}.`, ...result };
+      return { ok: true, message: `Investing calendar actual sync captured ${result.captured} actual value(s). Pending ${result.pending}. Failed ${result.failed}.`, ...result };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'browser_actual_sync_failed';
       await this.logSourceFetch(sourceName, jobType, 'FAILED', message, Date.now() - startedAt);
@@ -326,24 +328,23 @@ export class EconomicCalendarIntelligenceService {
   }
 
   async captureActualFromWebsite(eventId: string) {
-    const sourceName = 'ForexFactory';
+    const sourceName = 'Investing.com';
     const startedAt = Date.now();
     const event = await this.loadEventForActualCapture(eventId);
     if (!event) return { ok: false, message: 'Event not found.' };
 
-    const url = forexFactoryWeekUrlForDate(event.eventDate);
-    console.log('ECON_CAL_BROWSER_OPEN', { url, eventId: event.id });
-
-    const reference = new Date(`${event.eventDate}T00:00:00Z`);
-    const scraped = await scrapeForexFactoryCalendarWithPlaywright(url, reference);
-    console.log('ECON_CAL_BROWSER_EXTRACTED', { url, rows: scraped.events.length });
-
-    const match = findBestWebsiteMatch(event, scraped.events, 60);
+    const range = weekRangeForIsoDate(event.eventDate);
+    const investingEvents = await scrapeInvestingEconomicCalendarRange(range);
+    const match = findBestInvestingCalendarMatch(
+      { currency: event.currency, eventDate: event.eventDate, normalizedEventName: event.normalizedEventName, utcEventTime: event.utcEventTime, eventName: event.eventName },
+      investingEvents,
+    );
     if (!match) {
       try {
         await queryPostgres(
           `UPDATE economic_events
            SET actual_capture_status = 'FAILED',
+               actual_source = 'NONE',
                last_checked_at = now(),
                updated_at = now()
            WHERE id = $1`,
@@ -363,50 +364,56 @@ export class EconomicCalendarIntelligenceService {
       await queryPostgres(
         `INSERT INTO scrape_error_logs (source_name, error_type, message, url, raw_context)
          VALUES ($1, $2, $3, $4, $5)`,
-        [sourceName, 'capture_actual_no_match', 'No matching website row found for event.', url, JSON.stringify({ eventId: event.id, eventKey: event.eventKey, currency: event.currency, normalizedEventName: event.normalizedEventName, eventDate: event.eventDate, utcEventTime: event.utcEventTime })],
+        [sourceName, 'capture_actual_no_match', 'No matching Investing.com calendar row found for event.', investingCalendarUrl, JSON.stringify({ eventId: event.id, eventKey: event.eventKey, currency: event.currency, normalizedEventName: event.normalizedEventName, eventDate: event.eventDate, utcEventTime: event.utcEventTime })],
       );
-      return { ok: false, message: 'No matching website row found.', captured: false };
+      return { ok: false, message: 'No matching Investing.com calendar row found.', captured: false };
     }
 
-    const actual = normalizeActualValue(match.websiteActualValue ?? match.actualValue);
+    const actual = normalizeActualValue(cleanValue(match.actualValue ?? null));
     if (!actual) {
       try {
         await queryPostgres(
           `UPDATE economic_events
            SET actual_capture_status = 'PENDING',
                actual_source = 'NONE',
+               forecast_value = COALESCE($2, forecast_value),
+               previous_value = COALESCE($3, previous_value),
                last_checked_at = now(),
                updated_at = now()
            WHERE id = $1`,
-          [event.id],
+          [event.id, cleanValue(match.forecastValue ?? null), cleanValue(match.previousValue ?? null)],
         );
       } catch (error) {
         const pgError = error as { code?: string };
         if (!pgError || pgError.code !== '42703') throw error;
         await queryPostgres(
           `UPDATE economic_events
-           SET last_checked_at = now(),
+           SET forecast_value = COALESCE($2, forecast_value),
+               previous_value = COALESCE($3, previous_value),
+               last_checked_at = now(),
                updated_at = now()
            WHERE id = $1`,
-          [event.id],
+          [event.id, cleanValue(match.forecastValue ?? null), cleanValue(match.previousValue ?? null)],
         );
       }
-      return { ok: true, message: 'Pending. Website does not show actual yet.', captured: false, status: 'PENDING' };
+      return { ok: true, message: 'Pending. Investing.com does not show actual yet.', captured: false, status: 'PENDING' };
     }
 
     try {
       await queryPostgres(
         `UPDATE economic_events
          SET actual_value = $2,
-             website_actual_value = $2,
-             actual_source = 'WEBSITE',
+             actual_source = 'INVESTING',
              actual_capture_status = 'CAPTURED',
              actual_captured_at = now(),
              status = CASE WHEN status IN ('ARCHIVED','ANALYZED') THEN status ELSE 'RELEASED' END,
+             forecast_value = COALESCE($3, forecast_value),
+             previous_value = COALESCE($4, previous_value),
+             source_priority_used = 'INVESTING',
              last_checked_at = now(),
              updated_at = now()
          WHERE id = $1`,
-        [event.id, actual],
+        [event.id, actual, cleanValue(match.forecastValue ?? null), cleanValue(match.previousValue ?? null)],
       );
     } catch (error) {
       const pgError = error as { code?: string };
@@ -415,35 +422,44 @@ export class EconomicCalendarIntelligenceService {
         `UPDATE economic_events
          SET actual_value = $2,
              status = CASE WHEN status IN ('ARCHIVED','ANALYZED') THEN status ELSE 'RELEASED' END,
+             forecast_value = COALESCE($3, forecast_value),
+             previous_value = COALESCE($4, previous_value),
              last_checked_at = now(),
              updated_at = now()
          WHERE id = $1`,
-        [event.id, actual],
+        [event.id, actual, cleanValue(match.forecastValue ?? null), cleanValue(match.previousValue ?? null)],
       );
     }
 
     await this.recordReleaseSnapshot({
       id: event.id,
       actualValue: actual,
-      forecastValue: event.forecastValue,
-      previousValue: event.previousValue,
+      forecastValue: cleanValue(match.forecastValue ?? null) ?? event.forecastValue,
+      previousValue: cleanValue(match.previousValue ?? null) ?? event.previousValue,
       revisedPreviousValue: event.revisedPreviousValue,
-      sourceUrl: url,
+      sourceUrl: investingCalendarUrl,
     });
 
     console.log('ECON_CAL_ACTUAL_CAPTURED', { eventId: event.id, actual, durationMs: Date.now() - startedAt });
     await this.logSourceFetch(sourceName, 'capture_actual', 'SUCCESS', `Captured actual for ${event.id}: ${actual}`, Date.now() - startedAt);
-    return { ok: true, message: 'Captured.', captured: true, actualValue: actual, actualSource: 'WEBSITE', actualCaptureStatus: 'CAPTURED' };
+    return { ok: true, message: 'Captured.', captured: true, actualValue: actual, actualSource: 'INVESTING', actualCaptureStatus: 'CAPTURED' };
   }
 
   private async collectForexFactoryThisWeek(jobType: string): Promise<{ stored: number; lifecycle: LifecycleReconciliation }> {
-    const result = await this.runForexFactoryHybridSync({ jobType, mode: 'hybrid' });
+    const today = new Date().toISOString().slice(0, 10);
+    const range = weekRangeForIsoDate(today);
+    const result = await this.runInvestingCalendarSync({ jobType, range });
     return { stored: result.stored, lifecycle: result.lifecycle };
   }
 
-  private async runForexFactoryHybridSync(props: { jobType: string; mode: 'xml' | 'browser' | 'hybrid' }) {
-    const sourceName = 'ForexFactory';
-    const sourceUrl = forexFactoryCalendarUrl;
+  private async runForexFactoryHybridSync(props: { jobType: string; mode: 'json' | 'xml' | 'browser' | 'hybrid' }) {
+    const today = new Date().toISOString().slice(0, 10);
+    const range = weekRangeForIsoDate(today);
+    return this.runInvestingCalendarSync({ jobType: props.jobType, range });
+  }
+
+  private async runInvestingCalendarSync(props: { jobType: string; range: { fromDate: string; toDate: string } }): Promise<{ stored: number; lifecycle: LifecycleReconciliation; investingCount: number; capturedActuals: number }> {
+    const sourceName = 'Investing.com';
     const startedAt = Date.now();
 
     await queryPostgres(
@@ -455,146 +471,128 @@ export class EconomicCalendarIntelligenceService {
            last_checked_at = now(),
            updated_at = now()
        WHERE source_name = $1`,
-      [sourceName, sourceUrl],
+      [sourceName, investingCalendarUrl],
     );
 
-    let xmlEvents: CollectedEconomicEvent[] = [];
-    let browserEvents: CollectedEconomicEvent[] = [];
-    let browserMode: 'playwright' | 'fallback_html' | 'unavailable' = 'unavailable';
+    await queryPostgres(
+      `UPDATE economic_sources
+       SET enabled = false,
+           last_checked_at = now(),
+           updated_at = now()
+       WHERE source_name = 'ForexFactory'`,
+    );
+
+    await queryPostgres(`DELETE FROM economic_events WHERE source_name = 'ForexFactory'`);
 
     try {
-      if (props.mode === 'xml' || props.mode === 'hybrid') {
-        const xmlResponse = await fetch(forexFactoryXmlUrl, {
-          headers: {
-            Accept: 'application/xml,text/xml,*/*',
-            'User-Agent': 'CacsmsTrader/1.0 economic-calendar-intelligence',
-          },
-        });
-        if (xmlResponse.ok) {
-          const xml = await xmlResponse.text();
-          xmlEvents = parseForexFactoryXml(xml);
-        } else {
-          await this.logSourceFetch(sourceName, props.jobType, 'DEGRADED', `ForexFactory XML sync returned HTTP ${xmlResponse.status}.`, Date.now() - startedAt, xmlResponse.status);
-        }
-      }
-
-      if (props.mode === 'browser' || props.mode === 'hybrid') {
-        try {
-          const scraped = await scrapeForexFactoryCalendarWithPlaywright(forexFactoryCalendarUrl);
-          browserEvents = scraped.events;
-          browserMode = 'playwright';
-        } catch (error) {
-          const message = error instanceof Error ? error.message : 'Playwright scrape failed.';
-          await queryPostgres(
-            `INSERT INTO scrape_error_logs (source_name, error_type, message, url)
-             VALUES ($1, $2, $3, $4)`,
-            [sourceName, 'browser_scrape_failed', message, sourceUrl],
-          );
-
-          const response = await fetchForexFactoryCalendarPage();
-          if (response.ok) {
-            browserEvents = parseForexFactoryCalendarHtml(response.text);
-            browserMode = 'fallback_html';
-          } else {
-            browserMode = 'unavailable';
-          }
-        }
-      }
-
-      const merge = mergeForexFactorySources({ xmlEvents, browserEvents });
+      const investingCalendar = await scrapeInvestingEconomicCalendarRange(props.range);
 
       let stored = 0;
-      for (const item of merge.merged) {
-        await this.upsertCollectedEvent(item.event, { validationStatus: item.validationStatus, conflictStatus: item.conflictStatus });
-        if (item.xmlSnapshot) {
-          await this.insertSourceSnapshot(item.event.id, 'ForexFactory XML', forexFactoryXmlUrl, item.xmlSnapshot);
+      let capturedActuals = 0;
+
+      for (const item of investingCalendar) {
+        const currency = cleanCurrency(item.currency);
+        if (!isRequiredCurrency(currency)) continue;
+
+        const actual = normalizeActualValue(cleanValue(item.actualValue ?? null));
+        const forecast = cleanValue(item.forecastValue ?? null);
+        const previous = cleanValue(item.previousValue ?? null);
+        const expectsRelease = Boolean(forecast || previous);
+
+        const scheduled = item.utcEventTime ? new Date(item.utcEventTime) : null;
+        const status = lifecycleStatusForCollectedEvent(scheduled && !Number.isNaN(scheduled.getTime()) ? scheduled : null, actual, expectsRelease);
+        const surprise = computeSurprise(actual, forecast, item.eventName);
+        const bias = classifyBias(item.eventName, surprise);
+        const biasStrength = biasScore(bias);
+        const restriction = restrictionWindowForImpact(item.impactLevel);
+        const restrictionStartTime = scheduled && !Number.isNaN(scheduled.getTime()) && restriction.beforeMinutes > 0
+          ? new Date(scheduled.getTime() - restriction.beforeMinutes * 60_000).toISOString()
+          : null;
+        const restrictionEndTime = scheduled && !Number.isNaN(scheduled.getTime()) && restriction.afterMinutes > 0
+          ? new Date(scheduled.getTime() + restriction.afterMinutes * 60_000).toISOString()
+          : null;
+
+        const eventDate = item.eventDate;
+        const eventTime = item.eventTime;
+        const normalizedEventName = normalizeEventName(item.eventName, currency);
+        const eventKey = deterministicEventKey(currency, normalizedEventName, eventDate, eventTime);
+
+        const mergedEvent: CollectedEconomicEvent = {
+          id: `evt_${eventKey}`,
+          sourceName,
+          sourceUrl: item.sourceUrl ?? investingCalendarUrl,
+          sourceType: 'website',
+          eventKey,
+          eventName: item.eventName,
+          normalizedEventName,
+          country: countryForCurrency(currency),
+          currency,
+          impactLevel: item.impactLevel,
+          eventDate,
+          eventTime,
+          eventTimezone: 'UTC',
+          utcEventTime: item.utcEventTime,
+          actualValue: actual,
+          actualSource: actual ? ('INVESTING' as const) : ('NONE' as const),
+          actualCaptureStatus: actual ? ('CAPTURED' as const) : expectsRelease ? ('PENDING' as const) : ('NOT_RELEASED' as const),
+          actualCapturedAt: actual ? new Date().toISOString() : null,
+          websiteActualValue: null,
+          xmlActualValue: null,
+          sourcePriorityUsed: 'INVESTING',
+          forecastValue: forecast,
+          previousValue: previous,
+          revisedPreviousValue: null,
+          status,
+          surpriseValue: surprise,
+          surprisePercentage: surprise,
+          surpriseDirection: surprise == null ? null : surprise > 0 ? 'positive' : surprise < 0 ? 'negative' : 'neutral',
+          bias,
+          biasStrength,
+          affectedPairs: affectedPairsForCurrency(currency),
+          tradeRestrictionRequired: item.impactLevel === 'High' || item.impactLevel === 'Critical' || item.impactLevel === 'Medium',
+          restrictionStartTime,
+          restrictionEndTime,
+          aiSummary: actual
+            ? aiSummaryForEvent(item.eventName, currency, actual, forecast, previous, bias)
+            : pendingSummaryForStatus(status),
+          aiReasoning: actual ? 'Generated by deterministic economic surprise rule engine from real collected actual/forecast/previous values.' : null,
+        };
+
+        await this.upsertCollectedEvent(mergedEvent, { validationStatus: 'INVESTING_DIRECT', conflictStatus: 'NONE' });
+        await this.insertSourceSnapshot(mergedEvent.id, 'Investing.com Calendar', mergedEvent.sourceUrl, {
+          eventDate,
+          utcEventTime: item.utcEventTime,
+          currency,
+          eventName: item.eventName,
+          normalizedEventName,
+          impactLevel: item.impactLevel,
+          actualValue: actual,
+          forecastValue: forecast,
+          previousValue: previous,
+        });
+
+        if (actual) {
+          capturedActuals += 1;
+          await this.recordReleaseSnapshot({
+            id: mergedEvent.id,
+            actualValue: actual,
+            forecastValue: forecast,
+            previousValue: previous,
+            revisedPreviousValue: null,
+            sourceUrl: mergedEvent.sourceUrl,
+          });
         }
-        if (item.websiteSnapshot) {
-          await this.insertSourceSnapshot(item.event.id, 'ForexFactory Website', forexFactoryCalendarUrl, item.websiteSnapshot);
-        }
-        for (const conflict of item.conflicts) {
-          await this.insertConflict(item.event.id, conflict.fieldName, conflict.xmlValue, conflict.websiteValue);
-        }
+
         stored += 1;
       }
 
-      const dedupe = await this.dedupeForexFactoryDuplicates();
-
-      try {
-        await queryPostgres(
-          `UPDATE economic_events
-           SET xml_actual_value = COALESCE(xml_actual_value, actual_value),
-               actual_value = NULL,
-               actual_source = 'NONE',
-               actual_capture_status = 'PENDING',
-               updated_at = now()
-           WHERE source_name = 'ForexFactory'
-             AND source_url = $1
-             AND actual_value IS NOT NULL`,
-          [forexFactoryXmlUrl],
-        );
-      } catch (error) {
-        const pgError = error as { code?: string };
-        if (!pgError || pgError.code !== '42703') throw error;
-        await queryPostgres(
-          `UPDATE economic_events
-           SET actual_value = NULL,
-               updated_at = now()
-           WHERE source_name = 'ForexFactory'
-             AND source_url = $1
-             AND actual_value IS NOT NULL`,
-          [forexFactoryXmlUrl],
-        );
-      }
-
-      const status = browserMode === 'playwright'
-        ? 'SUCCESS'
-        : browserMode === 'fallback_html'
-          ? 'DEGRADED'
-          : props.mode === 'xml'
-            ? 'DEGRADED'
-            : 'FAILED';
-
-      await queryPostgres(
-        `UPDATE economic_sources
-         SET successful_fetch_count = successful_fetch_count + $2,
-             failed_fetch_count = failed_fetch_count + $3,
-             reliability_score = LEAST(100, GREATEST(0, reliability_score + $4)),
-             last_success_at = CASE WHEN $2 > 0 THEN now() ELSE last_success_at END,
-             last_failure_at = CASE WHEN $3 > 0 THEN now() ELSE last_failure_at END,
-             last_checked_at = now(),
-             updated_at = now()
-         WHERE source_name = $1`,
-        [
-          sourceName,
-          status === 'SUCCESS' ? 1 : 0,
-          status === 'FAILED' ? 1 : 0,
-          status === 'SUCCESS' ? 5 : status === 'DEGRADED' ? 1 : -5,
-        ],
-      );
-
-      const message = `Hybrid sync stored ${stored} event(s). XML=${xmlEvents.length} Website=${browserEvents.length} via=${browserMode}. Conflicts=${merge.conflictCount}. Dedupe merged=${dedupe.merged} deleted=${dedupe.deleted}.`;
-      await this.logSourceFetch(sourceName, props.jobType, status, message, Date.now() - startedAt);
-
-      return { stored, lifecycle: await this.reconcileReleaseLifecycle(), conflictCount: merge.conflictCount, xmlCount: xmlEvents.length, websiteCount: browserEvents.length, browserMode };
+      const lifecycle = await this.reconcileReleaseLifecycle();
+      await this.logSourceFetch(sourceName, props.jobType, 'SUCCESS', `Investing.com calendar sync stored=${stored} capturedActuals=${capturedActuals} range=${props.range.fromDate}..${props.range.toDate}.`, Date.now() - startedAt);
+      return { stored, lifecycle, investingCount: investingCalendar.length, capturedActuals };
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Hybrid collector failed.';
-      await queryPostgres(
-        `UPDATE economic_sources
-         SET failed_fetch_count = failed_fetch_count + 1,
-             last_failure_at = now(),
-             last_checked_at = now(),
-             updated_at = now()
-         WHERE source_name = $1`,
-        [sourceName],
-      );
+      const message = error instanceof Error ? error.message : 'investing_calendar_sync_failed';
       await this.logSourceFetch(sourceName, props.jobType, 'FAILED', message, Date.now() - startedAt);
-      await queryPostgres(
-        `INSERT INTO scrape_error_logs (source_name, error_type, message, url)
-         VALUES ($1, $2, $3, $4)`,
-        [sourceName, 'collector_failed', message, sourceUrl],
-      );
-      return { stored: 0, lifecycle: await this.reconcileReleaseLifecycle(), conflictCount: 0, xmlCount: 0, websiteCount: 0, browserMode: 'unavailable' as const };
+      return { stored: 0, lifecycle: await this.reconcileReleaseLifecycle(), investingCount: 0, capturedActuals: 0 };
     }
   }
 
@@ -667,9 +665,9 @@ export class EconomicCalendarIntelligenceService {
         website_actual_value = COALESCE(EXCLUDED.website_actual_value, economic_events.website_actual_value),
         xml_actual_value = COALESCE(EXCLUDED.xml_actual_value, economic_events.xml_actual_value),
         source_priority_used = COALESCE(EXCLUDED.source_priority_used, economic_events.source_priority_used),
-        forecast_value = EXCLUDED.forecast_value,
-        previous_value = EXCLUDED.previous_value,
-        revised_previous_value = EXCLUDED.revised_previous_value,
+        forecast_value = COALESCE(EXCLUDED.forecast_value, economic_events.forecast_value),
+        previous_value = COALESCE(EXCLUDED.previous_value, economic_events.previous_value),
+        revised_previous_value = COALESCE(EXCLUDED.revised_previous_value, economic_events.revised_previous_value),
         status = CASE
           WHEN economic_events.status IN ('ARCHIVED','ANALYZED') THEN economic_events.status
           ELSE EXCLUDED.status
@@ -787,9 +785,9 @@ export class EconomicCalendarIntelligenceService {
             local_event_time = EXCLUDED.local_event_time,
             utc_event_time = EXCLUDED.utc_event_time,
             actual_value = COALESCE(EXCLUDED.actual_value, economic_events.actual_value),
-            forecast_value = EXCLUDED.forecast_value,
-            previous_value = EXCLUDED.previous_value,
-            revised_previous_value = EXCLUDED.revised_previous_value,
+            forecast_value = COALESCE(EXCLUDED.forecast_value, economic_events.forecast_value),
+            previous_value = COALESCE(EXCLUDED.previous_value, economic_events.previous_value),
+            revised_previous_value = COALESCE(EXCLUDED.revised_previous_value, economic_events.revised_previous_value),
             status = CASE
               WHEN economic_events.status IN ('ARCHIVED','ANALYZED') THEN economic_events.status
               ELSE EXCLUDED.status
@@ -1180,20 +1178,6 @@ export class EconomicCalendarIntelligenceService {
     let archived = 0;
     let restrictionsUpserted = 0;
 
-    const shouldRunReleaseWatcher = claimed.rows.some((row) => String(row.job_type ?? '') === 'release_watcher');
-    if (shouldRunReleaseWatcher) {
-      try {
-        await this.forexFactoryBrowserActualSync('release_watcher_batch');
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'release_watcher_batch_failed';
-        await queryPostgres(
-          `INSERT INTO scrape_error_logs (source_name, error_type, message)
-           VALUES ($1, $2, $3)`,
-          ['Economic Calendar Worker', 'release_watcher_batch_failed', message],
-        );
-      }
-    }
-
     for (const row of claimed.rows) {
       processed += 1;
       const jobId = String(row.id);
@@ -1212,13 +1196,28 @@ export class EconomicCalendarIntelligenceService {
           continue;
         }
 
-        const refreshed = await this.loadEventForMonitoring(eventId);
+        let refreshed = await this.loadEventForMonitoring(eventId);
         if (!refreshed) {
           await this.failMonitoringJob(jobId, 'event_not_found_after_refresh');
           continue;
         }
 
         restrictionsUpserted += await this.upsertTradeRestrictionWindow(refreshed);
+
+        if (jobType === 'release_watcher') {
+          try {
+            await this.captureActualFromWebsite(eventId);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'release_watcher_capture_failed';
+            await queryPostgres(
+              `INSERT INTO scrape_error_logs (source_name, error_type, message)
+               VALUES ($1, $2, $3)`,
+              ['Economic Calendar Worker', 'release_watcher_capture_failed', message],
+            );
+          }
+          const afterCapture = await this.loadEventForMonitoring(eventId);
+          if (afterCapture) refreshed = afterCapture;
+        }
 
         if (refreshed.actualValue) {
           await this.recordReleaseSnapshot(refreshed);
@@ -1463,13 +1462,13 @@ export class EconomicCalendarIntelligenceService {
         event.forecastValue,
         event.previousValue,
         event.revisedPreviousValue,
-        'ForexFactory Website',
-        JSON.stringify({ sourceUrl: event.sourceUrl ?? forexFactoryCalendarUrl }),
+        'Investing.com Calendar',
+        JSON.stringify({ sourceUrl: event.sourceUrl ?? investingCalendarUrl }),
       ],
     );
   }
 
-  private async captureActualsForTodayFromWebsite(): Promise<{ matched: number; captured: number; pending: number; failed: number }> {
+  private async captureActualsForTodayFromInvesting(): Promise<{ matched: number; captured: number; pending: number; failed: number }> {
     const targets = await queryPostgres(
       `
       SELECT
@@ -1479,6 +1478,7 @@ export class EconomicCalendarIntelligenceService {
         event_time::text AS event_time,
         utc_event_time::text AS utc_event_time,
         currency,
+        event_name,
         normalized_event_name,
         forecast_value,
         previous_value,
@@ -1486,144 +1486,118 @@ export class EconomicCalendarIntelligenceService {
       FROM economic_events
       WHERE currency = ANY($1::text[])
         AND actual_value IS NULL
-        AND validation_status LIKE 'WEBSITE%'
         AND utc_event_time IS NOT NULL
         AND utc_event_time >= now() - interval '6 hours'
         AND utc_event_time <= now() + interval '24 hours'
-        AND (forecast_value IS NOT NULL OR previous_value IS NOT NULL OR revised_previous_value IS NOT NULL)
       ORDER BY utc_event_time ASC
       LIMIT 200
       `,
       [[...REQUIRED_CURRENCIES]],
     );
 
-    const byWeek = new Map<string, Array<{
-      id: string;
-      eventKey: string;
-      eventDate: string;
-      eventTime: string | null;
-      utcEventTime: string | null;
-      currency: string;
-      normalizedEventName: string;
-      forecastValue: string | null;
-      previousValue: string | null;
-      revisedPreviousValue: string | null;
-    }>>();
-
-    for (const row of targets.rows) {
-      const eventDate = String(row.event_date);
-      const weekUrl = forexFactoryWeekUrlForDate(eventDate);
-      const bucket = byWeek.get(weekUrl) ?? [];
-      bucket.push({
-        id: String(row.id),
-        eventKey: String(row.event_key),
-        eventDate,
-        eventTime: nullableString(row.event_time),
-        utcEventTime: nullableString(row.utc_event_time),
-        currency: String(row.currency),
-        normalizedEventName: String(row.normalized_event_name),
-        forecastValue: nullableString(row.forecast_value),
-        previousValue: nullableString(row.previous_value),
-        revisedPreviousValue: nullableString(row.revised_previous_value),
-      });
-      byWeek.set(weekUrl, bucket);
-    }
+    const dates = targets.rows
+      .map((row) => String(row.event_date))
+      .filter((value) => value)
+      .sort();
+    const fromDate = dates[0] ?? new Date().toISOString().slice(0, 10);
+    const toDate = dates[dates.length - 1] ?? fromDate;
+    const investingEvents = await scrapeInvestingEconomicCalendarRange({ fromDate, toDate });
 
     let matched = 0;
     let captured = 0;
     let pending = 0;
     let failed = 0;
 
-    for (const [weekUrl, events] of byWeek.entries()) {
-      const reference = new Date(`${events[0]?.eventDate ?? new Date().toISOString().slice(0, 10)}T00:00:00Z`);
-      console.log('ECON_CAL_BROWSER_OPEN', { url: weekUrl, eventCount: events.length });
-      const scraped = await scrapeForexFactoryCalendarWithPlaywright(weekUrl, reference);
-      console.log('ECON_CAL_BROWSER_EXTRACTED', { url: weekUrl, rows: scraped.events.length });
+    for (const row of targets.rows) {
+      const eventId = String(row.id);
+      const eventName = String(row.event_name ?? '');
+      const currency = String(row.currency ?? '');
+      const eventDate = String(row.event_date ?? '');
+      const normalizedEventName = String(row.normalized_event_name ?? '');
+      const utcEventTime = nullableString(row.utc_event_time);
 
-      for (const event of events) {
-        const match = findBestWebsiteMatch(event, scraped.events, 60);
-        if (!match) {
-          failed += 1;
-          try {
-            await queryPostgres(
-              `UPDATE economic_events
-               SET actual_capture_status = 'FAILED',
-                   last_checked_at = now(),
-                   updated_at = now()
-               WHERE id = $1`,
-              [event.id],
-            );
-          } catch (error) {
-            const pgError = error as { code?: string };
-            if (!pgError || pgError.code !== '42703') throw error;
-            await queryPostgres(
-              `UPDATE economic_events
-               SET last_checked_at = now(),
-                   updated_at = now()
-               WHERE id = $1`,
-              [event.id],
-            );
-          }
-          continue;
-        }
+      const match = findBestInvestingCalendarMatch({ currency, eventDate, normalizedEventName, utcEventTime, eventName }, investingEvents);
+      if (!match) {
+        failed += 1;
+        continue;
+      }
 
-        matched += 1;
-        const actual = normalizeActualValue(match.websiteActualValue ?? match.actualValue);
-        if (!actual) {
-          pending += 1;
-          try {
-            await queryPostgres(
-              `UPDATE economic_events
-               SET actual_capture_status = 'PENDING',
-                   actual_source = 'NONE',
-                   last_checked_at = now(),
-                   updated_at = now()
-               WHERE id = $1`,
-              [event.id],
-            );
-          } catch (error) {
-            const pgError = error as { code?: string };
-            if (!pgError || pgError.code !== '42703') throw error;
-            await queryPostgres(
-              `UPDATE economic_events
-               SET last_checked_at = now(),
-                   updated_at = now()
-               WHERE id = $1`,
-              [event.id],
-            );
-          }
-          continue;
-        }
+      matched += 1;
+      const actual = normalizeActualValue(cleanValue(match.actualValue ?? null));
+      const forecast = cleanValue(match.forecastValue ?? null);
+      const previous = cleanValue(match.previousValue ?? null);
 
-        captured += 1;
+      if (!actual) {
+        pending += 1;
         try {
           await queryPostgres(
             `UPDATE economic_events
-             SET actual_value = $2,
-                 website_actual_value = $2,
-                 actual_source = 'WEBSITE',
-                 actual_capture_status = 'CAPTURED',
-                 actual_captured_at = now(),
-                 status = CASE WHEN status IN ('ARCHIVED','ANALYZED') THEN status ELSE 'RELEASED' END,
+             SET actual_capture_status = 'PENDING',
+                 actual_source = 'NONE',
+                 forecast_value = COALESCE($2, forecast_value),
+                 previous_value = COALESCE($3, previous_value),
                  last_checked_at = now(),
                  updated_at = now()
              WHERE id = $1`,
-            [event.id, actual],
+            [eventId, forecast, previous],
           );
         } catch (error) {
           const pgError = error as { code?: string };
           if (!pgError || pgError.code !== '42703') throw error;
           await queryPostgres(
             `UPDATE economic_events
-             SET actual_value = $2,
-                 status = CASE WHEN status IN ('ARCHIVED','ANALYZED') THEN status ELSE 'RELEASED' END,
+             SET forecast_value = COALESCE($2, forecast_value),
+                 previous_value = COALESCE($3, previous_value),
                  last_checked_at = now(),
                  updated_at = now()
              WHERE id = $1`,
-            [event.id, actual],
+            [eventId, forecast, previous],
           );
         }
+        continue;
       }
+
+      captured += 1;
+      try {
+        await queryPostgres(
+          `UPDATE economic_events
+           SET actual_value = $2,
+               actual_source = 'INVESTING',
+               actual_capture_status = 'CAPTURED',
+               actual_captured_at = now(),
+               status = CASE WHEN status IN ('ARCHIVED','ANALYZED') THEN status ELSE 'RELEASED' END,
+               forecast_value = COALESCE($3, forecast_value),
+               previous_value = COALESCE($4, previous_value),
+               source_priority_used = 'INVESTING',
+               last_checked_at = now(),
+               updated_at = now()
+           WHERE id = $1`,
+          [eventId, actual, forecast, previous],
+        );
+      } catch (error) {
+        const pgError = error as { code?: string };
+        if (!pgError || pgError.code !== '42703') throw error;
+        await queryPostgres(
+          `UPDATE economic_events
+           SET actual_value = $2,
+               status = CASE WHEN status IN ('ARCHIVED','ANALYZED') THEN status ELSE 'RELEASED' END,
+               forecast_value = COALESCE($3, forecast_value),
+               previous_value = COALESCE($4, previous_value),
+               last_checked_at = now(),
+               updated_at = now()
+           WHERE id = $1`,
+          [eventId, actual, forecast, previous],
+        );
+      }
+
+      await this.recordReleaseSnapshot({
+        id: eventId,
+        actualValue: actual,
+        forecastValue: forecast,
+        previousValue: previous,
+        revisedPreviousValue: nullableString(row.revised_previous_value),
+        sourceUrl: investingCalendarUrl,
+      });
     }
 
     return { matched, captured, pending, failed };
@@ -1745,6 +1719,7 @@ export class EconomicCalendarIntelligenceService {
           archived_at::text AS archived_at
         FROM economic_events
         WHERE currency = ANY($1::text[])
+          AND source_name <> 'ForexFactory'
           AND (utc_event_time IS NULL OR utc_event_time >= now() - interval '14 days')
         ORDER BY COALESCE(utc_event_time, created_at) ASC
         LIMIT 500
@@ -1796,6 +1771,7 @@ export class EconomicCalendarIntelligenceService {
             archived_at::text AS archived_at
           FROM economic_events
           WHERE currency = ANY($1::text[])
+            AND source_name <> 'ForexFactory'
             AND (utc_event_time IS NULL OR utc_event_time >= now() - interval '14 days')
           ORDER BY COALESCE(utc_event_time, created_at) ASC
           LIMIT 500
@@ -2388,6 +2364,517 @@ function findBestWebsiteMatch(
   return best ?? candidates[0];
 }
 
+type InvestingEconomicCalendarEvent = {
+  eventDate: string;
+  utcEventTime: string | null;
+  eventTime: string | null;
+  currency: string;
+  eventName: string;
+  normalizedEventName: string;
+  impactLevel: EconomicImpactLevel;
+  sourceUrl: string | null;
+  actualValue: string | null;
+  forecastValue: string | null;
+  previousValue: string | null;
+};
+
+type InvestingCalendarMatch = InvestingEconomicCalendarEvent & { matchScore: number };
+
+function toForexFactoryScheduleOnly(event: CollectedEconomicEvent): CollectedEconomicEvent {
+  const scheduled = event.utcEventTime ? new Date(event.utcEventTime) : null;
+  const status = lifecycleStatusForCollectedEvent(scheduled && !Number.isNaN(scheduled.getTime()) ? scheduled : null, null, false);
+
+  return {
+    ...event,
+    actualValue: null,
+    actualSource: 'NONE',
+    actualCaptureStatus: 'NOT_RELEASED',
+    actualCapturedAt: null,
+    websiteActualValue: null,
+    xmlActualValue: null,
+    sourcePriorityUsed: 'FOREXFACTORY',
+    forecastValue: null,
+    previousValue: null,
+    revisedPreviousValue: null,
+    status,
+    surpriseValue: null,
+    surprisePercentage: null,
+    surpriseDirection: null,
+    bias: 'Not Enough Data',
+    biasStrength: 0,
+    aiSummary: pendingSummaryForStatus(status),
+    aiReasoning: null,
+  };
+}
+
+function weekRangeForIsoDate(dateIso: string): { fromDate: string; toDate: string } {
+  const parsed = new Date(`${dateIso}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    const today = new Date().toISOString().slice(0, 10);
+    return { fromDate: today, toDate: today };
+  }
+  const day = parsed.getUTCDay();
+  const mondayOffset = (day + 6) % 7;
+  const monday = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate() - mondayOffset, 0, 0, 0));
+  const sunday = new Date(Date.UTC(monday.getUTCFullYear(), monday.getUTCMonth(), monday.getUTCDate() + 6, 0, 0, 0));
+  return { fromDate: monday.toISOString().slice(0, 10), toDate: sunday.toISOString().slice(0, 10) };
+}
+
+function normalizeLooseTitle(value: string): string {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function bigramDiceCoefficient(a: string, b: string): number {
+  const left = normalizeLooseTitle(a);
+  const right = normalizeLooseTitle(b);
+  if (!left || !right) return 0;
+  if (left === right) return 1;
+  if (left.length < 2 || right.length < 2) return 0;
+
+  const make = (text: string) => {
+    const grams = new Map<string, number>();
+    for (let i = 0; i < text.length - 1; i += 1) {
+      const gram = text.slice(i, i + 2);
+      grams.set(gram, (grams.get(gram) ?? 0) + 1);
+    }
+    return grams;
+  };
+
+  const gramsA = make(left);
+  const gramsB = make(right);
+  let intersection = 0;
+  for (const [gram, countA] of gramsA.entries()) {
+    const countB = gramsB.get(gram) ?? 0;
+    intersection += Math.min(countA, countB);
+  }
+
+  const sizeA = Array.from(gramsA.values()).reduce((sum, n) => sum + n, 0);
+  const sizeB = Array.from(gramsB.values()).reduce((sum, n) => sum + n, 0);
+  if (sizeA + sizeB === 0) return 0;
+  return (2 * intersection) / (sizeA + sizeB);
+}
+
+function normalizeInvestingCurrency(value: string): string {
+  const raw = String(value ?? '').trim().toUpperCase();
+  if (raw.length === 3) return raw;
+  const mapping: Record<string, string> = {
+    EU: 'EUR',
+    US: 'USD',
+    GB: 'GBP',
+    UK: 'GBP',
+    JP: 'JPY',
+    CH: 'CHF',
+    CA: 'CAD',
+    AU: 'AUD',
+    NZ: 'NZD',
+    CN: 'CNY',
+  };
+  return mapping[raw] ?? raw;
+}
+
+function findBestInvestingCalendarMatch(
+  target: { currency: string; eventDate: string; normalizedEventName: string; utcEventTime: string | null; eventName: string },
+  investingEvents: InvestingEconomicCalendarEvent[],
+): InvestingCalendarMatch | null {
+  const currency = cleanCurrency(target.currency);
+  const date = String(target.eventDate ?? '').trim();
+  const candidates = investingEvents
+    .filter((event) => cleanCurrency(event.currency) === currency)
+    .filter((event) => String(event.eventDate ?? '').trim() === date);
+
+  if (!candidates.length) return null;
+
+  const targetTitle = normalizeLooseTitle(target.normalizedEventName || target.eventName);
+  const targetTime = target.utcEventTime ? new Date(target.utcEventTime).getTime() : Number.NaN;
+
+  let best: InvestingCalendarMatch | null = null;
+  let bestScore = -1;
+
+  for (const candidate of candidates) {
+    const candidateTitle = normalizeLooseTitle(candidate.normalizedEventName || candidate.eventName);
+    let score = bigramDiceCoefficient(targetTitle, candidateTitle);
+
+    const candidateTime = candidate.utcEventTime ? new Date(candidate.utcEventTime).getTime() : Number.NaN;
+    if (Number.isFinite(targetTime) && Number.isFinite(candidateTime)) {
+      const deltaMin = Math.abs(candidateTime - targetTime) / 60_000;
+      if (deltaMin > 180) score -= 0.25;
+      else if (deltaMin > 90) score -= 0.15;
+      else if (deltaMin > 30) score -= 0.05;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = { ...candidate, matchScore: Math.round(score * 1000) / 1000 };
+    }
+  }
+
+  if (!best || bestScore < 0.55) return null;
+  return best;
+}
+
+function decodeHtmlEntities(value: string): string {
+  return String(value ?? '')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function stripHtmlTags(value: string): string {
+  const withoutScripts = String(value ?? '').replace(/<script[\s\S]*?<\/script>/gi, '');
+  const withoutStyles = withoutScripts.replace(/<style[\s\S]*?<\/style>/gi, '');
+  return decodeHtmlEntities(withoutStyles.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
+function parseInvestingHeaderDate(raw: string): string | null {
+  const monthMap: Record<string, number> = {
+    jan: 1, january: 1,
+    feb: 2, february: 2,
+    mar: 3, march: 3,
+    apr: 4, april: 4,
+    may: 5,
+    jun: 6, june: 6,
+    jul: 7, july: 7,
+    aug: 8, august: 8,
+    sep: 9, sept: 9, september: 9,
+    oct: 10, october: 10,
+    nov: 11, november: 11,
+    dec: 12, december: 12,
+  };
+  const text = String(raw ?? '').trim();
+  if (!text) return null;
+
+  const mdy = text.match(/([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})/);
+  if (mdy) {
+    const mm = monthMap[mdy[1].toLowerCase()] ?? 0;
+    const dd = Number(mdy[2]);
+    const yyyy = Number(mdy[3]);
+    if (!mm || !dd || !yyyy) return null;
+    return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  }
+
+  const dmy = text.match(/(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})/);
+  if (dmy) {
+    const dd = Number(dmy[1]);
+    const mm = monthMap[dmy[2].toLowerCase()] ?? 0;
+    const yyyy = Number(dmy[3]);
+    if (!mm || !dd || !yyyy) return null;
+    return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  }
+
+  return null;
+}
+
+function extractTdTextByClass(trHtml: string, classCandidates: string[]): string {
+  for (const cls of classCandidates) {
+    const match = trHtml.match(new RegExp(`<td[^>]*class="[^"]*\\b${cls}\\b[^"]*"[^>]*>([\\s\\S]*?)<\\/td>`, 'i'));
+    if (!match) continue;
+    const text = stripHtmlTags(match[1] ?? '');
+    if (text) return text;
+  }
+  return '';
+}
+
+function parseInvestingCalendarServiceHtml(html: string): Array<{ eventDate: string | null; utcEventTime: string | null; eventTime: string | null; currencyText: string; eventName: string; impactLevel: EconomicImpactLevel; sourceUrl: string | null; actual: string; forecast: string; previous: string }> {
+  const rows = Array.from(String(html ?? '').matchAll(/<tr\b[\s\S]*?<\/tr>/gi)).map((match) => match[0]);
+  let currentDate: string | null = null;
+  const out: Array<{ eventDate: string | null; utcEventTime: string | null; eventTime: string | null; currencyText: string; eventName: string; impactLevel: EconomicImpactLevel; sourceUrl: string | null; actual: string; forecast: string; previous: string }> = [];
+
+  for (const rowHtml of rows) {
+    const isDayRow = /\btheDay\b/i.test(rowHtml);
+    if (isDayRow) {
+      const maybeDate = parseInvestingHeaderDate(stripHtmlTags(rowHtml));
+      if (maybeDate) {
+        currentDate = maybeDate;
+        continue;
+      }
+    }
+
+    const isEventRow = /eventRowId_/i.test(rowHtml) || /js-event-item/i.test(rowHtml) || /data-event-datetime=/i.test(rowHtml);
+    if (!isEventRow) continue;
+
+    const dtMatch = rowHtml.match(/data-event-datetime="([^"]+)"/i);
+    const dtText = dtMatch ? String(dtMatch[1]) : '';
+    const dtNormalized = dtText ? dtText.replace(/\//g, '-').replace(' ', 'T') : '';
+    const parsedDate = dtNormalized ? new Date(dtNormalized.endsWith('Z') ? dtNormalized : `${dtNormalized}Z`) : null;
+    const utcEventTime = parsedDate && !Number.isNaN(parsedDate.getTime()) ? parsedDate.toISOString() : null;
+    const eventTime = utcEventTime ? utcEventTime.slice(11, 19) : null;
+
+    let eventDate = utcEventTime ? utcEventTime.slice(0, 10) : currentDate;
+    const timeText = extractTdTextByClass(rowHtml, ['time', 'first', 'js-time']);
+    if (!utcEventTime && eventDate && timeText && /^\d{2}:\d{2}$/.test(timeText)) {
+      const fallback = new Date(`${eventDate}T${timeText}:00Z`);
+      if (!Number.isNaN(fallback.getTime())) {
+        eventDate = fallback.toISOString().slice(0, 10);
+      }
+    }
+
+    const currencyText = extractTdTextByClass(rowHtml, ['flagCur', 'cur', 'currency']);
+    const eventName = extractTdTextByClass(rowHtml, ['event']);
+    const sentimentTitleMatch = rowHtml.match(/class="[^"]*\bsentiment\b[^"]*"[^>]*title="([^"]+)"/i);
+    const sentimentTitle = sentimentTitleMatch ? stripHtmlTags(String(sentimentTitleMatch[1] ?? '')) : '';
+    const fullBulls = (rowHtml.match(/grayFullBullishIcon/gi) ?? []).length;
+    const impactLevel: EconomicImpactLevel = /high/i.test(sentimentTitle) || fullBulls >= 3
+      ? 'High'
+      : /moderate/i.test(sentimentTitle) || fullBulls === 2
+        ? 'Medium'
+        : 'Low';
+
+    const hrefMatch = rowHtml.match(/<td[^>]*class="[^"]*\bevent\b[^"]*"[\s\S]*?href="([^"]+)"/i);
+    const href = hrefMatch ? String(hrefMatch[1] ?? '') : '';
+    const sourceUrl = href
+      ? (href.startsWith('http') ? href : `https://www.investing.com${href.startsWith('/') ? '' : '/'}${href}`)
+      : null;
+
+    const actual = extractTdTextByClass(rowHtml, ['act', 'actual']);
+    const forecast = extractTdTextByClass(rowHtml, ['fore', 'cons', 'forecast']);
+    const previous = extractTdTextByClass(rowHtml, ['prev', 'previous']);
+
+    if (!eventDate || !currencyText || !eventName) continue;
+    out.push({ eventDate, utcEventTime, eventTime, currencyText, eventName, impactLevel, sourceUrl, actual, forecast, previous });
+  }
+
+  return out;
+}
+
+async function fetchInvestingEconomicCalendarRangeViaHttp(range: { fromDate: string; toDate: string }): Promise<InvestingEconomicCalendarEvent[]> {
+  const url = 'https://www.investing.com/economic-calendar/Service/getCalendarFilteredData';
+  const countryIds = [5, 4, 6, 35, 12, 25, 43, 17, 22, 10, 26];
+  const encodedCountries = countryIds.map((id) => `country%5B%5D=${encodeURIComponent(String(id))}`).join('&');
+  const body = `${encodedCountries}&dateFrom=${encodeURIComponent(range.fromDate)}&dateTo=${encodeURIComponent(range.toDate)}&currentTab=custom&submitFilters=1&limit_from=0`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Origin: 'https://www.investing.com',
+      Referer: investingCalendarUrl,
+      'X-Requested-With': 'XMLHttpRequest',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      Accept: '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'User-Agent': browserUserAgent,
+    },
+    body,
+  });
+
+  if (!response.ok) return [];
+  const text = await response.text();
+  if (!text || text.trim().startsWith('<')) return [];
+
+  let payload: any;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  const html = String(payload?.data ?? '');
+  if (!html) return [];
+
+  const parsedRows = parseInvestingCalendarServiceHtml(html);
+  return parsedRows
+    .map((row) => {
+      const eventDate = String(row.eventDate ?? '').trim();
+      if (!eventDate || eventDate < range.fromDate || eventDate > range.toDate) return null;
+
+      const currency = normalizeInvestingCurrency(String(row.currencyText ?? ''));
+      if (!currency || currency.length < 2) return null;
+
+      const eventName = String(row.eventName ?? '').trim();
+      if (!eventName) return null;
+
+      return {
+        eventDate,
+        utcEventTime: row.utcEventTime ? String(row.utcEventTime) : (null as string | null),
+        eventTime: row.eventTime ? String(row.eventTime) : null,
+        currency,
+        eventName,
+        normalizedEventName: normalizeEventName(eventName, currency),
+        impactLevel: row.impactLevel ? (String(row.impactLevel) as EconomicImpactLevel) : 'Low',
+        sourceUrl: row.sourceUrl ? String(row.sourceUrl) : null,
+        actualValue: cleanValue(String(row.actual ?? '')) ?? null,
+        forecastValue: cleanValue(String(row.forecast ?? '')) ?? null,
+        previousValue: cleanValue(String(row.previous ?? '')) ?? null,
+      } satisfies InvestingEconomicCalendarEvent;
+    })
+    .filter((row): row is InvestingEconomicCalendarEvent => Boolean(row));
+}
+
+async function scrapeInvestingEconomicCalendarRange(range: { fromDate: string; toDate: string }): Promise<InvestingEconomicCalendarEvent[]> {
+  const direct = await fetchInvestingEconomicCalendarRangeViaHttp(range).catch(() => []);
+  if (direct.length) return direct;
+
+  const headless = String(process.env.CACSMS_INVESTING_HEADLESS ?? 'true').toLowerCase() !== 'false';
+  const browser = await chromium
+    .launch({ headless, channel: 'chrome', args: ['--disable-blink-features=AutomationControlled'] })
+    .catch(() => chromium.launch({ headless, args: ['--disable-blink-features=AutomationControlled'] }));
+  const context = await browser.newContext({
+    userAgent: browserUserAgent,
+    viewport: { width: 1365, height: 900 },
+    locale: 'en-US',
+    timezoneId: 'UTC',
+  });
+  const page = await context.newPage();
+
+  try {
+    const start = new Date(`${range.fromDate}T00:00:00Z`);
+    const end = new Date(`${range.toDate}T00:00:00Z`);
+    const days: string[] = [];
+    if (!Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime())) {
+      for (let cursor = start.getTime(); cursor <= end.getTime(); cursor += 24 * 60 * 60_000) {
+        days.push(new Date(cursor).toISOString().slice(0, 10));
+      }
+    }
+    if (!days.length) days.push(new Date().toISOString().slice(0, 10));
+
+    const collectedRows: Array<{ eventDate: string | null; timeText: string; currencyText: string; eventName: string; actual: string; forecast: string; previous: string }> = [];
+
+    for (const day of days) {
+      await page.goto(`${investingCalendarUrl}?day=${encodeURIComponent(day)}`, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      await page.waitForTimeout(1_000);
+      await page.evaluate(() => {
+        const consent = document.querySelector('#onetrust-accept-btn-handler') as HTMLElement | null;
+        if (consent) {
+          try { consent.click(); } catch { /* noop */ }
+        }
+      }).catch(() => {});
+      await page.waitForTimeout(500);
+      await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+      await page.waitForTimeout(500);
+
+      const rawRows = await page.evaluate((forcedDateIso) => {
+      const monthMap: Record<string, number> = {
+        jan: 1, january: 1,
+        feb: 2, february: 2,
+        mar: 3, march: 3,
+        apr: 4, april: 4,
+        may: 5,
+        jun: 6, june: 6,
+        jul: 7, july: 7,
+        aug: 8, august: 8,
+        sep: 9, sept: 9, september: 9,
+        oct: 10, october: 10,
+        nov: 11, november: 11,
+        dec: 12, december: 12,
+      };
+
+      const parseHeaderDate = (text: string): string | null => {
+        const raw = String(text ?? '').trim();
+        if (!raw) return null;
+        const mdy = raw.match(/([A-Za-z]{3,9})\\s+(\\d{1,2}),\\s*(\\d{4})/);
+        if (mdy) {
+          const mm = monthMap[mdy[1].toLowerCase()] ?? 0;
+          const dd = Number(mdy[2]);
+          const yyyy = Number(mdy[3]);
+          if (!mm || !dd || !yyyy) return null;
+          return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+        }
+        const dmy = raw.match(/(\\d{1,2})\\s+([A-Za-z]{3,9})\\s+(\\d{4})/);
+        if (dmy) {
+          const dd = Number(dmy[1]);
+          const mm = monthMap[dmy[2].toLowerCase()] ?? 0;
+          const yyyy = Number(dmy[3]);
+          if (!mm || !dd || !yyyy) return null;
+          return `${String(yyyy).padStart(4, '0')}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+        }
+        return null;
+      };
+
+      const readCellText = (row: Element, selectors: string[]): string => {
+        for (const selector of selectors) {
+          const el = row.querySelector(selector);
+          const text = el?.textContent?.trim() ?? '';
+          if (text) return text;
+        }
+        return '';
+      };
+
+      let currentDate: string | null = forcedDateIso || null;
+      const out: Array<{ eventDate: string | null; timeText: string; currencyText: string; eventName: string; actual: string; forecast: string; previous: string }> = [];
+      const rows = Array.from(document.querySelectorAll('tr'));
+
+      for (const row of rows) {
+        const rowText = row.textContent?.trim() ?? '';
+        const maybeDate = row.classList.contains('theDay')
+          ? parseHeaderDate(rowText)
+          : row.querySelector('td.theDay') ? parseHeaderDate(rowText) : null;
+        if (maybeDate) {
+          currentDate = maybeDate;
+          continue;
+        }
+
+        const id = (row as HTMLElement).id ?? '';
+        const isEventRow = id.startsWith('eventRowId_')
+          || row.classList.contains('js-event-item')
+          || row.getAttribute('data-event-datetime') != null;
+        if (!isEventRow) continue;
+
+        const timeText = readCellText(row, ['td.time', 'td.first', 'td.js-time', 'td[class*="time"]']);
+        const currencyText = readCellText(row, ['td.flagCur', 'td[class*="flagCur"]', 'td.cur', 'td.currency']);
+        const eventName = readCellText(row, ['td.event a', 'td.event', 'td[class*="event"] a', 'td[class*="event"]']);
+        const actual = readCellText(row, ['td.act', 'td.actual', 'td[class*="act"]']);
+        const forecast = readCellText(row, ['td.fore', 'td.cons', 'td.forecast', 'td[class*="fore"]', 'td[class*="cons"]']);
+        const previous = readCellText(row, ['td.prev', 'td.previous', 'td[class*="prev"]']);
+
+        if (!currentDate || !currencyText || !eventName) continue;
+        out.push({ eventDate: currentDate, timeText, currencyText, eventName, actual, forecast, previous });
+      }
+
+      return out;
+    }, day);
+
+      for (const row of rawRows as any[]) {
+        collectedRows.push({
+          eventDate: row.eventDate ? String(row.eventDate) : day,
+          timeText: String(row.timeText ?? ''),
+          currencyText: String(row.currencyText ?? ''),
+          eventName: String(row.eventName ?? ''),
+          actual: String(row.actual ?? ''),
+          forecast: String(row.forecast ?? ''),
+          previous: String(row.previous ?? ''),
+        });
+      }
+    }
+
+    return collectedRows
+      .map((row) => {
+        const eventDate = String(row.eventDate ?? '').trim();
+        if (!eventDate || eventDate < range.fromDate || eventDate > range.toDate) return null;
+
+        const currency = normalizeInvestingCurrency(String(row.currencyText ?? ''));
+        if (!currency || currency.length < 2) return null;
+
+        const eventName = String(row.eventName ?? '').trim();
+        if (!eventName) return null;
+
+        const event: InvestingEconomicCalendarEvent = {
+          eventDate,
+          utcEventTime: null as string | null,
+          eventTime: null as string | null,
+          currency,
+          eventName,
+          normalizedEventName: normalizeEventName(eventName, currency),
+          impactLevel: 'Low',
+          sourceUrl: null,
+          actualValue: cleanValue(String(row.actual ?? '')) ?? null,
+          forecastValue: cleanValue(String(row.forecast ?? '')) ?? null,
+          previousValue: cleanValue(String(row.previous ?? '')) ?? null,
+        };
+        return event;
+      })
+      .filter((row): row is InvestingEconomicCalendarEvent => row != null);
+  } finally {
+    await page.close().catch(() => {});
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
 function nextMonitoringRunAfter(props: { now: Date; utcEventTime: string | null }): Date | null {
   if (!props.utcEventTime) return null;
   const release = new Date(props.utcEventTime);
@@ -2402,8 +2889,7 @@ function nextMonitoringRunAfter(props: { now: Date; utcEventTime: string | null 
   if (deltaMs > 1 * hour) return new Date(nowMs + 2 * hour);
   if (deltaMs > 5 * minute) return new Date(nowMs + 5 * minute);
   if (deltaMs > 0) return new Date(nowMs + 30_000);
-  if (deltaMs >= -30 * minute) return new Date(nowMs + 20_000);
-  if (deltaMs >= -24 * hour) return new Date(nowMs + 10 * minute);
+  if (deltaMs >= -24 * hour) return new Date(nowMs + 5 * minute);
   return null;
 }
 
@@ -2644,6 +3130,87 @@ function parseForexFactoryXml(xml: string): CollectedEconomicEvent[] {
     .filter((event) => event.eventName && isRequiredCurrency(event.currency));
 }
 
+function parseForexFactoryJson(jsonText: string): CollectedEconomicEvent[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const sourceName = 'ForexFactory';
+  const sourceUrl = forexFactoryJsonUrl;
+
+  return parsed
+    .map((row) => {
+      const obj = row as Record<string, unknown>;
+      const title = cleanValue(String(obj.title ?? obj.name ?? '')) ?? '';
+      const currency = cleanCurrency(String(obj.country ?? obj.currency ?? '').toUpperCase());
+      if (!title || !isRequiredCurrency(currency)) return null;
+
+      const rawDate = cleanValue(String(obj.date ?? obj.datetime ?? ''));
+      if (!rawDate) return null;
+      const scheduled = new Date(rawDate);
+      if (Number.isNaN(scheduled.getTime())) return null;
+
+      const eventDate = scheduled.toISOString().slice(0, 10);
+      const eventTime = scheduled.toISOString().slice(11, 19);
+      const impact = normalizeImpact(cleanValue(String(obj.impact ?? obj.impactName ?? '')) ?? null);
+      const normalizedEventName = normalizeEventName(title, currency);
+      const eventKey = deterministicEventKey(currency, normalizedEventName, eventDate, eventTime);
+      const restriction = restrictionWindowForImpact(impact);
+      const restrictionStartTime = restriction.beforeMinutes > 0
+        ? new Date(scheduled.getTime() - restriction.beforeMinutes * 60_000).toISOString()
+        : null;
+      const restrictionEndTime = restriction.afterMinutes > 0
+        ? new Date(scheduled.getTime() + restriction.afterMinutes * 60_000).toISOString()
+        : null;
+      const status = lifecycleStatusForCollectedEvent(scheduled, null, false);
+
+      const event: CollectedEconomicEvent = {
+        id: `evt_${eventKey}`,
+        sourceName,
+        sourceUrl: forexFactoryWeekUrlForDate(eventDate) || sourceUrl,
+        sourceType: 'json' as const,
+        eventKey,
+        eventName: title || normalizedEventName,
+        normalizedEventName,
+        country: countryForCurrency(currency),
+        currency,
+        impactLevel: impact,
+        eventDate,
+        eventTime,
+        eventTimezone: 'UTC',
+        utcEventTime: scheduled.toISOString(),
+        actualValue: null,
+        actualSource: 'NONE' as const,
+        actualCaptureStatus: 'NOT_RELEASED' as const,
+        actualCapturedAt: null,
+        websiteActualValue: null,
+        xmlActualValue: null,
+        sourcePriorityUsed: 'FOREXFACTORY' as const,
+        forecastValue: null,
+        previousValue: null,
+        revisedPreviousValue: null,
+        status,
+        surpriseValue: null,
+        surprisePercentage: null,
+        surpriseDirection: null,
+        bias: 'Not Enough Data',
+        biasStrength: 0,
+        affectedPairs: affectedPairsForCurrency(currency),
+        tradeRestrictionRequired: impact === 'High' || impact === 'Critical' || impact === 'Medium',
+        restrictionStartTime,
+        restrictionEndTime,
+        aiSummary: pendingSummaryForStatus(status),
+        aiReasoning: null,
+      };
+      return event;
+    })
+    .filter((event): event is CollectedEconomicEvent => event != null);
+}
+
 type ForexFactoryHtmlEvent = {
   id?: number;
   name?: string;
@@ -2841,7 +3408,7 @@ function cleanValue(value: string | null): string | null {
   return value.trim();
 }
 
-function guardSourceField(sourceType: 'xml' | 'website' | 'fallback_html', field: 'actual_value', value: string | null): string | null {
+function guardSourceField(sourceType: 'json' | 'xml' | 'website' | 'fallback_html', field: 'actual_value', value: string | null): string | null {
   if (sourceType === 'xml' && field === 'actual_value') return null;
   return value;
 }

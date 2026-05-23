@@ -1404,7 +1404,7 @@ function hrefForPageId(pageId: string): string | null {
   if (pageId === "macro-intelligence-overview") return "/economic-news-and-sentiment-intelligence";
   if (pageId === "economic-calendar-overview") return "/economic-news-and-sentiment-intelligence/economic-calendar";
   if (pageId === "cot-and-institutional-positioning") return "/economic-news-and-sentiment-intelligence/cot-institutional-positioning";
-  if (pageId === "monetary-policy-and-interest-rates") return "/economic-news-and-sentiment-intelligence/economic-calendar?tab=rates";
+  if (pageId === "monetary-policy-and-interest-rates") return "/economic-news-and-sentiment-intelligence/monetary-policy-and-interest-rates";
   if (pageId === "infrastructure-overview") return "/mt5-infrastructure";
   if (pageId === "connected-terminals") return "/mt5-infrastructure/terminal-operations/connected-terminals";
   if (pageId === "terminal-registration") return "/mt5-infrastructure/terminal-operations/terminal-registration";
@@ -1428,6 +1428,7 @@ function pageIdForPathname(pathname: string): string | null {
   if (pathname === "/economic-news-and-sentiment-intelligence") return "macro-intelligence-overview";
   if (pathname === "/economic-news-and-sentiment-intelligence/economic-calendar") return "economic-calendar-overview";
   if (pathname === "/economic-news-and-sentiment-intelligence/cot-institutional-positioning") return "cot-and-institutional-positioning";
+  if (pathname === "/economic-news-and-sentiment-intelligence/monetary-policy-and-interest-rates") return "monetary-policy-and-interest-rates";
   if (pathname === "/mt5-infrastructure") return "infrastructure-overview";
   const match = pathname.match(/^\/mt5-infrastructure\/terminal-operations\/([^/]+)$/);
   if (match?.[1]) {

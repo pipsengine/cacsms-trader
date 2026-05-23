@@ -88,6 +88,76 @@ export async function ensureRateDecisionHistoryTables(): Promise<void> {
   ).catch(() => null);
 }
 
+export async function ensureCentralBankRateTables(): Promise<void> {
+  const globalAny = globalThis as unknown as { __cacsmsCentralBankRateTablesEnsured?: boolean };
+  if (globalAny.__cacsmsCentralBankRateTablesEnsured) return;
+  globalAny.__cacsmsCentralBankRateTablesEnsured = true;
+
+  await queryPostgres(
+    `
+      CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+      CREATE TABLE IF NOT EXISTS central_bank_rate_events (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        event_id INTEGER NOT NULL UNIQUE,
+        currency TEXT NOT NULL,
+        country TEXT,
+        central_bank TEXT,
+        event_name TEXT NOT NULL,
+        investing_url TEXT NOT NULL,
+        is_active BOOLEAN NOT NULL DEFAULT true,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_central_bank_rate_events_currency ON central_bank_rate_events(currency);
+      CREATE INDEX IF NOT EXISTS idx_central_bank_rate_events_active ON central_bank_rate_events(is_active);
+
+      CREATE TABLE IF NOT EXISTS central_bank_rate_history (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        event_id INTEGER NOT NULL REFERENCES central_bank_rate_events(event_id) ON DELETE CASCADE,
+        currency TEXT NOT NULL,
+        central_bank TEXT,
+        release_date DATE NOT NULL,
+        release_time TEXT NOT NULL DEFAULT '',
+        actual_rate NUMERIC(12,6),
+        forecast_rate NUMERIC(12,6),
+        previous_rate NUMERIC(12,6),
+        rate_change NUMERIC(12,6),
+        surprise NUMERIC(12,6),
+        bias TEXT,
+        source_url TEXT NOT NULL,
+        fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_central_bank_rate_history_event_date_time
+        ON central_bank_rate_history(event_id, currency, release_date, release_time);
+
+      CREATE INDEX IF NOT EXISTS idx_central_bank_rate_history_currency_date ON central_bank_rate_history(currency, release_date DESC);
+      CREATE INDEX IF NOT EXISTS idx_central_bank_rate_history_event_date ON central_bank_rate_history(event_id, release_date DESC);
+      CREATE INDEX IF NOT EXISTS idx_central_bank_rate_history_fetched ON central_bank_rate_history(fetched_at DESC);
+
+      CREATE TABLE IF NOT EXISTS rate_sync_logs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        event_id INTEGER,
+        currency TEXT,
+        sync_started_at TIMESTAMPTZ NOT NULL,
+        sync_completed_at TIMESTAMPTZ,
+        status TEXT NOT NULL,
+        rows_fetched INTEGER NOT NULL DEFAULT 0,
+        rows_inserted INTEGER NOT NULL DEFAULT 0,
+        rows_updated INTEGER NOT NULL DEFAULT 0,
+        error_message TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_rate_sync_logs_started ON rate_sync_logs(sync_started_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_rate_sync_logs_event_started ON rate_sync_logs(event_id, sync_started_at DESC);
+    `,
+  ).catch(() => null);
+}
+
 function sha256(input: string): string {
   return crypto.createHash('sha256').update(input).digest('hex');
 }
@@ -199,6 +269,30 @@ function computePolicyBias(decisionType: string | null, surpriseDirection: strin
   return 'Neutral';
 }
 
+function computeBiasForCurrency(actual: number | null, forecast: number | null, currency: string): string | null {
+  if (actual == null || forecast == null) return null;
+  if (actual > forecast) return `Bullish ${currency}`;
+  if (actual < forecast) return `Bearish ${currency}`;
+  return `Neutral ${currency}`;
+}
+
+function computeStance(actual: number | null, previous: number | null): 'Rate Hike' | 'Rate Cut' | 'Rate Hold' | null {
+  if (actual == null || previous == null) return null;
+  if (actual > previous) return 'Rate Hike';
+  if (actual < previous) return 'Rate Cut';
+  return 'Rate Hold';
+}
+
+function computeRateChange(actual: number | null, previous: number | null): number | null {
+  if (actual == null || previous == null) return null;
+  return actual - previous;
+}
+
+function computeSurpriseNumeric(actual: number | null, forecast: number | null): number | null {
+  if (actual == null || forecast == null) return null;
+  return actual - forecast;
+}
+
 async function appendRateLog(input: { jobType: string; status: 'success' | 'error' | 'warning' | 'info'; message: string; pageId?: number; details?: any }): Promise<void> {
   await ensureRateDecisionHistoryTables();
   await queryPostgres(
@@ -210,7 +304,38 @@ async function appendRateLog(input: { jobType: string; status: 'success' | 'erro
   ).catch(() => null);
 }
 
-async function scrapeRateDecisionPage(input: { pageId: number; cutoffIso: string }): Promise<{ meta: any; rows: Array<{ releaseDateText: string; timeText: string; actualText: string; forecastText: string; previousText: string }> }> {
+async function appendRateSyncLog(input: { eventId: number | null; currency: string | null; startedAtIso: string; completedAtIso: string | null; status: string; rowsFetched: number; rowsInserted: number; rowsUpdated: number; errorMessage?: string | null }): Promise<void> {
+  await ensureCentralBankRateTables();
+  await queryPostgres(
+    `
+      INSERT INTO rate_sync_logs (
+        event_id,
+        currency,
+        sync_started_at,
+        sync_completed_at,
+        status,
+        rows_fetched,
+        rows_inserted,
+        rows_updated,
+        error_message
+      )
+      VALUES ($1,$2,$3::timestamptz,$4::timestamptz,$5,$6,$7,$8,$9)
+    `,
+    [
+      input.eventId,
+      input.currency,
+      input.startedAtIso,
+      input.completedAtIso,
+      String(input.status),
+      Number(input.rowsFetched ?? 0),
+      Number(input.rowsInserted ?? 0),
+      Number(input.rowsUpdated ?? 0),
+      input.errorMessage ?? null,
+    ],
+  ).catch(() => null);
+}
+
+async function scrapeRateDecisionPage(input: { pageId: number; cutoffIso: string; mode?: 'full' | 'visible' }): Promise<{ meta: any; rows: Array<{ releaseDateText: string; timeText: string; actualText: string; forecastText: string; previousText: string }> }> {
   const sourceUrl = `https://www.investing.com/economic-calendar/interest-rate-decision-${input.pageId}`;
 
   const headless = String(process.env.CACSMS_INVESTING_HEADLESS ?? 'true').toLowerCase() !== 'false';
@@ -410,6 +535,13 @@ async function scrapeRateDecisionPage(input: { pageId: number; cutoffIso: string
         return match.querySelectorAll('tbody tr').length > 0;
       }, null, { timeout: 45_000 })
       .catch(() => null);
+
+    if (input.mode === 'visible') {
+      const extracted = await extractOnce();
+      if (!extracted?.eventName) throw new Error('Event name not found.');
+      if (!Array.isArray(extracted?.rows) || extracted.rows.length === 0) throw new Error('Historical table not found or empty.');
+      return { meta: { sourceUrl, ...extracted }, rows: extracted.rows };
+    }
 
     let beforeCount = await getRowCount();
     let stable = 0;
@@ -844,10 +976,366 @@ export class InvestingHistoricalRateDecisionCollectorService {
   }
 }
 
+type CentralBankRateSyncResult = {
+  ok: boolean;
+  inserted: number;
+  updated: number;
+  pages: number[];
+  rowsFetched: number;
+  message: string;
+};
+
+type CentralBankRateHistoryRow = {
+  eventId: number;
+  currency: string;
+  country: string | null;
+  centralBank: string | null;
+  eventName: string;
+  sourceUrl: string;
+  releaseDate: string;
+  releaseTime: string;
+  actualRate: number | null;
+  forecastRate: number | null;
+  previousRate: number | null;
+  fetchedAtIso: string;
+};
+
+export class CentralBankRateHistoryCollectorService {
+  private readonly pageIds = [164, 165, 166, 167, 168, 169, 170, 171];
+
+  async syncAllLast3Years(jobType: string): Promise<CentralBankRateSyncResult> {
+    return this.syncPages({ pageIds: this.pageIds, jobType, years: 3 });
+  }
+
+  async syncPageLast3Years(pageId: number, jobType: string): Promise<CentralBankRateSyncResult> {
+    return this.syncPages({ pageIds: [pageId], jobType, years: 3 });
+  }
+
+  async syncAllLatest(jobType: string): Promise<CentralBankRateSyncResult> {
+    return this.syncPagesLatest({ pageIds: this.pageIds, jobType, lookbackDays: 120 });
+  }
+
+  async syncPageLatest(pageId: number, jobType: string): Promise<CentralBankRateSyncResult> {
+    return this.syncPagesLatest({ pageIds: [pageId], jobType, lookbackDays: 120 });
+  }
+
+  async syncPages(props: { pageIds: number[]; jobType: string; years: number }): Promise<CentralBankRateSyncResult> {
+    await ensureCentralBankRateTables();
+    const startedAt = nowIso();
+    let inserted = 0;
+    let updated = 0;
+    let rowsFetched = 0;
+
+    const now = new Date();
+    const cutoff = subtractYearsUtc(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())), Math.max(1, props.years));
+    const cutoffIso = cutoff.toISOString().slice(0, 10);
+
+    for (const pageId of props.pageIds) {
+      const perStarted = nowIso();
+      try {
+        const scraped = await scrapeRateDecisionPage({ pageId, cutoffIso, mode: 'full' });
+        const meta = scraped.meta ?? {};
+        const currency = String(meta.currency ?? '').trim();
+        if (!currency) throw new Error('currency_missing');
+        const eventName = String(meta.eventName ?? '').trim() || `Interest Rate Decision ${pageId}`;
+        const centralBank = meta.centralBank ? String(meta.centralBank) : null;
+        const country = meta.country ? String(meta.country) : null;
+        const sourceUrl = String(meta.sourceUrl ?? `https://www.investing.com/economic-calendar/interest-rate-decision-${pageId}`);
+
+        await this.upsertEvent({
+          eventId: pageId,
+          currency,
+          country,
+          centralBank,
+          eventName,
+          sourceUrl,
+        });
+
+        let pageInserted = 0;
+        let pageUpdated = 0;
+        let pageRows = 0;
+        const fetchedAtIso = nowIso();
+
+        for (const row of scraped.rows) {
+          const releaseDate = parseReleaseDate(row.releaseDateText);
+          if (!releaseDate) continue;
+          if (releaseDate < cutoffIso) continue;
+
+          const actualRate = parseRate(row.actualText);
+          const forecastRate = parseRate(row.forecastText);
+          const previousRate = parseRate(row.previousText);
+          const releaseTime = row.timeText ? String(row.timeText).trim() : '';
+
+          const prepared: CentralBankRateHistoryRow = {
+            eventId: pageId,
+            currency,
+            country,
+            centralBank,
+            eventName,
+            sourceUrl,
+            releaseDate,
+            releaseTime,
+            actualRate,
+            forecastRate,
+            previousRate,
+            fetchedAtIso,
+          };
+
+          const upserted = await this.upsertHistory(prepared);
+          if (upserted.inserted) {
+            inserted += 1;
+            pageInserted += 1;
+          } else {
+            updated += 1;
+            pageUpdated += 1;
+          }
+          pageRows += 1;
+        }
+
+        rowsFetched += pageRows;
+        await appendRateSyncLog({
+          eventId: pageId,
+          currency,
+          startedAtIso: perStarted,
+          completedAtIso: nowIso(),
+          status: 'SUCCESS',
+          rowsFetched: pageRows,
+          rowsInserted: pageInserted,
+          rowsUpdated: pageUpdated,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'sync_failed';
+        await appendRateSyncLog({
+          eventId: pageId,
+          currency: null,
+          startedAtIso: perStarted,
+          completedAtIso: nowIso(),
+          status: 'FAILED',
+          rowsFetched: 0,
+          rowsInserted: 0,
+          rowsUpdated: 0,
+          errorMessage: message,
+        });
+      }
+    }
+
+    const ok = true;
+    const message = `Synced central bank rate history pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}).`;
+    await appendRateSyncLog({
+      eventId: null,
+      currency: null,
+      startedAtIso: startedAt,
+      completedAtIso: nowIso(),
+      status: 'DONE',
+      rowsFetched,
+      rowsInserted: inserted,
+      rowsUpdated: updated,
+    });
+    return { ok, inserted, updated, pages: props.pageIds, rowsFetched, message };
+  }
+
+  private async syncPagesLatest(props: { pageIds: number[]; jobType: string; lookbackDays: number }): Promise<CentralBankRateSyncResult> {
+    await ensureCentralBankRateTables();
+    const startedAt = nowIso();
+    let inserted = 0;
+    let updated = 0;
+    let rowsFetched = 0;
+
+    const now = new Date();
+    const cutoffMs = now.getTime() - Math.max(1, props.lookbackDays) * 24 * 60 * 60_000;
+    const cutoffIso = new Date(cutoffMs).toISOString().slice(0, 10);
+
+    for (const pageId of props.pageIds) {
+      const perStarted = nowIso();
+      try {
+        const scraped = await scrapeRateDecisionPage({ pageId, cutoffIso, mode: 'visible' });
+        const meta = scraped.meta ?? {};
+        const currency = String(meta.currency ?? '').trim();
+        if (!currency) throw new Error('currency_missing');
+        const eventName = String(meta.eventName ?? '').trim() || `Interest Rate Decision ${pageId}`;
+        const centralBank = meta.centralBank ? String(meta.centralBank) : null;
+        const country = meta.country ? String(meta.country) : null;
+        const sourceUrl = String(meta.sourceUrl ?? `https://www.investing.com/economic-calendar/interest-rate-decision-${pageId}`);
+
+        await this.upsertEvent({ eventId: pageId, currency, country, centralBank, eventName, sourceUrl });
+
+        let pageInserted = 0;
+        let pageUpdated = 0;
+        let pageRows = 0;
+        const fetchedAtIso = nowIso();
+
+        for (const row of scraped.rows) {
+          const releaseDate = parseReleaseDate(row.releaseDateText);
+          if (!releaseDate) continue;
+          if (releaseDate < cutoffIso) continue;
+
+          const prepared: CentralBankRateHistoryRow = {
+            eventId: pageId,
+            currency,
+            country,
+            centralBank,
+            eventName,
+            sourceUrl,
+            releaseDate,
+            releaseTime: row.timeText ? String(row.timeText).trim() : '',
+            actualRate: parseRate(row.actualText),
+            forecastRate: parseRate(row.forecastText),
+            previousRate: parseRate(row.previousText),
+            fetchedAtIso,
+          };
+
+          const upserted = await this.upsertHistory(prepared);
+          if (upserted.inserted) {
+            inserted += 1;
+            pageInserted += 1;
+          } else {
+            updated += 1;
+            pageUpdated += 1;
+          }
+          pageRows += 1;
+        }
+
+        rowsFetched += pageRows;
+        await appendRateSyncLog({
+          eventId: pageId,
+          currency,
+          startedAtIso: perStarted,
+          completedAtIso: nowIso(),
+          status: 'SUCCESS_LATEST',
+          rowsFetched: pageRows,
+          rowsInserted: pageInserted,
+          rowsUpdated: pageUpdated,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'sync_failed';
+        await appendRateSyncLog({
+          eventId: pageId,
+          currency: null,
+          startedAtIso: perStarted,
+          completedAtIso: nowIso(),
+          status: 'FAILED_LATEST',
+          rowsFetched: 0,
+          rowsInserted: 0,
+          rowsUpdated: 0,
+          errorMessage: message,
+        });
+      }
+    }
+
+    const ok = true;
+    const message = `Synced latest central bank rate rows for pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}).`;
+    await appendRateSyncLog({
+      eventId: null,
+      currency: null,
+      startedAtIso: startedAt,
+      completedAtIso: nowIso(),
+      status: 'DONE_LATEST',
+      rowsFetched,
+      rowsInserted: inserted,
+      rowsUpdated: updated,
+    });
+    return { ok, inserted, updated, pages: props.pageIds, rowsFetched, message };
+  }
+
+  private async upsertEvent(input: { eventId: number; currency: string; country: string | null; centralBank: string | null; eventName: string; sourceUrl: string }): Promise<void> {
+    await ensureCentralBankRateTables();
+    await queryPostgres(
+      `
+        INSERT INTO central_bank_rate_events (
+          event_id,
+          currency,
+          country,
+          central_bank,
+          event_name,
+          investing_url,
+          is_active,
+          created_at,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,true, now(), now())
+        ON CONFLICT (event_id)
+        DO UPDATE SET
+          currency = EXCLUDED.currency,
+          country = COALESCE(central_bank_rate_events.country, EXCLUDED.country),
+          central_bank = COALESCE(central_bank_rate_events.central_bank, EXCLUDED.central_bank),
+          event_name = COALESCE(central_bank_rate_events.event_name, EXCLUDED.event_name),
+          investing_url = COALESCE(central_bank_rate_events.investing_url, EXCLUDED.investing_url),
+          is_active = true,
+          updated_at = now()
+      `,
+      [input.eventId, input.currency, input.country, input.centralBank, input.eventName, input.sourceUrl],
+    );
+  }
+
+  private async upsertHistory(row: CentralBankRateHistoryRow): Promise<{ inserted: boolean }> {
+    await ensureCentralBankRateTables();
+    const rateChange = computeRateChange(row.actualRate, row.previousRate);
+    const surprise = computeSurpriseNumeric(row.actualRate, row.forecastRate);
+    const bias = computeBiasForCurrency(row.actualRate, row.forecastRate, row.currency);
+
+    const result = await queryPostgres(
+      `
+        INSERT INTO central_bank_rate_history (
+          event_id,
+          currency,
+          central_bank,
+          release_date,
+          release_time,
+          actual_rate,
+          forecast_rate,
+          previous_rate,
+          rate_change,
+          surprise,
+          bias,
+          source_url,
+          fetched_at,
+          created_at,
+          updated_at
+        )
+        VALUES ($1,$2,$3,$4::date,$5,$6,$7,$8,$9,$10,$11,$12,$13::timestamptz, now(), now())
+        ON CONFLICT (event_id, currency, release_date, release_time)
+        DO UPDATE SET
+          central_bank = COALESCE(central_bank_rate_history.central_bank, EXCLUDED.central_bank),
+          actual_rate = CASE WHEN EXCLUDED.actual_rate IS NOT NULL THEN EXCLUDED.actual_rate ELSE central_bank_rate_history.actual_rate END,
+          forecast_rate = CASE WHEN EXCLUDED.forecast_rate IS NOT NULL THEN EXCLUDED.forecast_rate ELSE central_bank_rate_history.forecast_rate END,
+          previous_rate = CASE WHEN EXCLUDED.previous_rate IS NOT NULL THEN EXCLUDED.previous_rate ELSE central_bank_rate_history.previous_rate END,
+          rate_change = CASE WHEN EXCLUDED.rate_change IS NOT NULL THEN EXCLUDED.rate_change ELSE central_bank_rate_history.rate_change END,
+          surprise = CASE WHEN EXCLUDED.surprise IS NOT NULL THEN EXCLUDED.surprise ELSE central_bank_rate_history.surprise END,
+          bias = CASE WHEN EXCLUDED.bias IS NOT NULL THEN EXCLUDED.bias ELSE central_bank_rate_history.bias END,
+          source_url = COALESCE(central_bank_rate_history.source_url, EXCLUDED.source_url),
+          fetched_at = GREATEST(central_bank_rate_history.fetched_at, EXCLUDED.fetched_at),
+          updated_at = now()
+        RETURNING (xmax = 0) AS inserted
+      `,
+      [
+        row.eventId,
+        row.currency,
+        row.centralBank,
+        row.releaseDate,
+        row.releaseTime ?? '',
+        row.actualRate,
+        row.forecastRate,
+        row.previousRate,
+        rateChange,
+        surprise,
+        bias,
+        row.sourceUrl,
+        row.fetchedAtIso,
+      ],
+    );
+    const first = result.rows[0] as any;
+    return { inserted: Boolean(first?.inserted) };
+  }
+}
+
 declare global {
   var __cacsmsRateHistorySchedulerStarted: boolean | undefined;
   var __cacsmsRateHistorySchedulerTimer: ReturnType<typeof setInterval> | undefined;
   var __cacsmsRateHistoryTablesEnsured: boolean | undefined;
+  var __cacsmsCentralBankRateSchedulerStarted: boolean | undefined;
+  var __cacsmsCentralBankRateSchedulerTimer: ReturnType<typeof setInterval> | undefined;
+  var __cacsmsCentralBankRatePreEventKey: string | undefined;
+  var __cacsmsCentralBankRatePostReleaseKey: string | undefined;
 }
 
 function lagosNowUtcShifted(): Date {
@@ -904,5 +1392,238 @@ export class InvestingRateDecisionWeeklySchedulerService {
       message: result.message,
       details: result,
     });
+  }
+}
+
+function shouldRunDailyMidnightLagos(now = lagosNowUtcShifted()): boolean {
+  return now.getUTCHours() === 0 && now.getUTCMinutes() <= 10;
+}
+
+function shouldRunEvery6HoursLagos(now = lagosNowUtcShifted()): boolean {
+  return now.getUTCHours() % 6 === 0 && now.getUTCMinutes() <= 10;
+}
+
+function isFiveMinuteTick(now = lagosNowUtcShifted()): boolean {
+  return now.getUTCMinutes() % 5 === 0;
+}
+
+const centralBankEventIdByCurrency: Record<string, number> = {
+  EUR: 164,
+  JPY: 165,
+  CAD: 166,
+  NZD: 167,
+  USD: 168,
+  CHF: 169,
+  GBP: 170,
+  AUD: 171,
+};
+
+export class CentralBankRateSchedulerService {
+  private readonly collector = new CentralBankRateHistoryCollectorService();
+
+  ensureStarted(): void {
+    if (globalThis.__cacsmsCentralBankRateSchedulerStarted) return;
+    globalThis.__cacsmsCentralBankRateSchedulerStarted = true;
+    globalThis.__cacsmsCentralBankRateSchedulerTimer = setInterval(() => {
+      this.tick().catch(() => null);
+    }, 60_000);
+  }
+
+  private async tick(): Promise<void> {
+    await ensureCentralBankRateTables();
+    const now = lagosNowUtcShifted();
+
+    if (shouldRunDailyMidnightLagos(now)) {
+      const dateKey = lagosDateKey(now);
+      const already = await queryPostgres(
+        `
+          SELECT 1
+          FROM rate_sync_logs
+          WHERE status LIKE 'DAILY_%'
+            AND DATE(sync_started_at AT TIME ZONE 'Africa/Lagos') = $1::date
+          LIMIT 1
+        `,
+        [dateKey],
+      ).then((r) => (r.rows?.length ?? 0) > 0).catch(() => false);
+
+      if (!already) {
+        const startedAtIso = nowIso();
+        try {
+          const result = await this.collector.syncAllLatest('daily_rate_check');
+          await appendRateSyncLog({
+            eventId: null,
+            currency: null,
+            startedAtIso,
+            completedAtIso: nowIso(),
+            status: 'DAILY_SUCCESS',
+            rowsFetched: result.rowsFetched,
+            rowsInserted: result.inserted,
+            rowsUpdated: result.updated,
+          });
+        } catch (error) {
+          await appendRateSyncLog({
+            eventId: null,
+            currency: null,
+            startedAtIso,
+            completedAtIso: nowIso(),
+            status: 'DAILY_FAILED',
+            rowsFetched: 0,
+            rowsInserted: 0,
+            rowsUpdated: 0,
+            errorMessage: error instanceof Error ? error.message : 'daily_failed',
+          });
+        }
+      }
+    }
+
+    if (shouldRunSaturdayMidnightLagos(now)) {
+      const dateKey = lagosDateKey(now);
+      const already = await queryPostgres(
+        `
+          SELECT 1
+          FROM rate_sync_logs
+          WHERE status LIKE 'WEEKLY_%'
+            AND DATE(sync_started_at AT TIME ZONE 'Africa/Lagos') = $1::date
+          LIMIT 1
+        `,
+        [dateKey],
+      ).then((r) => (r.rows?.length ?? 0) > 0).catch(() => false);
+
+      if (!already) {
+        const startedAtIso = nowIso();
+        try {
+          const result = await this.collector.syncAllLast3Years('weekly_full_reconciliation');
+          await appendRateSyncLog({
+            eventId: null,
+            currency: null,
+            startedAtIso,
+            completedAtIso: nowIso(),
+            status: 'WEEKLY_SUCCESS',
+            rowsFetched: result.rowsFetched,
+            rowsInserted: result.inserted,
+            rowsUpdated: result.updated,
+          });
+        } catch (error) {
+          await appendRateSyncLog({
+            eventId: null,
+            currency: null,
+            startedAtIso,
+            completedAtIso: nowIso(),
+            status: 'WEEKLY_FAILED',
+            rowsFetched: 0,
+            rowsInserted: 0,
+            rowsUpdated: 0,
+            errorMessage: error instanceof Error ? error.message : 'weekly_failed',
+          });
+        }
+      }
+    }
+
+    if (shouldRunEvery6HoursLagos(now)) {
+      const bucket = `${lagosDateKey(now)}:${Math.floor(now.getUTCHours() / 6)}`;
+      if (globalThis.__cacsmsCentralBankRatePreEventKey !== bucket) {
+        globalThis.__cacsmsCentralBankRatePreEventKey = bucket;
+        const startedAtIso = nowIso();
+        try {
+          const due = await queryPostgres(
+            `
+              SELECT currency, utc_event_time
+              FROM economic_events
+              WHERE event_name ILIKE '%interest rate decision%'
+                AND utc_event_time IS NOT NULL
+                AND utc_event_time >= now()
+                AND utc_event_time <= now() + interval '48 hours'
+            `,
+          ).then((r) => r.rows as Array<{ currency: string; utc_event_time: string }>)
+            .catch(() => []);
+
+          const uniqueCurrencies = Array.from(new Set(due.map((d) => String(d.currency ?? '').trim().toUpperCase()).filter(Boolean)));
+          const pageIds = uniqueCurrencies
+            .map((cur) => centralBankEventIdByCurrency[cur])
+            .filter((id): id is number => Number.isFinite(id));
+
+          for (const pageId of pageIds) {
+            await this.collector.syncPageLatest(pageId, 'pre_event_sync');
+          }
+
+          await appendRateSyncLog({
+            eventId: null,
+            currency: null,
+            startedAtIso,
+            completedAtIso: nowIso(),
+            status: 'PRE_EVENT_SUCCESS',
+            rowsFetched: 0,
+            rowsInserted: 0,
+            rowsUpdated: 0,
+          });
+        } catch (error) {
+          await appendRateSyncLog({
+            eventId: null,
+            currency: null,
+            startedAtIso,
+            completedAtIso: nowIso(),
+            status: 'PRE_EVENT_FAILED',
+            rowsFetched: 0,
+            rowsInserted: 0,
+            rowsUpdated: 0,
+            errorMessage: error instanceof Error ? error.message : 'pre_event_failed',
+          });
+        }
+      }
+    }
+
+    if (isFiveMinuteTick(now)) {
+      const bucket = `${lagosDateKey(now)}:${now.getUTCHours()}:${Math.floor(now.getUTCMinutes() / 5)}`;
+      if (globalThis.__cacsmsCentralBankRatePostReleaseKey !== bucket) {
+        globalThis.__cacsmsCentralBankRatePostReleaseKey = bucket;
+        const startedAtIso = nowIso();
+        try {
+          const due = await queryPostgres(
+            `
+              SELECT currency, utc_event_time
+              FROM economic_events
+              WHERE event_name ILIKE '%interest rate decision%'
+                AND utc_event_time IS NOT NULL
+                AND utc_event_time >= now() - interval '2 hours'
+                AND utc_event_time <= now()
+                AND (actual_value IS NULL OR btrim(actual_value) = '')
+            `,
+          ).then((r) => r.rows as Array<{ currency: string; utc_event_time: string }>)
+            .catch(() => []);
+
+          const uniqueCurrencies = Array.from(new Set(due.map((d) => String(d.currency ?? '').trim().toUpperCase()).filter(Boolean)));
+          const pageIds = uniqueCurrencies
+            .map((cur) => centralBankEventIdByCurrency[cur])
+            .filter((id): id is number => Number.isFinite(id));
+
+          for (const pageId of pageIds) {
+            await this.collector.syncPageLatest(pageId, 'post_release_sync');
+          }
+
+          await appendRateSyncLog({
+            eventId: null,
+            currency: null,
+            startedAtIso,
+            completedAtIso: nowIso(),
+            status: 'POST_RELEASE_SUCCESS',
+            rowsFetched: 0,
+            rowsInserted: 0,
+            rowsUpdated: 0,
+          });
+        } catch (error) {
+          await appendRateSyncLog({
+            eventId: null,
+            currency: null,
+            startedAtIso,
+            completedAtIso: nowIso(),
+            status: 'POST_RELEASE_FAILED',
+            rowsFetched: 0,
+            rowsInserted: 0,
+            rowsUpdated: 0,
+            errorMessage: error instanceof Error ? error.message : 'post_release_failed',
+          });
+        }
+      }
+    }
   }
 }

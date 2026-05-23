@@ -21,12 +21,25 @@ function assertLocalOnly(request: Request) {
   }
 }
 
+function shouldAutoDiscover(): boolean {
+  const globalAny = globalThis as unknown as { __cacsmsEconomicCalendarAutoDiscoverAt?: number };
+  const now = Date.now();
+  const last = globalAny.__cacsmsEconomicCalendarAutoDiscoverAt ?? 0;
+  if (now - last < 5 * 60_000) return false;
+  globalAny.__cacsmsEconomicCalendarAutoDiscoverAt = now;
+  return true;
+}
+
 export async function GET(request: Request) {
   try {
     assertLocalOnly(request);
     ensureEconomicCalendarWorkerStarted();
     const service = new EconomicCalendarIntelligenceService();
-    const dashboard = await service.getDashboard();
+    let dashboard = await service.getDashboard();
+    if (dashboard.ok && dashboard.events.length === 0 && shouldAutoDiscover()) {
+      await service.recordAction('discover');
+      dashboard = await service.getDashboard();
+    }
     return NextResponse.json(dashboard, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return NextResponse.json(
