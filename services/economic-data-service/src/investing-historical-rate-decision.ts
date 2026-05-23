@@ -1,4 +1,3 @@
-import { chromium } from 'playwright';
 import { queryPostgres } from '@/lib/postgres';
 import crypto from 'crypto';
 
@@ -29,6 +28,203 @@ type SyncResult = { ok: boolean; inserted: number; updated: number; skipped: num
 
 const browserUserAgent =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+async function getChromium() {
+  const mod = await import('playwright');
+  return mod.chromium;
+}
+
+const investingCalendarServiceUrl = 'https://www.investing.com/economic-calendar/Service/getCalendarFilteredData';
+
+const centralBankRateEventPages: Record<
+  number,
+  { currency: string; country: string; centralBank: string; eventName: string; investingUrl: string }
+> = {
+  164: { currency: 'EUR', country: 'Eurozone', centralBank: 'European Central Bank (ECB)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-164' },
+  165: { currency: 'JPY', country: 'Japan', centralBank: 'Bank of Japan (BoJ)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-165' },
+  166: { currency: 'CAD', country: 'Canada', centralBank: 'Bank of Canada (BoC)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-166' },
+  167: { currency: 'NZD', country: 'New Zealand', centralBank: 'Reserve Bank of New Zealand (RBNZ)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-167' },
+  168: { currency: 'USD', country: 'United States', centralBank: 'Federal Reserve (FOMC)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-168' },
+  169: { currency: 'CHF', country: 'Switzerland', centralBank: 'Swiss National Bank (SNB)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-169' },
+  170: { currency: 'GBP', country: 'United Kingdom', centralBank: 'Bank of England (BoE)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-170' },
+  171: { currency: 'AUD', country: 'Australia', centralBank: 'Reserve Bank of Australia (RBA)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-171' },
+};
+
+function isBotProtectionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const lower = message.toLowerCase();
+  return lower.includes('bot protection') || lower.includes('just a moment') || lower.includes('attention required') || lower.includes('captcha');
+}
+
+function stripHtml(value: string): string {
+  return String(value ?? '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseInvestingEventDatetimeAttr(value: string): { dateIso: string | null; timeText: string } {
+  const raw = String(value ?? '').trim();
+  const m = raw.match(/^(\d{4})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return { dateIso: null, timeText: '' };
+  return { dateIso: `${m[1]}-${m[2]}-${m[3]}`, timeText: `${m[4]}:${m[5]}` };
+}
+
+function extractTd(html: string, className: string): string {
+  const re = new RegExp(`<td[^>]*class="[^"]*\\b${className}\\b[^"]*"[^>]*>([\\s\\S]*?)<\\/td>`, 'i');
+  const m = html.match(re);
+  return m ? stripHtml(m[1]) : '';
+}
+
+function extractEventLink(html: string): string {
+  const tdMatch = html.match(/<td[^>]*class="[^"]*\bevent\b[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
+  if (!tdMatch) return '';
+  const hrefMatch = tdMatch[1].match(/<a[^>]*href="([^"]+)"/i);
+  if (!hrefMatch) return '';
+  try {
+    return new URL(String(hrefMatch[1]), 'https://www.investing.com').toString();
+  } catch {
+    return '';
+  }
+}
+
+function extractEventPageIdFromUrl(url: string): number | null {
+  const raw = String(url ?? '').trim();
+  if (!raw) return null;
+  const m = raw.match(/\/economic-calendar\/interest-rate-decision-(\d+)(?:\/)?(?:[?#].*)?$/i);
+  if (!m?.[1]) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+type CalendarServiceRow = {
+  eventId: number | null;
+  eventPageId: number | null;
+  releaseDateText: string;
+  timeText: string;
+  currency: string;
+  eventName: string;
+  actualText: string;
+  forecastText: string;
+  previousText: string;
+  sourceUrl: string;
+};
+
+function normalizeCurrencyText(value: string): string {
+  const raw = String(value ?? '').toUpperCase();
+  const match = raw.match(/\b[A-Z]{3}\b/);
+  return match ? match[0] : raw.replace(/[^A-Z]/g, '').slice(-3);
+}
+
+function extractEventRowId(html: string): number | null {
+  const m = String(html ?? '').match(/\beventRowId_(\d+)\b/i);
+  if (!m?.[1]) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseInvestingCalendarServiceHtml(html: string): CalendarServiceRow[] {
+  const rows: CalendarServiceRow[] = [];
+  const trRe = /<tr[^>]*data-event-datetime="([^"]+)"[^>]*>[\s\S]*?<\/tr>/gi;
+  for (const match of html.matchAll(trRe)) {
+    const rowHtml = match[0];
+    const dt = String(match[1] ?? '');
+    const { dateIso, timeText: timeFromAttr } = parseInvestingEventDatetimeAttr(dt);
+    const currencyRaw = extractTd(rowHtml, 'flagCur');
+    const currency = normalizeCurrencyText(currencyRaw);
+    const eventName = extractTd(rowHtml, 'event');
+    if (!dateIso || !currency || !eventName) continue;
+
+    const timeText = timeFromAttr || extractTd(rowHtml, 'time');
+    const sourceUrl = extractEventLink(rowHtml);
+    rows.push({
+      eventId: extractEventRowId(rowHtml),
+      eventPageId: extractEventPageIdFromUrl(sourceUrl),
+      releaseDateText: dateIso,
+      timeText,
+      currency,
+      eventName,
+      actualText: extractTd(rowHtml, 'act'),
+      forecastText: extractTd(rowHtml, 'fore'),
+      previousText: extractTd(rowHtml, 'prev'),
+      sourceUrl,
+    });
+  }
+  return rows;
+}
+
+async function fetchInvestingCalendarServiceRangeViaPlaywright(range: { fromDate: string; toDate: string }): Promise<CalendarServiceRow[]> {
+  const headless = String(process.env.CACSMS_INVESTING_HEADLESS ?? 'false').toLowerCase() === 'true';
+  const chromium = await getChromium();
+  const browser = await chromium
+    .launch({ headless, channel: 'chrome', args: ['--disable-blink-features=AutomationControlled'] })
+    .catch(() => chromium.launch({ headless, args: ['--disable-blink-features=AutomationControlled'] }));
+  const context = await browser.newContext({
+    userAgent: browserUserAgent,
+    locale: 'en-US',
+    timezoneId: 'UTC',
+    viewport: { width: 1365, height: 900 },
+    extraHTTPHeaders: { 'accept-language': 'en-US,en;q=0.9' },
+  });
+
+  try {
+    const all: CalendarServiceRow[] = [];
+    const seen = new Set<string>();
+    let limitFrom = 0;
+
+    for (let i = 0; i < 400; i += 1) {
+      const response = await context.request.post(investingCalendarServiceUrl, {
+        headers: {
+          Origin: 'https://www.investing.com',
+          Referer: 'https://www.investing.com/economic-calendar/',
+          'X-Requested-With': 'XMLHttpRequest',
+          Accept: '*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        form: {
+          currentTab: 'custom',
+          dateFrom: range.fromDate,
+          dateTo: range.toDate,
+          submitFilters: '1',
+          limit_from: String(limitFrom),
+        },
+      });
+
+      if (!response.ok()) throw new Error(`calendar_service_http_${response.status()}`);
+      const raw = await response.text();
+      const parsed = (() => {
+        try {
+          return JSON.parse(raw) as { data?: string };
+        } catch {
+          throw new Error('calendar_service_non_json');
+        }
+      })();
+      const html = String(parsed?.data ?? '');
+      if (!html) break;
+      const batch = parseInvestingCalendarServiceHtml(html);
+      if (!batch.length) break;
+
+      let newCount = 0;
+      for (const r of batch) {
+        const key = `${r.eventPageId ?? ''}|${r.releaseDateText}|${r.timeText}|${r.currency}|${normalizeEventName(r.eventName)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        all.push(r);
+        newCount += 1;
+      }
+
+      if (newCount === 0) break;
+      limitFrom += 50;
+    }
+
+    return all;
+  } finally {
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
 
 export async function ensureRateDecisionHistoryTables(): Promise<void> {
   if (globalThis.__cacsmsRateHistoryTablesEnsured) return;
@@ -181,7 +377,7 @@ function parseRate(value: string): number | null {
 }
 
 function parseReleaseDate(value: string): string | null {
-  const raw = String(value ?? '').trim();
+  const raw = String(value ?? '').trim().replace(/\s*\([^)]*\)\s*$/, '').trim();
   if (!raw) return null;
 
   const ymd = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -339,6 +535,7 @@ async function scrapeRateDecisionPage(input: { pageId: number; cutoffIso: string
   const sourceUrl = `https://www.investing.com/economic-calendar/interest-rate-decision-${input.pageId}`;
 
   const headless = String(process.env.CACSMS_INVESTING_HEADLESS ?? 'true').toLowerCase() !== 'false';
+  const chromium = await getChromium();
   const browser = await chromium
     .launch({ headless, channel: 'chrome', args: ['--disable-blink-features=AutomationControlled'] })
     .catch(() => chromium.launch({ headless, args: ['--disable-blink-features=AutomationControlled'] }));
@@ -357,32 +554,6 @@ async function scrapeRateDecisionPage(input: { pageId: number; cutoffIso: string
   const page = await context.newPage();
 
   try {
-    let attempt = 0;
-    while (attempt < 3) {
-      attempt += 1;
-      await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
-      await page.waitForTimeout(1250).catch(() => null);
-      const currentUrl = page.url();
-      if (!currentUrl.includes(`interest-rate-decision-${input.pageId}`)) {
-        if (attempt >= 3) throw new Error('Page blocked (bot protection).');
-        await page.waitForTimeout(2500 * attempt).catch(() => null);
-        continue;
-      }
-      const title = (await page.title()).toLowerCase();
-      if (title.includes('just a moment') || title.includes('attention required') || title.includes('captcha')) {
-        if (attempt >= 3) throw new Error('Page blocked (bot protection).');
-        await page.waitForTimeout(2500 * attempt).catch(() => null);
-        continue;
-      }
-      break;
-    }
-
-    await page.locator('button:has-text("Accept")').first().click({ timeout: 2_000 }).catch(() => {});
-    const afterConsentTitle = (await page.title().catch(() => '')).toLowerCase();
-    if (afterConsentTitle.includes('just a moment') || afterConsentTitle.includes('attention required') || afterConsentTitle.includes('captcha')) {
-      throw new Error('Page blocked (bot protection).');
-    }
-
     const extractOnce = async (): Promise<{
       eventName: string;
       currency: string | null;
@@ -481,6 +652,62 @@ async function scrapeRateDecisionPage(input: { pageId: number; cutoffIso: string
         return { eventName, currency, centralBank, country, rows };
       });
     };
+
+    const requestExtract = await (async () => {
+      const response = await context.request.get(sourceUrl, {
+        headers: {
+          'User-Agent': browserUserAgent,
+          'Accept-Language': 'en-US,en;q=0.9',
+          Referer: 'https://www.investing.com/economic-calendar/',
+        },
+      });
+      if (!response.ok()) return null;
+      const html = await response.text();
+      const lower = html.toLowerCase();
+      if (lower.includes('just a moment') || lower.includes('attention required') || lower.includes('captcha')) return null;
+      await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      const extracted = await extractOnce().catch(() => null);
+      if (!extracted?.eventName || !Array.isArray(extracted?.rows) || extracted.rows.length === 0) return null;
+      return extracted;
+    })().catch(() => null);
+
+    if (requestExtract) {
+      const dates = requestExtract.rows
+        .map((r) => parseReleaseDate(r.releaseDateText))
+        .filter((d): d is string => Boolean(d))
+        .sort();
+      const oldest = dates.length ? dates[0] : null;
+      if (input.mode === 'visible' || (oldest && oldest <= input.cutoffIso)) {
+        return { meta: { sourceUrl, ...requestExtract }, rows: requestExtract.rows };
+      }
+    }
+
+    let attempt = 0;
+    while (attempt < 3) {
+      attempt += 1;
+      await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      await page.waitForURL(new RegExp(`interest-rate-decision-${input.pageId}(?:[/?#]|$)`), { timeout: 45_000 }).catch(() => null);
+      await page.waitForTimeout(1250).catch(() => null);
+      const currentUrl = page.url();
+      const title = (await page.title().catch(() => '')).toLowerCase();
+      if (!currentUrl.includes(`interest-rate-decision-${input.pageId}`)) {
+        if (attempt >= 3) throw new Error('Page blocked (bot protection).');
+        await page.waitForTimeout(2500 * attempt).catch(() => null);
+        continue;
+      }
+      if (title.includes('just a moment') || title.includes('attention required') || title.includes('captcha')) {
+        if (attempt >= 3) throw new Error('Page blocked (bot protection).');
+        await page.waitForTimeout(2500 * attempt).catch(() => null);
+        continue;
+      }
+      break;
+    }
+
+    await page.locator('button:has-text(Accept)').first().click({ timeout: 2_000 }).catch(() => {});
+    const afterConsentTitle = (await page.title().catch(() => '')).toLowerCase();
+    if (afterConsentTitle.includes('just a moment') || afterConsentTitle.includes('attention required') || afterConsentTitle.includes('captcha')) {
+      throw new Error('Page blocked (bot protection).');
+    }
 
     const getRowCount = async (): Promise<number> => {
       return page.evaluate(() => {
@@ -982,6 +1209,7 @@ type CentralBankRateSyncResult = {
   updated: number;
   pages: number[];
   rowsFetched: number;
+  failedPages: number;
   message: string;
 };
 
@@ -1025,22 +1253,88 @@ export class CentralBankRateHistoryCollectorService {
     let inserted = 0;
     let updated = 0;
     let rowsFetched = 0;
+    let failedPages = 0;
 
     const now = new Date();
     const cutoff = subtractYearsUtc(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())), Math.max(1, props.years));
     const cutoffIso = cutoff.toISOString().slice(0, 10);
+    const toDate = now.toISOString().slice(0, 10);
+
+    let calendarFallback: Map<number, { meta: any; rows: Array<{ releaseDateText: string; timeText: string; actualText: string; forecastText: string; previousText: string }> }> | null =
+      null;
+    let forceFallback = false;
+    const getFallbackForPage = async (pageId: number) => {
+      if (!calendarFallback) {
+        const allRows = await fetchInvestingCalendarServiceRangeViaPlaywright({ fromDate: cutoffIso, toDate });
+        const neededPageIds = new Set(Object.keys(centralBankRateEventPages).map((x) => Number(x)));
+        const rateRows = allRows.filter((r) => r.eventPageId != null && neededPageIds.has(r.eventPageId));
+
+        const map = new Map<number, { meta: any; rows: any[] }>();
+        for (const [idStr, meta] of Object.entries(centralBankRateEventPages)) {
+          const id = Number(idStr);
+          const direct = rateRows.filter((r) => r.eventPageId === id);
+          const loose = rateRows.filter((r) => r.currency === meta.currency && normalizeEventName(r.eventName).includes('interest rate decision'));
+          const picked = direct.length ? direct : loose;
+          const rows = picked
+            .map((r) => ({
+              releaseDateText: r.releaseDateText,
+              timeText: r.timeText,
+              actualText: r.actualText,
+              forecastText: r.forecastText,
+              previousText: r.previousText,
+            }))
+            .filter((r) => Boolean(r.releaseDateText))
+            .sort((a, b) => (a.releaseDateText < b.releaseDateText ? 1 : a.releaseDateText > b.releaseDateText ? -1 : 0));
+          map.set(id, {
+            meta: {
+              sourceUrl: meta.investingUrl,
+              currency: meta.currency,
+              eventName: meta.eventName,
+              centralBank: meta.centralBank,
+              country: meta.country,
+            },
+            rows,
+          });
+        }
+        calendarFallback = map;
+      }
+      return calendarFallback.get(pageId) ?? null;
+    };
 
     for (const pageId of props.pageIds) {
       const perStarted = nowIso();
       try {
-        const scraped = await scrapeRateDecisionPage({ pageId, cutoffIso, mode: 'full' });
+        const fallbackMeta = centralBankRateEventPages[pageId] ?? null;
+        let scraped:
+          | { meta: any; rows: Array<{ releaseDateText: string; timeText: string; actualText: string; forecastText: string; previousText: string }> }
+          | null = null;
+        let usedFallback = false;
+
+        if (forceFallback) {
+          scraped = await getFallbackForPage(pageId);
+          usedFallback = true;
+        } else {
+          try {
+            scraped = await scrapeRateDecisionPage({ pageId, cutoffIso, mode: 'full' });
+          } catch (error) {
+            if (isBotProtectionError(error)) {
+              forceFallback = true;
+              scraped = await getFallbackForPage(pageId);
+              usedFallback = true;
+            } else {
+              throw error;
+            }
+          }
+        }
+
+        if (!scraped) throw new Error('rate_rows_missing');
         const meta = scraped.meta ?? {};
         const currency = String(meta.currency ?? '').trim();
         if (!currency) throw new Error('currency_missing');
         const eventName = String(meta.eventName ?? '').trim() || `Interest Rate Decision ${pageId}`;
         const centralBank = meta.centralBank ? String(meta.centralBank) : null;
         const country = meta.country ? String(meta.country) : null;
-        const sourceUrl = String(meta.sourceUrl ?? `https://www.investing.com/economic-calendar/interest-rate-decision-${pageId}`);
+        const sourceUrl = String(meta.sourceUrl ?? fallbackMeta?.investingUrl ?? `https://www.investing.com/economic-calendar/interest-rate-decision-${pageId}`);
 
         await this.upsertEvent({
           eventId: pageId,
@@ -1098,16 +1392,19 @@ export class CentralBankRateHistoryCollectorService {
           currency,
           startedAtIso: perStarted,
           completedAtIso: nowIso(),
-          status: 'SUCCESS',
+          status: usedFallback ? 'SUCCESS_FALLBACK' : 'SUCCESS',
           rowsFetched: pageRows,
           rowsInserted: pageInserted,
           rowsUpdated: pageUpdated,
+          errorMessage: usedFallback ? 'fallback_used' : null,
         });
       } catch (error) {
+        failedPages += 1;
         const message = error instanceof Error ? error.message : 'sync_failed';
+        const fallbackMeta = centralBankRateEventPages[pageId] ?? null;
         await appendRateSyncLog({
           eventId: pageId,
-          currency: null,
+          currency: fallbackMeta?.currency ?? null,
           startedAtIso: perStarted,
           completedAtIso: nowIso(),
           status: 'FAILED',
@@ -1119,8 +1416,8 @@ export class CentralBankRateHistoryCollectorService {
       }
     }
 
-    const ok = true;
-    const message = `Synced central bank rate history pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}).`;
+    const ok = rowsFetched > 0 && failedPages === 0;
+    const message = `Synced central bank rate history pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}, failedPages ${failedPages}).`;
     await appendRateSyncLog({
       eventId: null,
       currency: null,
@@ -1131,7 +1428,7 @@ export class CentralBankRateHistoryCollectorService {
       rowsInserted: inserted,
       rowsUpdated: updated,
     });
-    return { ok, inserted, updated, pages: props.pageIds, rowsFetched, message };
+    return { ok, inserted, updated, pages: props.pageIds, rowsFetched, failedPages, message };
   }
 
   private async syncPagesLatest(props: { pageIds: number[]; jobType: string; lookbackDays: number }): Promise<CentralBankRateSyncResult> {
@@ -1140,22 +1437,88 @@ export class CentralBankRateHistoryCollectorService {
     let inserted = 0;
     let updated = 0;
     let rowsFetched = 0;
+    let failedPages = 0;
 
     const now = new Date();
     const cutoffMs = now.getTime() - Math.max(1, props.lookbackDays) * 24 * 60 * 60_000;
     const cutoffIso = new Date(cutoffMs).toISOString().slice(0, 10);
+    const toDate = now.toISOString().slice(0, 10);
+
+    let calendarFallback: Map<number, { meta: any; rows: Array<{ releaseDateText: string; timeText: string; actualText: string; forecastText: string; previousText: string }> }> | null =
+      null;
+    let forceFallback = false;
+    const getFallbackForPage = async (pageId: number) => {
+      if (!calendarFallback) {
+        const allRows = await fetchInvestingCalendarServiceRangeViaPlaywright({ fromDate: cutoffIso, toDate });
+        const neededPageIds = new Set(Object.keys(centralBankRateEventPages).map((x) => Number(x)));
+        const rateRows = allRows.filter((r) => r.eventPageId != null && neededPageIds.has(r.eventPageId));
+
+        const map = new Map<number, { meta: any; rows: any[] }>();
+        for (const [idStr, meta] of Object.entries(centralBankRateEventPages)) {
+          const id = Number(idStr);
+          const direct = rateRows.filter((r) => r.eventPageId === id);
+          const loose = rateRows.filter((r) => r.currency === meta.currency && normalizeEventName(r.eventName).includes('interest rate decision'));
+          const picked = direct.length ? direct : loose;
+          const rows = picked
+            .map((r) => ({
+              releaseDateText: r.releaseDateText,
+              timeText: r.timeText,
+              actualText: r.actualText,
+              forecastText: r.forecastText,
+              previousText: r.previousText,
+            }))
+            .filter((r) => Boolean(r.releaseDateText))
+            .sort((a, b) => (a.releaseDateText < b.releaseDateText ? 1 : a.releaseDateText > b.releaseDateText ? -1 : 0));
+          map.set(id, {
+            meta: {
+              sourceUrl: meta.investingUrl,
+              currency: meta.currency,
+              eventName: meta.eventName,
+              centralBank: meta.centralBank,
+              country: meta.country,
+            },
+            rows,
+          });
+        }
+        calendarFallback = map;
+      }
+      return calendarFallback.get(pageId) ?? null;
+    };
 
     for (const pageId of props.pageIds) {
       const perStarted = nowIso();
       try {
-        const scraped = await scrapeRateDecisionPage({ pageId, cutoffIso, mode: 'visible' });
+        const fallbackMeta = centralBankRateEventPages[pageId] ?? null;
+        let scraped:
+          | { meta: any; rows: Array<{ releaseDateText: string; timeText: string; actualText: string; forecastText: string; previousText: string }> }
+          | null = null;
+        let usedFallback = false;
+
+        if (forceFallback) {
+          scraped = await getFallbackForPage(pageId);
+          usedFallback = true;
+        } else {
+          try {
+            scraped = await scrapeRateDecisionPage({ pageId, cutoffIso, mode: 'visible' });
+          } catch (error) {
+            if (isBotProtectionError(error)) {
+              forceFallback = true;
+              scraped = await getFallbackForPage(pageId);
+              usedFallback = true;
+            } else {
+              throw error;
+            }
+          }
+        }
+
+        if (!scraped) throw new Error('rate_rows_missing');
         const meta = scraped.meta ?? {};
         const currency = String(meta.currency ?? '').trim();
         if (!currency) throw new Error('currency_missing');
         const eventName = String(meta.eventName ?? '').trim() || `Interest Rate Decision ${pageId}`;
         const centralBank = meta.centralBank ? String(meta.centralBank) : null;
         const country = meta.country ? String(meta.country) : null;
-        const sourceUrl = String(meta.sourceUrl ?? `https://www.investing.com/economic-calendar/interest-rate-decision-${pageId}`);
+        const sourceUrl = String(meta.sourceUrl ?? fallbackMeta?.investingUrl ?? `https://www.investing.com/economic-calendar/interest-rate-decision-${pageId}`);
 
         await this.upsertEvent({ eventId: pageId, currency, country, centralBank, eventName, sourceUrl });
 
@@ -1201,16 +1564,19 @@ export class CentralBankRateHistoryCollectorService {
           currency,
           startedAtIso: perStarted,
           completedAtIso: nowIso(),
-          status: 'SUCCESS_LATEST',
+          status: usedFallback ? 'SUCCESS_LATEST_FALLBACK' : 'SUCCESS_LATEST',
           rowsFetched: pageRows,
           rowsInserted: pageInserted,
           rowsUpdated: pageUpdated,
+          errorMessage: usedFallback ? 'fallback_used' : null,
         });
       } catch (error) {
+        failedPages += 1;
         const message = error instanceof Error ? error.message : 'sync_failed';
+        const fallbackMeta = centralBankRateEventPages[pageId] ?? null;
         await appendRateSyncLog({
           eventId: pageId,
-          currency: null,
+          currency: fallbackMeta?.currency ?? null,
           startedAtIso: perStarted,
           completedAtIso: nowIso(),
           status: 'FAILED_LATEST',
@@ -1222,8 +1588,8 @@ export class CentralBankRateHistoryCollectorService {
       }
     }
 
-    const ok = true;
-    const message = `Synced latest central bank rate rows for pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}).`;
+    const ok = rowsFetched > 0 && failedPages === 0;
+    const message = `Synced latest central bank rate rows for pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}, failedPages ${failedPages}).`;
     await appendRateSyncLog({
       eventId: null,
       currency: null,
@@ -1234,7 +1600,7 @@ export class CentralBankRateHistoryCollectorService {
       rowsInserted: inserted,
       rowsUpdated: updated,
     });
-    return { ok, inserted, updated, pages: props.pageIds, rowsFetched, message };
+    return { ok, inserted, updated, pages: props.pageIds, rowsFetched, failedPages, message };
   }
 
   private async upsertEvent(input: { eventId: number; currency: string; country: string | null; centralBank: string | null; eventName: string; sourceUrl: string }): Promise<void> {

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { CalendarClock, Database, Eye, Landmark, Loader2, Menu, RefreshCw, ShieldAlert, TrendingDown, TrendingUp } from 'lucide-react';
+import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { TraderSidebar } from '@/components/trader-sidebar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -121,6 +122,31 @@ function classifyStance(actual: number | null, previous: number | null): 'Rate H
   return 'Rate Hold';
 }
 
+function toneForStance(stance: 'Rate Hike' | 'Rate Hold' | 'Rate Cut' | '—'): Tone {
+  if (stance === 'Rate Hike') return 'emerald';
+  if (stance === 'Rate Cut') return 'rose';
+  if (stance === 'Rate Hold') return 'slate';
+  return 'slate';
+}
+
+function toneCardClass(tone: Tone): string {
+  if (tone === 'emerald') return 'border-emerald-200 bg-emerald-50';
+  if (tone === 'rose') return 'border-rose-200 bg-rose-50';
+  if (tone === 'cyan') return 'border-cyan-200 bg-cyan-50';
+  if (tone === 'violet') return 'border-violet-200 bg-violet-50';
+  if (tone === 'amber') return 'border-amber-200 bg-amber-50';
+  return 'border-slate-200 bg-white';
+}
+
+function toneIconClass(tone: Tone): string {
+  if (tone === 'emerald') return 'text-emerald-700';
+  if (tone === 'rose') return 'text-rose-700';
+  if (tone === 'cyan') return 'text-cyan-700';
+  if (tone === 'violet') return 'text-violet-700';
+  if (tone === 'amber') return 'text-amber-700';
+  return 'text-indigo-700';
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   const status = response.status;
   const text = await response.text().catch(() => '');
@@ -139,7 +165,7 @@ async function readJson<T>(response: Response): Promise<T> {
 export default function MonetaryPolicyInterestRatesPage() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'history' | 'logs'>('dashboard');
-  const [loading, setLoading] = useState({ current: false, history: false, bias: false, diffs: false, logs: false, sync: false });
+  const [loading, setLoading] = useState({ current: false, history: false, bias: false, diffs: false, logs: false, chart: false });
   const [error, setError] = useState('');
 
   const [current, setCurrent] = useState<CurrentRatesPayload | null>(null);
@@ -151,6 +177,8 @@ export default function MonetaryPolicyInterestRatesPage() {
   const [historyCurrency, setHistoryCurrency] = useState('All');
   const [historyFrom, setHistoryFrom] = useState('');
   const [historyTo, setHistoryTo] = useState('');
+  const [chartCurrency, setChartCurrency] = useState('USD');
+  const [chartHistory, setChartHistory] = useState<HistoryPayload | null>(null);
 
   const loadCurrent = async () => {
     setLoading((p) => ({ ...p, current: true }));
@@ -227,29 +255,61 @@ export default function MonetaryPolicyInterestRatesPage() {
     }
   };
 
-  const runSync = async () => {
-    setLoading((p) => ({ ...p, sync: true }));
-    setError('');
+  const loadChart = async (currency: string) => {
+    setLoading((p) => ({ ...p, chart: true }));
     try {
-      const res = await fetch('/api/rates/sync', { method: 'POST', cache: 'no-store' });
-      const payload = await readJson<any>(res);
-      if (payload?.ok !== true) throw new Error(payload?.error ?? `Sync failed (HTTP ${res.status}).`);
-      await Promise.all([loadCurrent(), loadBias(), loadDiffs(), loadHistory(), loadLogs()]);
+      const params = new URLSearchParams();
+      params.set('currency', currency);
+      params.set('limit', '800');
+      const res = await fetch(`/api/rates/history?${params.toString()}`, { cache: 'no-store' });
+      const payload = await readJson<HistoryPayload>(res);
+      setChartHistory(payload);
+      if (!payload.ok) throw new Error(payload.error ?? `Failed to load chart history (HTTP ${res.status}).`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Sync failed.');
+      setError(e instanceof Error ? e.message : 'Failed to load chart history.');
     } finally {
-      setLoading((p) => ({ ...p, sync: false }));
+      setLoading((p) => ({ ...p, chart: false }));
     }
   };
 
   useEffect(() => {
     setError('');
-    void Promise.all([loadCurrent(), loadBias(), loadDiffs(), loadHistory(), loadLogs()]);
+    void Promise.all([loadCurrent(), loadBias(), loadDiffs(), loadHistory(), loadLogs(), loadChart(chartCurrency)]);
   }, []);
 
   const historyRows = history?.records ?? [];
   const biasRows = bias?.currencies ?? [];
   const currentRows = current?.rates ?? [];
+  const chartRows = chartHistory?.records ?? [];
+
+  const chartData = useMemo(() => {
+    const rows = chartRows
+      .map((r) => ({
+        date: r.release_date,
+        actual: num(r.actual_rate),
+        forecast: num(r.forecast_rate),
+        previous: num(r.previous_rate),
+      }))
+      .filter((r) => r.date)
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    return rows;
+  }, [chartRows]);
+
+  const currencyCards = useMemo(() => {
+    const order = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF'];
+    const byCode = new Map(currentRows.map((r) => [String(r.currency).toUpperCase(), r]));
+    return order.map((cur) => {
+      const row = byCode.get(cur) ?? null;
+      const stance = classifyStance(num(row?.actualRate), num(row?.previousRate));
+      return {
+        currency: cur,
+        centralBank: row?.centralBank ?? null,
+        actualRate: row?.actualRate ?? null,
+        stance,
+        tone: toneForStance(stance),
+      };
+    });
+  }, [currentRows]);
 
   const stanceCards = useMemo(() => {
     const stanceCount = { 'Rate Hike': 0, 'Rate Hold': 0, 'Rate Cut': 0 };
@@ -283,11 +343,6 @@ export default function MonetaryPolicyInterestRatesPage() {
               </p>
             </div>
           </div>
-          <div className="hidden items-center gap-2 lg:flex">
-            <Button variant="outline" size="sm" className="gap-2" onClick={() => void runSync()} disabled={loading.sync}>
-              {loading.sync ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Sync Last 3 Years Rate History
-            </Button>
-          </div>
         </header>
 
         <div className="flex-1 overflow-hidden">
@@ -303,43 +358,43 @@ export default function MonetaryPolicyInterestRatesPage() {
               ) : null}
 
               <section className="grid grid-cols-1 gap-4 xl:grid-cols-4">
-                <Card className="border-slate-200 bg-white">
-                  <CardHeader className="pb-2">
+                <Card className={cn('shadow-sm shadow-slate-900/5', toneCardClass('violet'))}>
+                  <CardHeader className="pb-1">
                     <CardTitle className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-                      <Database className="h-4 w-4 text-indigo-700" /> Current Rates
+                      <Database className={cn('h-4 w-4', toneIconClass('violet'))} /> Current Rates
                     </CardTitle>
                   </CardHeader>
-                  <CardContent className="pt-0 text-xs text-slate-600">{currentRows.length} currencies</CardContent>
+                  <CardContent className="pt-0 text-xs text-slate-700">{currentRows.length} currencies</CardContent>
                 </Card>
-                <Card className="border-slate-200 bg-white">
-                  <CardHeader className="pb-2">
+                <Card className={cn('shadow-sm shadow-slate-900/5', toneCardClass('emerald'))}>
+                  <CardHeader className="pb-1">
                     <CardTitle className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-                      <TrendingUp className="h-4 w-4 text-emerald-700" /> Most Hawkish
+                      <TrendingUp className={cn('h-4 w-4', toneIconClass('emerald'))} /> Most Hawkish
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="pt-0">
                     <div className="text-lg font-semibold text-slate-950">{bias?.mostHawkishCurrency ?? '—'}</div>
-                    <div className="text-xs text-slate-600">3Y net + surprise score</div>
+                    <div className="text-xs text-slate-700">3Y net + surprise score</div>
                   </CardContent>
                 </Card>
-                <Card className="border-slate-200 bg-white">
-                  <CardHeader className="pb-2">
+                <Card className={cn('shadow-sm shadow-slate-900/5', toneCardClass('rose'))}>
+                  <CardHeader className="pb-1">
                     <CardTitle className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-                      <TrendingDown className="h-4 w-4 text-rose-700" /> Most Dovish
+                      <TrendingDown className={cn('h-4 w-4', toneIconClass('rose'))} /> Most Dovish
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="pt-0">
                     <div className="text-lg font-semibold text-slate-950">{bias?.mostDovishCurrency ?? '—'}</div>
-                    <div className="text-xs text-slate-600">3Y net + surprise score</div>
+                    <div className="text-xs text-slate-700">3Y net + surprise score</div>
                   </CardContent>
                 </Card>
-                <Card className="border-slate-200 bg-white">
-                  <CardHeader className="pb-2">
+                <Card className={cn('shadow-sm shadow-slate-900/5', toneCardClass('cyan'))}>
+                  <CardHeader className="pb-1">
                     <CardTitle className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-                      <CalendarClock className="h-4 w-4 text-cyan-700" /> Last Refresh
+                      <CalendarClock className={cn('h-4 w-4', toneIconClass('cyan'))} /> Last Refresh
                     </CardTitle>
                   </CardHeader>
-                  <CardContent className="pt-0 text-xs text-slate-700">{current?.generatedAt ? new Date(current.generatedAt).toLocaleString() : '—'}</CardContent>
+                  <CardContent className="pt-0 text-xs text-slate-800">{current?.generatedAt ? new Date(current.generatedAt).toLocaleString() : '—'}</CardContent>
                 </Card>
               </section>
 
@@ -349,11 +404,6 @@ export default function MonetaryPolicyInterestRatesPage() {
                     <CardTitle className="flex items-center gap-2 text-sm font-semibold text-slate-950">
                       <Landmark className="h-4 w-4 text-indigo-700" /> Policy Rates Dashboard
                     </CardTitle>
-                    <div className="flex items-center gap-2 lg:hidden">
-                      <Button variant="outline" size="sm" className="gap-2" onClick={() => void runSync()} disabled={loading.sync}>
-                        {loading.sync ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Sync Last 3 Years Rate History
-                      </Button>
-                    </div>
                   </div>
                 </CardHeader>
                 <CardContent className="p-0">
@@ -442,6 +492,82 @@ export default function MonetaryPolicyInterestRatesPage() {
                         </Card>
 
                         <div className="space-y-4">
+                          <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
+                            <CardHeader className="border-b border-slate-200">
+                              <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                                <div>
+                                  <div className="text-sm font-semibold text-slate-950">Currency Rate History</div>
+                                  <div className="mt-1 text-xs text-slate-500">Select a currency to view its stored policy rate history.</div>
+                                </div>
+                                <div className="text-xs font-mono text-slate-600">
+                                  {loading.chart ? 'Loading…' : chartHistory?.total != null ? `${chartHistory.total} rows` : '—'}
+                                </div>
+                              </div>
+                            </CardHeader>
+                            <CardContent className="space-y-3 p-4">
+                              <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                                {currencyCards.map((c) => {
+                                  const selected = c.currency === chartCurrency;
+                                  return (
+                                    <button
+                                      key={c.currency}
+                                      type="button"
+                                      onClick={() => {
+                                        setChartCurrency(c.currency);
+                                        void loadChart(c.currency);
+                                      }}
+                                      className={cn(
+                                        'rounded-lg border px-3 py-2 text-left shadow-sm shadow-slate-900/5 transition',
+                                        toneCardClass(c.tone),
+                                        selected ? 'ring-2 ring-indigo-500 ring-offset-2' : 'hover:bg-slate-50',
+                                      )}
+                                    >
+                                      <div className="flex items-center justify-between gap-2">
+                                        <div className="text-sm font-semibold text-slate-950">{c.currency}</div>
+                                        <ToneBadge tone={c.tone}>{c.stance}</ToneBadge>
+                                      </div>
+                                      <div className="mt-1 text-xs text-slate-700">{c.centralBank ?? '—'}</div>
+                                      <div className="mt-1 font-mono text-xs text-slate-900">{fmtRate(c.actualRate)}</div>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+
+                              <div className="rounded-lg border border-slate-200 bg-white p-3">
+                                <div className="mb-2 flex items-center justify-between gap-3">
+                                  <div className="text-sm font-semibold text-slate-950">{chartCurrency} Policy Rate History</div>
+                                  <Button variant="outline" size="sm" className="gap-2" onClick={() => void loadChart(chartCurrency)} disabled={loading.chart}>
+                                    {loading.chart ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />} Refresh
+                                  </Button>
+                                </div>
+                                {loading.chart ? (
+                                  <div className="h-48 text-center text-sm text-slate-600">Loading chart…</div>
+                                ) : chartData.length === 0 ? (
+                                  <div className="h-48 text-center text-sm text-slate-600">No history for {chartCurrency} yet.</div>
+                                ) : (
+                                  <div className="h-56 w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                      <LineChart data={chartData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
+                                        <XAxis dataKey="date" tick={{ fontSize: 10 }} minTickGap={24} />
+                                        <YAxis tick={{ fontSize: 10 }} tickFormatter={(v) => `${Number(v).toFixed(2)}%`} domain={['auto', 'auto']} />
+                                        <Tooltip
+                                          formatter={(value: any, name: any) => {
+                                            const n = typeof value === 'number' ? value : Number(String(value));
+                                            const label = name === 'actual' ? 'Actual' : name === 'forecast' ? 'Forecast' : name === 'previous' ? 'Previous' : String(name);
+                                            return [Number.isFinite(n) ? `${n.toFixed(2)}%` : '—', label];
+                                          }}
+                                        />
+                                        <Line type="monotone" dataKey="actual" name="Actual" stroke="#4f46e5" strokeWidth={2} dot={false} />
+                                        <Line type="monotone" dataKey="forecast" name="Forecast" stroke="#f59e0b" strokeWidth={2} dot={false} />
+                                        <Line type="monotone" dataKey="previous" name="Previous" stroke="#334155" strokeWidth={2} dot={false} />
+                                      </LineChart>
+                                    </ResponsiveContainer>
+                                  </div>
+                                )}
+                              </div>
+                            </CardContent>
+                          </Card>
+
                           <Card className="border-slate-200 bg-white shadow-sm shadow-slate-900/5">
                             <CardHeader className="border-b border-slate-200">
                               <div className="text-sm font-semibold text-slate-950">Rate Differential Matrix</div>
