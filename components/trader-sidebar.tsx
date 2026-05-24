@@ -1401,6 +1401,17 @@ function slug(value: string): string {
 function hrefForPageId(pageId: string): string | null {
   if (pageId === "trading-operations") return "/";
   if (pageId === "executive-overview") return "/";
+  if (pageId === "visual-intelligence-overview") return "/visual-intelligence-overview";
+  if (pageId === "chart-screenshot-capture") return "/visual-intelligence-overview/chart-screenshot-capture";
+  if (pageId === "candle-detection") return "/visual-intelligence-overview/candle-detection";
+  if (pageId === "swing-point-detection") return "/visual-intelligence-overview/swing-point-detection";
+  if (pageId === "pattern-recognition") return "/visual-intelligence-overview/pattern-recognition";
+  if (pageId === "trendline-detection") return "/visual-intelligence-overview/trendline-detection";
+  if (pageId === "channel-detection") return "/visual-intelligence-overview/channel-detection";
+  if (pageId === "support-resistance-mapping") return "/visual-intelligence-overview/support-resistance-mapping";
+  if (pageId === "order-block-detection") return "/visual-intelligence-overview/order-block-detection";
+  if (pageId === "liquidity-zone-detection") return "/visual-intelligence-overview/liquidity-zone-detection";
+  if (pageId === "structure-analysis") return "/visual-intelligence-overview/structure-analysis";
   if (pageId === "macro-intelligence-overview") return "/economic-news-and-sentiment-intelligence";
   if (pageId === "economic-calendar-overview") return "/economic-news-and-sentiment-intelligence/economic-calendar";
   if (pageId === "cpi-inflation-events") return "/economic-news-and-sentiment-intelligence/cpi-inflation-events";
@@ -1433,6 +1444,17 @@ function hrefForPageId(pageId: string): string | null {
 
 function pageIdForPathname(pathname: string): string | null {
   if (pathname === "/") return "executive-overview";
+  if (pathname === "/visual-intelligence-overview") return "visual-intelligence-overview";
+  if (pathname === "/visual-intelligence-overview/chart-screenshot-capture") return "chart-screenshot-capture";
+  if (pathname === "/visual-intelligence-overview/candle-detection") return "candle-detection";
+  if (pathname === "/visual-intelligence-overview/swing-point-detection") return "swing-point-detection";
+  if (pathname === "/visual-intelligence-overview/pattern-recognition") return "pattern-recognition";
+  if (pathname === "/visual-intelligence-overview/trendline-detection") return "trendline-detection";
+  if (pathname === "/visual-intelligence-overview/channel-detection") return "channel-detection";
+  if (pathname === "/visual-intelligence-overview/support-resistance-mapping") return "support-resistance-mapping";
+  if (pathname === "/visual-intelligence-overview/order-block-detection") return "order-block-detection";
+  if (pathname === "/visual-intelligence-overview/liquidity-zone-detection") return "liquidity-zone-detection";
+  if (pathname === "/visual-intelligence-overview/structure-analysis") return "structure-analysis";
   if (pathname === "/economic-news-and-sentiment-intelligence") return "macro-intelligence-overview";
   if (pathname === "/economic-news-and-sentiment-intelligence/economic-calendar") return "economic-calendar-overview";
   if (pathname === "/economic-news-and-sentiment-intelligence/cpi-inflation-events") return "cpi-inflation-events";
