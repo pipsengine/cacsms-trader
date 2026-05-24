@@ -1412,6 +1412,7 @@ function hrefForPageId(pageId: string): string | null {
   if (pageId === "order-block-detection") return "/visual-intelligence-overview/order-block-detection";
   if (pageId === "liquidity-zone-detection") return "/visual-intelligence-overview/liquidity-zone-detection";
   if (pageId === "structure-analysis") return "/visual-intelligence-overview/structure-analysis";
+  if (pageId === "multi-timeframe-comparison") return "/visual-intelligence-overview/multi-timeframe-comparison";
   if (pageId === "macro-intelligence-overview") return "/economic-news-and-sentiment-intelligence";
   if (pageId === "economic-calendar-overview") return "/economic-news-and-sentiment-intelligence/economic-calendar";
   if (pageId === "cpi-inflation-events") return "/economic-news-and-sentiment-intelligence/cpi-inflation-events";
