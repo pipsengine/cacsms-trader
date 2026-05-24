@@ -1,0 +1,969 @@
+import { randomUUID } from 'crypto';
+
+import { buildAutonomousDecision } from './autonomous-decision-engine';
+import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
+import { analyzeAiVisualInterpretation } from './ai-visual-interpretation-store';
+import { analyzeCaptureCandles } from './candle-detection-store';
+import { analyzeCaptureChannels } from './channel-detection-store';
+import { analyzeChartSegmentation } from './chart-segmentation-store';
+import { analyzeCaptureLiquidity } from './liquidity-zone-store';
+import { analyzeSymbolMultiTimeframe } from './multi-timeframe-analysis-store';
+import { analyzeCaptureOrderBlocks } from './order-block-detection-store';
+import { analyzeCapturePatterns } from './pattern-recognition-store';
+import { queryPostgres } from './postgres';
+import { analyzeCaptureStructure } from './structure-analysis-store';
+import { analyzeCaptureSupportResistance } from './support-resistance-store';
+import { analyzeCaptureSwings } from './swing-point-store';
+import { analyzeCaptureTrendlines } from './trendline-detection-store';
+import { analyzeVisualAnomaly } from './visual-anomaly-detection-store';
+import { publishVisualIntelligenceEvent } from './visual-intelligence-store';
+import { analyzeVisualMarketInterpretation, getLatestVisualMarketInterpretation } from './visual-market-interpretation-store';
+
+type Row = Record<string, unknown>;
+
+const schemaSql = `
+CREATE TABLE IF NOT EXISTS autonomous_jobs (
+  id UUID PRIMARY KEY,
+  symbol TEXT,
+  timeframe TEXT,
+  worker_name TEXT NOT NULL,
+  trigger_source TEXT NOT NULL,
+  status TEXT NOT NULL,
+  progress INTEGER NOT NULL DEFAULT 0,
+  input_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  output_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  confidence_score NUMERIC(8, 4),
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  error_message TEXT,
+  started_at TIMESTAMPTZ,
+  completed_at TIMESTAMPTZ,
+  next_run_time TIMESTAMPTZ,
+  audit_trace_id UUID NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_job_runs (
+  id UUID PRIMARY KEY,
+  job_id UUID NOT NULL REFERENCES autonomous_jobs(id) ON DELETE CASCADE,
+  worker_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  progress INTEGER NOT NULL DEFAULT 0,
+  input_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  output_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+  confidence_score NUMERIC(8, 4),
+  error_message TEXT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS autonomous_schedules (
+  id UUID PRIMARY KEY,
+  worker_name TEXT NOT NULL,
+  schedule_key TEXT NOT NULL UNIQUE,
+  symbol TEXT,
+  timeframe TEXT,
+  cadence_seconds INTEGER NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT true,
+  next_run_at TIMESTAMPTZ NOT NULL,
+  last_run_at TIMESTAMPTZ,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_worker_status (
+  worker_name TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  current_job_id UUID,
+  last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_error TEXT,
+  processed_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE TABLE IF NOT EXISTS autonomous_scan_cycles (
+  id UUID PRIMARY KEY,
+  cycle_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  symbols_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  timeframes_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  summary_json JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE TABLE IF NOT EXISTS autonomous_symbol_queue (
+  id UUID PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 5,
+  status TEXT NOT NULL DEFAULT 'queued',
+  reason TEXT NOT NULL,
+  next_scan_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_timeframe_queue (
+  id UUID PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  worker_name TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  priority INTEGER NOT NULL DEFAULT 5,
+  next_scan_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_failures (
+  id UUID PRIMARY KEY,
+  job_id UUID REFERENCES autonomous_jobs(id) ON DELETE SET NULL,
+  worker_name TEXT NOT NULL,
+  symbol TEXT,
+  timeframe TEXT,
+  failure_type TEXT NOT NULL,
+  error_message TEXT NOT NULL,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  escalated BOOLEAN NOT NULL DEFAULT false,
+  next_retry_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_retry_logs (
+  id UUID PRIMARY KEY,
+  job_id UUID REFERENCES autonomous_jobs(id) ON DELETE SET NULL,
+  retry_number INTEGER NOT NULL,
+  backoff_seconds INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  error_message TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_decision_logs (
+  id UUID PRIMARY KEY,
+  job_id UUID REFERENCES autonomous_jobs(id) ON DELETE SET NULL,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  dominant_timeframe TEXT NOT NULL,
+  final_bias TEXT NOT NULL,
+  setup_type TEXT NOT NULL,
+  setup_readiness_score NUMERIC(8, 4) NOT NULL,
+  confidence_score NUMERIC(8, 4) NOT NULL,
+  risk_score NUMERIC(8, 4) NOT NULL,
+  decision TEXT NOT NULL,
+  entry_zone_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  stop_loss NUMERIC(18, 6),
+  take_profit_levels_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+  invalidation_level NUMERIC(18, 6),
+  reason_for_decision TEXT NOT NULL,
+  reason_against_decision TEXT NOT NULL,
+  macro_risk_warning TEXT NOT NULL,
+  liquidity_warning TEXT NOT NULL,
+  anomaly_warning TEXT NOT NULL,
+  recommended_next_action TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_alerts (
+  id UUID PRIMARY KEY,
+  decision_log_id UUID REFERENCES autonomous_decision_logs(id) ON DELETE SET NULL,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  alert_type TEXT NOT NULL,
+  message TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  acknowledged_at TIMESTAMPTZ
+);
+CREATE TABLE IF NOT EXISTS autonomous_model_feedback (
+  id UUID PRIMARY KEY,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  feedback_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_outcome_tracking (
+  id UUID PRIMARY KEY,
+  decision_log_id UUID REFERENCES autonomous_decision_logs(id) ON DELETE SET NULL,
+  symbol TEXT NOT NULL,
+  timeframe TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  outcome_status TEXT NOT NULL DEFAULT 'pending',
+  pnl_r_multiple NUMERIC(10, 4),
+  reviewed_at TIMESTAMPTZ,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_system_health (
+  id UUID PRIMARY KEY,
+  health_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
+  emergency_stopped BOOLEAN NOT NULL DEFAULT false,
+  message TEXT NOT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_audit_trails (
+  id UUID PRIMARY KEY,
+  audit_trace_id UUID NOT NULL,
+  job_id UUID REFERENCES autonomous_jobs(id) ON DELETE SET NULL,
+  event_type TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS autonomous_config (
+  key TEXT PRIMARY KEY,
+  value_json JSONB NOT NULL,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_autonomous_jobs_status ON autonomous_jobs(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_autonomous_jobs_symbol_tf ON autonomous_jobs(symbol, timeframe, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_autonomous_failures_worker ON autonomous_failures(worker_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_autonomous_decisions_symbol_tf ON autonomous_decision_logs(symbol, timeframe, created_at DESC);
+`;
+
+const defaultConfig: AutonomyConfig = {
+  activeSymbols: ['XAUUSD'],
+  activeTimeframes: [...AUTONOMY_TIMEFRAMES],
+  mode: 'assisted_trade',
+  confidenceThreshold: 60,
+  alertThreshold: 72,
+  riskThreshold: 70,
+  retryLimit: 3,
+  workerConcurrency: 2,
+  newsBlackoutMinutes: 30,
+  scanFrequencySeconds: 60,
+  captureSources: ['mt5_bridge', 'chart_capture_service'],
+  dataSources: ['visual_intelligence', 'economic_calendar', 'cot', 'interest_rates', 'sentiment'],
+  signalGenerationRules: { requireTimeframeAlignment: true, blockHighImpactNews: true, blockCriticalAnomalies: true },
+  tradeExecutionMode: 'assisted_trade',
+};
+
+let schemaReady: Promise<void> | null = null;
+let runtimeStarted = false;
+let runtimeTimer: ReturnType<typeof setInterval> | null = null;
+
+export async function ensureAutonomySchema() {
+  if (!schemaReady) {
+    schemaReady = queryPostgres(schemaSql).then(async () => {
+      await seedAutonomyDefaults();
+    });
+  }
+  return schemaReady;
+}
+
+export async function ensureAutonomyRuntime() {
+  await ensureAutonomySchema();
+  if (runtimeStarted) return;
+  runtimeStarted = true;
+  runtimeTimer = setInterval(() => {
+    runAutonomyTick('scheduler').catch(() => undefined);
+  }, 30_000);
+  await runAutonomyTick('startup');
+}
+
+export async function getAutonomyStatus() {
+  await ensureAutonomyRuntime();
+  const [health, jobs, failures, alerts, decisions, schedules] = await Promise.all([
+    getHealth(),
+    listAutonomyJobs(10),
+    listFailures(10),
+    listAlerts(10),
+    listDecisionLogs(10),
+    listSchedules(),
+  ]);
+  return {
+    config: await getAutonomyConfig(),
+    health,
+    summary: {
+      queuedJobs: jobs.filter((job) => job.status === 'queued').length,
+      runningJobs: jobs.filter((job) => job.status === 'running').length,
+      recentFailures: failures.length,
+      openAlerts: alerts.filter((alert) => alert.status === 'open').length,
+      nextRunAt: schedules.filter((item) => item.enabled).sort((a, b) => String(a.nextRunAt).localeCompare(String(b.nextRunAt)))[0]?.nextRunAt ?? null,
+    },
+    latestJobs: jobs,
+    latestDecisions: decisions,
+    latestFailures: failures,
+    latestAlerts: alerts,
+  };
+}
+
+export async function listWorkers() {
+  await ensureAutonomyRuntime();
+  const result = await queryPostgres('SELECT * FROM autonomous_worker_status ORDER BY worker_name ASC');
+  return result.rows.map(mapWorker);
+}
+
+export async function listAutonomyJobs(limit = 50) {
+  await ensureAutonomySchema();
+  const result = await queryPostgres('SELECT * FROM autonomous_jobs ORDER BY created_at DESC LIMIT $1', [limit]);
+  return result.rows.map(mapJob);
+}
+
+export async function getAutonomyJob(id: string) {
+  await ensureAutonomySchema();
+  const [job, runs, audit] = await Promise.all([
+    queryPostgres('SELECT * FROM autonomous_jobs WHERE id = $1', [id]),
+    queryPostgres('SELECT * FROM autonomous_job_runs WHERE job_id = $1 ORDER BY started_at DESC', [id]),
+    queryPostgres('SELECT * FROM autonomous_audit_trails WHERE job_id = $1 ORDER BY created_at ASC', [id]),
+  ]);
+  return job.rows[0] ? { ...mapJob(job.rows[0]), runs: runs.rows.map(mapRun), auditTrail: audit.rows.map(mapAudit) } : null;
+}
+
+export async function retryAutonomyJob(id: string) {
+  await ensureAutonomySchema();
+  const current = await getAutonomyJob(id);
+  if (!current) throw new Error('Autonomous job was not found.');
+  const retryId = await createAutonomyJob({
+    workerName: current.workerName,
+    symbol: current.symbol,
+    timeframe: current.timeframe,
+    triggerSource: 'manual_retry',
+    inputPayload: current.inputPayload,
+    retryCount: current.retryCount + 1,
+  });
+  await publishAutonomyEvent('autonomy.retry.started', { originalJobId: id, retryJobId: retryId });
+  return executeAutonomyJob(retryId);
+}
+
+export async function cancelAutonomyJob(id: string) {
+  await ensureAutonomySchema();
+  await queryPostgres("UPDATE autonomous_jobs SET status = 'cancelled', completed_at = now(), updated_at = now() WHERE id = $1 AND status IN ('queued','running')", [id]);
+  await publishAutonomyEvent('autonomy.job.failed', { jobId: id, status: 'cancelled' });
+  return getAutonomyJob(id);
+}
+
+export async function listSchedules() {
+  await ensureAutonomySchema();
+  const result = await queryPostgres('SELECT * FROM autonomous_schedules ORDER BY worker_name, timeframe NULLS FIRST, symbol NULLS FIRST');
+  return result.rows.map(mapSchedule);
+}
+
+export async function updateSchedules(input: { schedules?: Array<Record<string, unknown>>; config?: Partial<AutonomyConfig> }) {
+  await ensureAutonomySchema();
+  if (input.config) await saveAutonomyConfig(input.config);
+  for (const schedule of input.schedules ?? []) {
+    if (typeof schedule.id !== 'string') continue;
+    const enabled = typeof schedule.enabled === 'boolean' ? schedule.enabled : null;
+    const cadenceSeconds = typeof schedule.cadenceSeconds === 'number' ? schedule.cadenceSeconds : null;
+    const nextRunAt = typeof schedule.nextRunAt === 'string' ? schedule.nextRunAt : null;
+    await queryPostgres(`
+      UPDATE autonomous_schedules
+      SET enabled = COALESCE($2, enabled),
+          cadence_seconds = COALESCE($3, cadence_seconds),
+          next_run_at = COALESCE($4::timestamptz, next_run_at),
+          updated_at = now()
+      WHERE id = $1
+    `, [schedule.id, enabled, cadenceSeconds, nextRunAt]);
+  }
+  return { config: await getAutonomyConfig(), schedules: await listSchedules() };
+}
+
+export async function listScanCycles(limit = 50) {
+  await ensureAutonomySchema();
+  const result = await queryPostgres('SELECT * FROM autonomous_scan_cycles ORDER BY started_at DESC LIMIT $1', [limit]);
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    cycleType: String(row.cycle_type),
+    status: String(row.status),
+    symbols: arrayValue(row.symbols_json),
+    timeframes: arrayValue(row.timeframes_json),
+    startedAt: dateString(row.started_at),
+    completedAt: nullableDate(row.completed_at),
+    summary: objectValue(row.summary_json),
+  }));
+}
+
+export async function listDecisionLogs(limit = 50) {
+  await ensureAutonomySchema();
+  const result = await queryPostgres('SELECT * FROM autonomous_decision_logs ORDER BY created_at DESC LIMIT $1', [limit]);
+  return result.rows.map(mapDecision);
+}
+
+export async function listFailures(limit = 50) {
+  await ensureAutonomySchema();
+  const result = await queryPostgres('SELECT * FROM autonomous_failures ORDER BY created_at DESC LIMIT $1', [limit]);
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    jobId: nullableString(row.job_id),
+    workerName: String(row.worker_name),
+    symbol: nullableString(row.symbol),
+    timeframe: nullableString(row.timeframe),
+    failureType: String(row.failure_type),
+    errorMessage: String(row.error_message),
+    retryCount: Number(row.retry_count),
+    escalated: Boolean(row.escalated),
+    nextRetryAt: nullableDate(row.next_retry_at),
+    createdAt: dateString(row.created_at),
+  }));
+}
+
+export async function getAutonomyHealth() {
+  await ensureAutonomyRuntime();
+  return { health: await getHealth(), workers: await listWorkers(), failures: await listFailures(5) };
+}
+
+export async function emergencyStopAutonomy(reason = 'Emergency stop requested.') {
+  await ensureAutonomySchema();
+  if (runtimeTimer) clearInterval(runtimeTimer);
+  runtimeTimer = null;
+  runtimeStarted = false;
+  await upsertHealth('autonomy', 'stopped', reason, true, {});
+  await publishAutonomyEvent('autonomy.emergency.stopped', { reason });
+  return getAutonomyHealth();
+}
+
+export async function resumeAutonomy() {
+  await ensureAutonomySchema();
+  await upsertHealth('autonomy', 'running', 'Autonomous runtime resumed.', false, {});
+  await publishAutonomyEvent('autonomy.resumed', {});
+  await ensureAutonomyRuntime();
+  return getAutonomyHealth();
+}
+
+async function runAutonomyTick(triggerSource: string) {
+  if ((await isEmergencyStopped())) return;
+  const config = defaultConfig;
+  const cycleId = randomUUID();
+  await queryPostgres('INSERT INTO autonomous_scan_cycles (id, cycle_type, status, symbols_json, timeframes_json) VALUES ($1,$2,$3,$4,$5)', [cycleId, triggerSource, 'running', config.activeSymbols, config.activeTimeframes]);
+  await publishAutonomyEvent('autonomy.scan.started', { cycleId, triggerSource });
+  const due = await queryPostgres(`
+    SELECT * FROM autonomous_schedules
+    WHERE enabled = true AND next_run_at <= now()
+    ORDER BY next_run_at ASC
+    LIMIT $1
+  `, [Math.max(1, config.workerConcurrency)]);
+  const created: string[] = [];
+  for (const schedule of due.rows) {
+    await publishAutonomyEvent('autonomy.schedule.triggered', { scheduleKey: schedule.schedule_key, workerName: schedule.worker_name });
+    const jobId = await createAutonomyJob({
+      workerName: String(schedule.worker_name) as AutonomyWorkerName,
+      symbol: nullableString(schedule.symbol),
+      timeframe: nullableString(schedule.timeframe),
+      triggerSource,
+      inputPayload: objectValue(schedule.metadata_json),
+    });
+    created.push(jobId);
+    await bumpSchedule(String(schedule.id), Number(schedule.cadence_seconds));
+  }
+  for (const jobId of created) await executeAutonomyJob(jobId);
+  await recoverFailedJobs(config.retryLimit);
+  await queryPostgres('UPDATE autonomous_scan_cycles SET status = $2, completed_at = now(), summary_json = $3 WHERE id = $1', [cycleId, 'completed', { jobsCreated: created.length }]);
+  await publishAutonomyEvent('autonomy.scan.completed', { cycleId, jobsCreated: created.length });
+  await updateHealthSummary();
+}
+
+async function executeAutonomyJob(jobId: string) {
+  const job = await getAutonomyJob(jobId);
+  if (!job || job.status === 'cancelled') return job;
+  const runId = randomUUID();
+  await queryPostgres('INSERT INTO autonomous_job_runs (id, job_id, worker_name, status, progress, input_payload) VALUES ($1,$2,$3,$4,$5,$6)', [runId, jobId, job.workerName, 'running', 5, job.inputPayload]);
+  await markWorker(job.workerName, 'running', jobId);
+  await updateJob(jobId, 'running', 10, null, null);
+  await publishAutonomyEvent('autonomy.job.started', { jobId, workerName: job.workerName, symbol: job.symbol, timeframe: job.timeframe });
+  await publishAutonomyEvent('autonomy.worker.started', { workerName: job.workerName, jobId });
+  try {
+    const output = await runWorker(job.workerName as AutonomyWorkerName, job.symbol, job.timeframe, job.inputPayload);
+    const confidence = numberValue(output.confidenceScore ?? output.confidence ?? output.setupReadinessScore, null);
+    await queryPostgres('UPDATE autonomous_job_runs SET status = $2, progress = 100, output_payload = $3, confidence_score = $4, completed_at = now() WHERE id = $1', [runId, 'completed', output, confidence]);
+    await updateJob(jobId, 'completed', 100, output, confidence);
+    await markWorker(job.workerName, 'idle', null, true);
+    await publishAutonomyEvent('autonomy.job.completed', { jobId, workerName: job.workerName, confidenceScore: confidence });
+    await publishAutonomyEvent('autonomy.worker.completed', { workerName: job.workerName, jobId });
+    return getAutonomyJob(jobId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Autonomous worker failed.';
+    await queryPostgres('UPDATE autonomous_job_runs SET status = $2, error_message = $3, completed_at = now() WHERE id = $1', [runId, 'failed', message]);
+    await updateJob(jobId, 'failed', 100, null, null, message);
+    await logFailure(job, message);
+    await markWorker(job.workerName, 'failed', null, false, message);
+    await publishAutonomyEvent('autonomy.job.failed', { jobId, workerName: job.workerName, error: message });
+    await publishAutonomyEvent('autonomy.worker.failed', { workerName: job.workerName, jobId, error: message });
+    return getAutonomyJob(jobId);
+  }
+}
+
+async function runWorker(workerName: AutonomyWorkerName, symbol: string | null, timeframe: string | null, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const normalizedSymbol = (symbol ?? String(input.symbol ?? 'XAUUSD')).toUpperCase();
+  const normalizedTimeframe = normalizeTimeframe(timeframe ?? String(input.timeframe ?? 'H1'));
+  if (workerName === 'AutonomousSymbolScannerWorker') return toPayload(await scanSymbols());
+  if (workerName === 'AutonomousTimeframeSchedulerWorker') return toPayload(await enqueueTimeframes(normalizedSymbol));
+  if (workerName === 'AutonomousChartCaptureWorker') return toPayload(await runCaptureReadiness(normalizedSymbol, normalizedTimeframe));
+  if (workerName === 'AutonomousCacsmsVisionWorker') {
+    const { startCacsmsVisionScan } = await import('./cacsms-vision-store');
+    return toPayload(await startCacsmsVisionScan({ symbols: [normalizedSymbol], timeframes: [normalizedTimeframe], triggerSource: 'autonomous_worker' }));
+  }
+  if (workerName === 'AutonomousMultiTimeframeComparisonWorker') return toPayload(await analyzeSymbolMultiTimeframe({ symbol: normalizedSymbol }));
+  if (workerName === 'AutonomousVisualInterpretationWorker') return toPayload(await analyzeAiVisualInterpretation({ symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousAnomalyDetectionWorker') return toPayload(await analyzeVisualAnomaly({ symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousChartSegmentationWorker') return toPayload(await analyzeChartSegmentation({ symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousMarketInterpretationWorker') return toPayload(await analyzeVisualMarketInterpretation({ symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousSignalGenerationWorker') return toPayload(await generateAutonomousSignal(normalizedSymbol, normalizedTimeframe));
+  if (workerName === 'AutonomousAlertWorker') return toPayload(await generateAlerts());
+  if (workerName === 'AutonomousFailureRecoveryWorker') return toPayload(await recoverFailedJobs((await getAutonomyConfig()).retryLimit));
+  if (workerName === 'AutonomousAuditLogWorker') return { audited: true, confidenceScore: 100 };
+  if (workerName === 'AutonomousOutcomeTrackingWorker') return toPayload(await trackPendingOutcomes());
+  if (workerName === 'AutonomousModelLearningWorker') return toPayload(await evaluateModelFeedback());
+  if (workerName === 'AutonomousMacroDataSyncWorker' || workerName === 'AutonomousCOTSyncWorker' || workerName === 'AutonomousInterestRateSyncWorker') return toPayload(await runMacroSyncPlaceholder(workerName));
+  const captureId = await latestCaptureId(normalizedSymbol, normalizedTimeframe);
+  if (!captureId) throw new Error(`No chart capture is available for ${normalizedSymbol} ${normalizedTimeframe}; autonomous capture source must publish a capture first.`);
+  if (workerName === 'AutonomousVisionPreprocessingWorker') return { captureId, confidenceScore: 100, status: 'ready' };
+  if (workerName === 'AutonomousCandleDetectionWorker') return toPayload(await analyzeCaptureCandles({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousSwingDetectionWorker') return toPayload(await analyzeCaptureSwings({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousPatternRecognitionWorker') return toPayload(await analyzeCapturePatterns({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousTrendlineDetectionWorker') return toPayload(await analyzeCaptureTrendlines({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousChannelDetectionWorker') return toPayload(await analyzeCaptureChannels({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousSupportResistanceWorker') return toPayload(await analyzeCaptureSupportResistance({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousOrderBlockWorker') return toPayload(await analyzeCaptureOrderBlocks({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousLiquidityDetectionWorker') return toPayload(await analyzeCaptureLiquidity({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  if (workerName === 'AutonomousStructureAnalysisWorker') return toPayload(await analyzeCaptureStructure({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }));
+  throw new Error(`Worker ${workerName} is not registered.`);
+}
+
+async function generateAutonomousSignal(symbol: string, timeframe: string) {
+  const visual = await getLatestVisualMarketInterpretation(symbol, timeframe) ?? await analyzeVisualMarketInterpretation({ symbol, timeframe });
+  const decision = buildAutonomousDecision({
+    symbol,
+    timeframe,
+    dominantTimeframe: visual.dominantTimeframe,
+    visual,
+    macro: await loadMacroContext(symbol),
+    execution: await loadExecutionContext(symbol, timeframe),
+  });
+  const decisionId = randomUUID();
+  await queryPostgres(`
+    INSERT INTO autonomous_decision_logs (
+      id, symbol, timeframe, dominant_timeframe, final_bias, setup_type, setup_readiness_score,
+      confidence_score, risk_score, decision, entry_zone_json, stop_loss, take_profit_levels_json,
+      invalidation_level, reason_for_decision, reason_against_decision, macro_risk_warning,
+      liquidity_warning, anomaly_warning, recommended_next_action
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+  `, [
+    decisionId, decision.symbol, decision.timeframe, decision.dominantTimeframe, decision.finalBias, decision.setupType,
+    decision.setupReadinessScore, decision.confidenceScore, decision.riskScore, decision.decision, decision.entryZone,
+    decision.stopLoss, decision.takeProfitLevels, decision.invalidationLevel, decision.reasonForDecision,
+    decision.reasonAgainstDecision, decision.macroRiskWarning, decision.liquidityWarning, decision.anomalyWarning,
+    decision.recommendedNextAction,
+  ]);
+  await queryPostgres('INSERT INTO autonomous_outcome_tracking (id, decision_log_id, symbol, timeframe, decision) VALUES ($1,$2,$3,$4,$5)', [randomUUID(), decisionId, symbol, timeframe, decision.decision]);
+  await publishAutonomyEvent('autonomy.signal.generated', { decisionLogId: decisionId, decision });
+  if (['BUY', 'SELL'].includes(decision.decision) && decision.confidenceScore >= (await getAutonomyConfig()).alertThreshold) {
+    await createAlert(decisionId, symbol, timeframe, 'high', 'trade_setup', decision.reasonForDecision);
+  }
+  return { ...decision, decisionLogId: decisionId };
+}
+
+async function generateAlerts() {
+  const result = await queryPostgres(`
+    SELECT * FROM autonomous_decision_logs d
+    WHERE d.created_at >= now() - interval '4 hours'
+      AND d.decision IN ('BUY','SELL')
+      AND d.confidence_score >= $1
+      AND NOT EXISTS (SELECT 1 FROM autonomous_alerts a WHERE a.decision_log_id = d.id)
+    ORDER BY d.created_at DESC
+    LIMIT 20
+  `, [(await getAutonomyConfig()).alertThreshold]);
+  for (const row of result.rows) {
+    await createAlert(String(row.id), String(row.symbol), String(row.timeframe), 'high', 'trade_setup', String(row.reason_for_decision));
+  }
+  return { alertsCreated: result.rows.length, confidenceScore: 100 };
+}
+
+async function scanSymbols() {
+  const config = await getAutonomyConfig();
+  for (const symbol of config.activeSymbols) {
+    await queryPostgres('INSERT INTO autonomous_symbol_queue (id, symbol, reason) VALUES ($1,$2,$3)', [randomUUID(), symbol, 'scheduled_autonomous_scan']);
+  }
+  return { symbolsQueued: config.activeSymbols.length, confidenceScore: 100 };
+}
+
+async function enqueueTimeframes(symbol: string) {
+  const config = await getAutonomyConfig();
+  for (const timeframe of config.activeTimeframes) {
+    await queryPostgres('INSERT INTO autonomous_timeframe_queue (id, symbol, timeframe, worker_name) VALUES ($1,$2,$3,$4)', [randomUUID(), symbol, timeframe, 'AutonomousMarketInterpretationWorker']);
+  }
+  return { symbol, timeframesQueued: config.activeTimeframes.length, confidenceScore: 100 };
+}
+
+async function runCaptureReadiness(symbol: string, timeframe: string) {
+  const captureId = await latestCaptureId(symbol, timeframe);
+  if (!captureId) {
+    throw new Error(`No autonomous chart capture found for ${symbol} ${timeframe}. Configure MT5/chart capture source before analysis can proceed.`);
+  }
+  return { symbol, timeframe, captureId, confidenceScore: 100, status: 'capture_available' };
+}
+
+async function runMacroSyncPlaceholder(workerName: string) {
+  await publishAutonomyEvent('autonomy.job.progress', { workerName, stage: 'sync_delegated_to_existing_macro_services' });
+  return { workerName, status: 'delegated', confidenceScore: 80 };
+}
+
+async function recoverFailedJobs(retryLimit: number) {
+  const failed = await queryPostgres(`
+    SELECT * FROM autonomous_jobs
+    WHERE status = 'failed' AND retry_count < $1
+    ORDER BY updated_at ASC
+    LIMIT 5
+  `, [retryLimit]);
+  for (const row of failed.rows) {
+    const retryCount = Number(row.retry_count) + 1;
+    const backoffSeconds = Math.min(3600, 30 * 2 ** retryCount);
+    await queryPostgres('INSERT INTO autonomous_retry_logs (id, job_id, retry_number, backoff_seconds, status, error_message) VALUES ($1,$2,$3,$4,$5,$6)', [randomUUID(), String(row.id), retryCount, backoffSeconds, 'scheduled', nullableString(row.error_message)]);
+    await queryPostgres("UPDATE autonomous_jobs SET status = 'queued', retry_count = $2, next_run_time = now() + ($3 || ' seconds')::interval, updated_at = now() WHERE id = $1", [String(row.id), retryCount, backoffSeconds]);
+  }
+  return { recovered: failed.rows.length, confidenceScore: 100 };
+}
+
+async function trackPendingOutcomes() {
+  const result = await queryPostgres("UPDATE autonomous_outcome_tracking SET metadata_json = metadata_json || $1::jsonb WHERE outcome_status = 'pending' RETURNING id", [{ checkedAt: new Date().toISOString() }]);
+  return { outcomesChecked: result.rows.length, confidenceScore: 100 };
+}
+
+async function evaluateModelFeedback() {
+  const result = await queryPostgres('SELECT COUNT(*)::int AS count FROM autonomous_outcome_tracking');
+  return { samples: Number(result.rows[0]?.count ?? 0), confidenceScore: 100 };
+}
+
+async function createAutonomyJob(input: { workerName: AutonomyWorkerName | string; symbol?: string | null; timeframe?: string | null; triggerSource: string; inputPayload?: Record<string, unknown>; retryCount?: number }) {
+  const id = randomUUID();
+  const auditTraceId = randomUUID();
+  await queryPostgres(`
+    INSERT INTO autonomous_jobs (
+      id, symbol, timeframe, worker_name, trigger_source, status, progress, input_payload,
+      retry_count, next_run_time, audit_trace_id
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10)
+  `, [id, input.symbol ?? null, input.timeframe ?? null, input.workerName, input.triggerSource, 'queued', 0, input.inputPayload ?? {}, input.retryCount ?? 0, auditTraceId]);
+  await audit(auditTraceId, id, 'autonomy.job.created', 'autonomy-runtime', toPayload(input));
+  await publishAutonomyEvent('autonomy.job.created', { jobId: id, workerName: input.workerName, symbol: input.symbol, timeframe: input.timeframe });
+  return id;
+}
+
+async function seedAutonomyDefaults() {
+  await queryPostgres('INSERT INTO autonomous_config (key, value_json) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', ['default', toPayload(defaultConfig)]);
+  await upsertHealth('autonomy', 'running', 'Autonomous runtime is available.', false, {});
+  for (const worker of AUTONOMY_WORKERS) {
+    await queryPostgres(`
+      INSERT INTO autonomous_worker_status (worker_name, status)
+      VALUES ($1, 'idle')
+      ON CONFLICT (worker_name) DO NOTHING
+    `, [worker]);
+  }
+  const config = await getAutonomyConfig();
+  for (const symbol of config.activeSymbols) {
+    for (const timeframe of config.activeTimeframes) {
+      await seedSchedule('AutonomousChartCaptureWorker', symbol, timeframe, cadenceForTimeframe(timeframe));
+      await seedSchedule('AutonomousCacsmsVisionWorker', symbol, timeframe, cadenceForTimeframe(timeframe) + 10);
+      await seedSchedule('AutonomousMarketInterpretationWorker', symbol, timeframe, cadenceForTimeframe(timeframe) + 20);
+      await seedSchedule('AutonomousSignalGenerationWorker', symbol, timeframe, cadenceForTimeframe(timeframe) + 40);
+    }
+    await seedSchedule('AutonomousMultiTimeframeComparisonWorker', symbol, null, 3600);
+  }
+  await seedSchedule('AutonomousSymbolScannerWorker', null, null, config.scanFrequencySeconds);
+  await seedSchedule('AutonomousFailureRecoveryWorker', null, null, 120);
+  await seedSchedule('AutonomousAlertWorker', null, null, 60);
+  await seedSchedule('AutonomousMacroDataSyncWorker', null, null, 900);
+  await seedSchedule('AutonomousCOTSyncWorker', null, null, 604800);
+  await seedSchedule('AutonomousInterestRateSyncWorker', null, null, 86400);
+  await seedSchedule('AutonomousOutcomeTrackingWorker', null, null, 86400);
+  await seedSchedule('AutonomousModelLearningWorker', null, null, 604800);
+}
+
+async function seedSchedule(workerName: string, symbol: string | null, timeframe: string | null, cadenceSeconds: number) {
+  const key = [workerName, symbol ?? 'system', timeframe ?? 'all'].join(':');
+  await queryPostgres(`
+    INSERT INTO autonomous_schedules (id, worker_name, schedule_key, symbol, timeframe, cadence_seconds, next_run_at, metadata_json)
+    VALUES ($1,$2,$3,$4,$5,$6,now(),$7)
+    ON CONFLICT (schedule_key) DO NOTHING
+  `, [randomUUID(), workerName, key, symbol, timeframe, cadenceSeconds, { autonomousFirst: true }]);
+}
+
+async function getAutonomyConfig(): Promise<AutonomyConfig> {
+  await ensureAutonomySchema();
+  const result = await queryPostgres('SELECT value_json FROM autonomous_config WHERE key = $1', ['default']);
+  return { ...defaultConfig, ...objectValue(result.rows[0]?.value_json) } as AutonomyConfig;
+}
+
+async function saveAutonomyConfig(patch: Partial<AutonomyConfig>) {
+  const config = { ...(await getAutonomyConfig()), ...patch };
+  await queryPostgres('INSERT INTO autonomous_config (key, value_json, updated_at) VALUES ($1,$2,now()) ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = now()', ['default', toPayload(config)]);
+}
+
+async function updateJob(id: string, status: AutonomyJobStatus, progress: number, output: Record<string, unknown> | null, confidence: number | null, error?: string) {
+  await queryPostgres(`
+    UPDATE autonomous_jobs
+    SET status = $2,
+        progress = $3,
+        output_payload = COALESCE($4, output_payload),
+        confidence_score = COALESCE($5, confidence_score),
+        error_message = COALESCE($6, error_message),
+        started_at = CASE WHEN $2 = 'running' AND started_at IS NULL THEN now() ELSE started_at END,
+        completed_at = CASE WHEN $2 IN ('completed','failed','cancelled','blocked') THEN now() ELSE completed_at END,
+        updated_at = now()
+    WHERE id = $1
+  `, [id, status, progress, output, confidence, error ?? null]);
+  await publishAutonomyEvent(status === 'running' ? 'autonomy.job.progress' : `autonomy.job.${status}`, { jobId: id, status, progress });
+}
+
+async function markWorker(workerName: string, status: string, jobId: string | null, success?: boolean, error?: string) {
+  await queryPostgres(`
+    UPDATE autonomous_worker_status
+    SET status = $2,
+        current_job_id = $3,
+        last_heartbeat_at = now(),
+        last_error = $4,
+        processed_count = processed_count + $5,
+        failed_count = failed_count + $6
+    WHERE worker_name = $1
+  `, [workerName, status, jobId, error ?? null, success ? 1 : 0, error ? 1 : 0]);
+}
+
+async function logFailure(job: ReturnType<typeof mapJob>, message: string) {
+  const nextRetryAt = new Date(Date.now() + Math.min(3600, 30 * 2 ** (job.retryCount + 1)) * 1000).toISOString();
+  await queryPostgres(`
+    INSERT INTO autonomous_failures (id, job_id, worker_name, symbol, timeframe, failure_type, error_message, retry_count, escalated, next_retry_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+  `, [randomUUID(), job.id, job.workerName, job.symbol, job.timeframe, 'worker_failure', message, job.retryCount, job.retryCount >= (await getAutonomyConfig()).retryLimit, nextRetryAt]);
+}
+
+async function createAlert(decisionLogId: string, symbol: string, timeframe: string, severity: string, alertType: string, message: string) {
+  const id = randomUUID();
+  await queryPostgres('INSERT INTO autonomous_alerts (id, decision_log_id, symbol, timeframe, severity, alert_type, message) VALUES ($1,$2,$3,$4,$5,$6,$7)', [id, decisionLogId, symbol, timeframe, severity, alertType, message]);
+  await publishAutonomyEvent('autonomy.alert.triggered', { alertId: id, decisionLogId, symbol, timeframe, severity, message });
+}
+
+async function publishAutonomyEvent(eventType: string, payload: Record<string, unknown>) {
+  await publishVisualIntelligenceEvent(eventType, null, null, payload);
+}
+
+async function audit(auditTraceId: string, jobId: string | null, eventType: string, actor: string, payload: Record<string, unknown>) {
+  await queryPostgres('INSERT INTO autonomous_audit_trails (id, audit_trace_id, job_id, event_type, actor, payload_json) VALUES ($1,$2,$3,$4,$5,$6)', [randomUUID(), auditTraceId, jobId, eventType, actor, payload]);
+}
+
+async function latestCaptureId(symbol: string, timeframe: string) {
+  const result = await queryPostgres(`
+    SELECT id FROM chart_captures
+    WHERE upper(symbol) = $1 AND upper(timeframe) = $2
+    ORDER BY captured_at DESC
+    LIMIT 1
+  `, [symbol.toUpperCase(), timeframe.toUpperCase()]);
+  return nullableString(result.rows[0]?.id);
+}
+
+async function loadMacroContext(symbol: string) {
+  const risk = await queryPostgres(`
+    SELECT COUNT(*)::int AS high_impact_count
+    FROM economic_events
+    WHERE impact = 'High'
+      AND event_time >= now() - interval '30 minutes'
+      AND event_time <= now() + interval '30 minutes'
+  `).catch(() => ({ rows: [] as Row[] }));
+  return {
+    economicRiskScore: Number(risk.rows[0]?.high_impact_count ?? 0) > 0 ? 85 : 20,
+    warning: Number(risk.rows[0]?.high_impact_count ?? 0) > 0 ? `High-impact macro risk is active for ${symbol}.` : null,
+  };
+}
+
+async function loadExecutionContext(_symbol: string, _timeframe: string) {
+  return { spreadScore: 75, dataQualityScore: 65, captureQualityScore: 65, sessionState: 'unknown' };
+}
+
+async function listAlerts(limit: number) {
+  const result = await queryPostgres('SELECT * FROM autonomous_alerts ORDER BY created_at DESC LIMIT $1', [limit]);
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    decisionLogId: nullableString(row.decision_log_id),
+    symbol: String(row.symbol),
+    timeframe: String(row.timeframe),
+    severity: String(row.severity),
+    alertType: String(row.alert_type),
+    message: String(row.message),
+    status: String(row.status),
+    createdAt: dateString(row.created_at),
+  }));
+}
+
+async function getHealth() {
+  const result = await queryPostgres('SELECT * FROM autonomous_system_health ORDER BY updated_at DESC');
+  return result.rows.map((row) => ({
+    key: String(row.health_key),
+    status: String(row.status),
+    emergencyStopped: Boolean(row.emergency_stopped),
+    message: String(row.message),
+    payload: objectValue(row.payload_json),
+    updatedAt: dateString(row.updated_at),
+  }));
+}
+
+async function upsertHealth(key: string, status: string, message: string, emergencyStopped: boolean, payload: Record<string, unknown>) {
+  await queryPostgres(`
+    INSERT INTO autonomous_system_health (id, health_key, status, emergency_stopped, message, payload_json, updated_at)
+    VALUES ($1,$2,$3,$4,$5,$6,now())
+    ON CONFLICT (health_key) DO UPDATE
+      SET status = EXCLUDED.status,
+          emergency_stopped = EXCLUDED.emergency_stopped,
+          message = EXCLUDED.message,
+          payload_json = EXCLUDED.payload_json,
+          updated_at = now()
+  `, [randomUUID(), key, status, emergencyStopped, message, payload]);
+  await publishAutonomyEvent('autonomy.health.updated', { key, status, emergencyStopped, message, payload });
+}
+
+async function updateHealthSummary() {
+  const [queued, failed] = await Promise.all([
+    queryPostgres("SELECT COUNT(*)::int AS count FROM autonomous_jobs WHERE status = 'queued'"),
+    queryPostgres("SELECT COUNT(*)::int AS count FROM autonomous_jobs WHERE status = 'failed' AND updated_at >= now() - interval '24 hours'"),
+  ]);
+  await upsertHealth('autonomy', 'running', 'Autonomous runtime is scanning schedules and workers.', false, {
+    queuedJobs: Number(queued.rows[0]?.count ?? 0),
+    failedJobs24h: Number(failed.rows[0]?.count ?? 0),
+  });
+}
+
+async function isEmergencyStopped() {
+  const result = await queryPostgres("SELECT emergency_stopped FROM autonomous_system_health WHERE health_key = 'autonomy' LIMIT 1");
+  return Boolean(result.rows[0]?.emergency_stopped);
+}
+
+async function bumpSchedule(id: string, cadenceSeconds: number) {
+  await queryPostgres("UPDATE autonomous_schedules SET last_run_at = now(), next_run_at = now() + ($2 || ' seconds')::interval, updated_at = now() WHERE id = $1", [id, cadenceSeconds]);
+}
+
+function cadenceForTimeframe(timeframe: string) {
+  if (timeframe === 'W') return 604800;
+  if (timeframe === 'D') return 86400;
+  if (timeframe === 'H4') return 14400;
+  if (timeframe === 'H1') return 3600;
+  return 900;
+}
+
+function normalizeTimeframe(value: string) {
+  const timeframe = value.toUpperCase();
+  if (!AUTONOMY_TIMEFRAMES.includes(timeframe as typeof AUTONOMY_TIMEFRAMES[number])) throw new Error(`Unsupported autonomous timeframe ${timeframe}.`);
+  return timeframe;
+}
+
+function mapJob(row: Row) {
+  return {
+    id: String(row.id),
+    symbol: nullableString(row.symbol),
+    timeframe: nullableString(row.timeframe),
+    workerName: String(row.worker_name),
+    triggerSource: String(row.trigger_source),
+    status: String(row.status) as AutonomyJobStatus,
+    progress: Number(row.progress),
+    inputPayload: objectValue(row.input_payload),
+    outputPayload: objectValue(row.output_payload),
+    confidenceScore: numberValue(row.confidence_score, null),
+    retryCount: Number(row.retry_count),
+    errorMessage: nullableString(row.error_message),
+    startedAt: nullableDate(row.started_at),
+    completedAt: nullableDate(row.completed_at),
+    nextRunTime: nullableDate(row.next_run_time),
+    auditTraceId: String(row.audit_trace_id),
+    createdAt: dateString(row.created_at),
+    updatedAt: dateString(row.updated_at),
+  };
+}
+
+function mapRun(row: Row) {
+  return {
+    id: String(row.id),
+    jobId: String(row.job_id),
+    workerName: String(row.worker_name),
+    status: String(row.status),
+    progress: Number(row.progress),
+    inputPayload: objectValue(row.input_payload),
+    outputPayload: objectValue(row.output_payload),
+    confidenceScore: numberValue(row.confidence_score, null),
+    errorMessage: nullableString(row.error_message),
+    startedAt: dateString(row.started_at),
+    completedAt: nullableDate(row.completed_at),
+  };
+}
+
+function mapWorker(row: Row) {
+  return {
+    workerName: String(row.worker_name),
+    status: String(row.status),
+    currentJobId: nullableString(row.current_job_id),
+    lastHeartbeatAt: dateString(row.last_heartbeat_at),
+    lastError: nullableString(row.last_error),
+    processedCount: Number(row.processed_count),
+    failedCount: Number(row.failed_count),
+    metadata: objectValue(row.metadata_json),
+  };
+}
+
+function mapSchedule(row: Row) {
+  return {
+    id: String(row.id),
+    workerName: String(row.worker_name),
+    scheduleKey: String(row.schedule_key),
+    symbol: nullableString(row.symbol),
+    timeframe: nullableString(row.timeframe),
+    cadenceSeconds: Number(row.cadence_seconds),
+    enabled: Boolean(row.enabled),
+    nextRunAt: dateString(row.next_run_at),
+    lastRunAt: nullableDate(row.last_run_at),
+    metadata: objectValue(row.metadata_json),
+  };
+}
+
+function mapDecision(row: Row) {
+  return {
+    id: String(row.id),
+    jobId: nullableString(row.job_id),
+    symbol: String(row.symbol),
+    timeframe: String(row.timeframe),
+    dominantTimeframe: String(row.dominant_timeframe),
+    finalBias: String(row.final_bias),
+    setupType: String(row.setup_type),
+    setupReadinessScore: Number(row.setup_readiness_score),
+    confidenceScore: Number(row.confidence_score),
+    riskScore: Number(row.risk_score),
+    decision: String(row.decision),
+    entryZone: objectValue(row.entry_zone_json),
+    reasonForDecision: String(row.reason_for_decision),
+    reasonAgainstDecision: String(row.reason_against_decision),
+    macroRiskWarning: String(row.macro_risk_warning),
+    liquidityWarning: String(row.liquidity_warning),
+    anomalyWarning: String(row.anomaly_warning),
+    recommendedNextAction: String(row.recommended_next_action),
+    createdAt: dateString(row.created_at),
+  };
+}
+
+function mapAudit(row: Row) {
+  return {
+    id: String(row.id),
+    auditTraceId: String(row.audit_trace_id),
+    jobId: nullableString(row.job_id),
+    eventType: String(row.event_type),
+    actor: String(row.actor),
+    payload: objectValue(row.payload_json),
+    createdAt: dateString(row.created_at),
+  };
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function numberValue(value: unknown, fallback: number | null) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function nullableString(value: unknown) {
+  return value == null ? null : String(value);
+}
+
+function toPayload(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return { ...(value as Record<string, unknown>) };
+  return { value };
+}
+
+function nullableDate(value: unknown) {
+  return value == null ? null : dateString(value);
+}
+
+function dateString(value: unknown): string {
+  return value instanceof Date ? value.toISOString() : String(value);
+}

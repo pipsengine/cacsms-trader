@@ -282,6 +282,7 @@ const navigationModules: NavigationModule[] = [
   ]),
   navModule("Computer Vision & Visual Intelligence", Eye, [
     page("Visual intelligence overview"),
+    page("Cacsms Vision Intelligence Room", "engine"),
     group("Chart Capture & Detection", [
       "Chart screenshot capture",
       "Candle detection",
@@ -1402,6 +1403,7 @@ function hrefForPageId(pageId: string): string | null {
   if (pageId === "trading-operations") return "/";
   if (pageId === "executive-overview") return "/";
   if (pageId === "visual-intelligence-overview") return "/visual-intelligence-overview";
+  if (pageId === "cacsms-vision-intelligence-room") return "/cacsms-vision";
   if (pageId === "chart-screenshot-capture") return "/visual-intelligence-overview/chart-screenshot-capture";
   if (pageId === "candle-detection") return "/visual-intelligence-overview/candle-detection";
   if (pageId === "swing-point-detection") return "/visual-intelligence-overview/swing-point-detection";
@@ -1413,6 +1415,11 @@ function hrefForPageId(pageId: string): string | null {
   if (pageId === "liquidity-zone-detection") return "/visual-intelligence-overview/liquidity-zone-detection";
   if (pageId === "structure-analysis") return "/visual-intelligence-overview/structure-analysis";
   if (pageId === "multi-timeframe-comparison") return "/visual-intelligence-overview/multi-timeframe-comparison";
+  if (pageId === "image-comparison-engine") return "/visual-intelligence-overview/image-comparison-engine";
+  if (pageId === "ai-visual-interpretation") return "/visual-intelligence-overview/ai-visual-interpretation";
+  if (pageId === "visual-anomaly-detection") return "/visual-intelligence-overview/visual-anomaly-detection";
+  if (pageId === "ai-chart-segmentation") return "/visual-intelligence-overview/ai-chart-segmentation";
+  if (pageId === "visual-market-interpretation") return "/visual-intelligence-overview/visual-market-interpretation";
   if (pageId === "macro-intelligence-overview") return "/economic-news-and-sentiment-intelligence";
   if (pageId === "economic-calendar-overview") return "/economic-news-and-sentiment-intelligence/economic-calendar";
   if (pageId === "cpi-inflation-events") return "/economic-news-and-sentiment-intelligence/cpi-inflation-events";
@@ -1446,6 +1453,7 @@ function hrefForPageId(pageId: string): string | null {
 function pageIdForPathname(pathname: string): string | null {
   if (pathname === "/") return "executive-overview";
   if (pathname === "/visual-intelligence-overview") return "visual-intelligence-overview";
+  if (pathname === "/cacsms-vision") return "cacsms-vision-intelligence-room";
   if (pathname === "/visual-intelligence-overview/chart-screenshot-capture") return "chart-screenshot-capture";
   if (pathname === "/visual-intelligence-overview/candle-detection") return "candle-detection";
   if (pathname === "/visual-intelligence-overview/swing-point-detection") return "swing-point-detection";
@@ -1456,6 +1464,12 @@ function pageIdForPathname(pathname: string): string | null {
   if (pathname === "/visual-intelligence-overview/order-block-detection") return "order-block-detection";
   if (pathname === "/visual-intelligence-overview/liquidity-zone-detection") return "liquidity-zone-detection";
   if (pathname === "/visual-intelligence-overview/structure-analysis") return "structure-analysis";
+  if (pathname === "/visual-intelligence-overview/multi-timeframe-comparison") return "multi-timeframe-comparison";
+  if (pathname === "/visual-intelligence-overview/image-comparison-engine") return "image-comparison-engine";
+  if (pathname === "/visual-intelligence-overview/ai-visual-interpretation") return "ai-visual-interpretation";
+  if (pathname === "/visual-intelligence-overview/visual-anomaly-detection") return "visual-anomaly-detection";
+  if (pathname === "/visual-intelligence-overview/ai-chart-segmentation") return "ai-chart-segmentation";
+  if (pathname === "/visual-intelligence-overview/visual-market-interpretation") return "visual-market-interpretation";
   if (pathname === "/economic-news-and-sentiment-intelligence") return "macro-intelligence-overview";
   if (pathname === "/economic-news-and-sentiment-intelligence/economic-calendar") return "economic-calendar-overview";
   if (pathname === "/economic-news-and-sentiment-intelligence/cpi-inflation-events") return "cpi-inflation-events";
