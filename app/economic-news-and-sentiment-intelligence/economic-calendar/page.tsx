@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Suspense, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useSearchParams } from 'next/navigation';
 import {
   AlertTriangle,
@@ -172,7 +172,7 @@ const actions = [
   { label: 'Archive Completed Events', endpoint: '/api/economic-calendar/archive', icon: Archive },
 ];
 
-export default function EconomicCalendarIntelligencePage() {
+function EconomicCalendarIntelligencePage() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [dashboard, setDashboard] = useState<DashboardPayload>(emptyDashboard);
   const [loading, setLoading] = useState(true);
@@ -1050,6 +1050,14 @@ function decisionTone(value: string | null): Tone {
   if (raw === 'CUT') return 'rose';
   if (raw === 'HOLD') return 'slate';
   return 'slate';
+}
+
+export default function EconomicCalendarIntelligencePageRoute() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-slate-950 text-slate-200 p-6">Loading economic calendar...</div>}>
+      <EconomicCalendarIntelligencePage />
+    </Suspense>
+  );
 }
 
 function surpriseTone(value: string | null): Tone {

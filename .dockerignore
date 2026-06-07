@@ -1,0 +1,15 @@
+node_modules
+.next/*
+!.next/standalone
+!.next/static
+.git
+.gitignore
+.npm-cache
+.cache
+coverage
+*.log
+.env*
+!.env.example
+tsconfig.tsbuildinfo
+README.md
+terminals

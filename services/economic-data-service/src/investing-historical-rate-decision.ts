@@ -377,7 +377,7 @@ function subtractYearsUtc(date: Date, years: number): Date {
   return next;
 }
 
-function parseRate(value: string): number | null {
+function parseRate(value: string | null | undefined): number | null {
   const raw = String(value ?? '').trim();
   if (!raw || raw === '-' || raw.toLowerCase() === 'n/a') return null;
   const cleaned = raw.replaceAll('%', '').replaceAll(',', '').replaceAll(' ', '');

@@ -2,10 +2,10 @@ export const runtime = 'nodejs';
 
 import { getLatestAiVisualInterpretation } from '@/lib/ai-visual-interpretation-store';
 
-export async function GET(_request: Request, context: { params: Promise<{ symbol: string; timeframe: string }> }): Promise<Response> {
+export async function GET(_request: Request, context: { params: Promise<{ key: string; timeframe: string }> }): Promise<Response> {
   try {
-    const { symbol, timeframe } = await context.params;
-    const interpretation = await getLatestAiVisualInterpretation(symbol, timeframe);
+    const { key, timeframe } = await context.params;
+    const interpretation = await getLatestAiVisualInterpretation(key, timeframe);
     if (!interpretation) {
       return Response.json({ ok: false, error: 'No latest AI visual interpretation exists for this symbol/timeframe.' }, { status: 404, headers: { 'Cache-Control': 'no-store' } });
     }

@@ -267,8 +267,14 @@ function compareZones(previous?: ComparisonAnalysisPayload, current?: Comparison
   const newZones = currentZones.filter((zone) => !previousZones.some((oldZone) => zoneKey(oldZone) === zoneKey(zone))).slice(0, 8);
   const invalidatedZones = previousZones.filter((zone) => !currentZones.some((newZone) => zoneKey(newZone) === zoneKey(zone))).slice(0, 8);
   const events = [
-    ...newZones.map((zone) => changeEvent(String(zone.timeframe ?? 'H1') as ImageComparisonTimeframe, 'new_zone', 0.66, `New ${String(zone.type ?? 'market')} zone appeared in the current screenshot.`, zone)),
-    ...invalidatedZones.map((zone) => changeEvent(String(zone.timeframe ?? 'H1') as ImageComparisonTimeframe, 'invalidated_zone', 0.7, `Prior ${String(zone.type ?? 'market')} zone is no longer valid in the current screenshot.`, zone)),
+    ...newZones.map((zone) => {
+      const record = zone as Record<string, unknown>;
+      return changeEvent(String(record.timeframe ?? 'H1') as ImageComparisonTimeframe, 'new_zone', 0.66, `New ${String(record.type ?? 'market')} zone appeared in the current screenshot.`, zone);
+    }),
+    ...invalidatedZones.map((zone) => {
+      const record = zone as Record<string, unknown>;
+      return changeEvent(String(record.timeframe ?? 'H1') as ImageComparisonTimeframe, 'invalidated_zone', 0.7, `Prior ${String(record.type ?? 'market')} zone is no longer valid in the current screenshot.`, zone);
+    }),
   ];
   return {
     newZones,

@@ -587,8 +587,8 @@ async function runCaptureReadiness(symbol: string, timeframe: string) {
 }
 
 async function runMacroSyncPlaceholder(workerName: string) {
-  await publishAutonomyEvent('autonomy.job.progress', { workerName, stage: 'sync_delegated_to_existing_macro_services' });
-  return { workerName, status: 'delegated', confidenceScore: 80 };
+  await publishAutonomyEvent('autonomy.job.progress', { workerName, stage: 'awaiting_live_macro_service' });
+  throw new Error(`${workerName} requires a live macro data sync result. No placeholder worker output is emitted.`);
 }
 
 async function recoverFailedJobs(retryLimit: number) {

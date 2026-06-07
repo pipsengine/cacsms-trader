@@ -1,6 +1,6 @@
 export const runtime = 'nodejs';
 
-import { createEaSymlink, enginePolicyFromEnv, assertPolicy } from '@/services/ea-deployment/ea-deployment-engine';
+import { createEaSymlink, enginePolicyFromEnv, assertPolicy, sanitizeEaDeploymentConfig } from '@/services/ea-deployment/ea-deployment-engine';
 import crypto from 'node:crypto';
 import { appendEaDeploymentLogs, createEaDeploymentRun, upsertEaDeploymentConfig } from '@/lib/ea-deployment-store';
 
@@ -9,10 +9,11 @@ export async function POST(request: Request): Promise<Response> {
     const policy = enginePolicyFromEnv();
     assertPolicy(policy, request.headers);
     const payload = await request.json();
-    const result = await createEaSymlink(policy, payload.config, Boolean(payload.force));
+    const config = sanitizeEaDeploymentConfig(payload.config);
+    const result = await createEaSymlink(policy, config, Boolean(payload.force));
     const persisted = await persistRunSafe({
       runId: crypto.randomUUID(),
-      config: payload.config,
+      config,
       method: 'SYMLINK',
       status: result.verification?.status ?? (result.ok ? 'SUCCESS' : 'FAILED'),
       message: result.message ?? '',

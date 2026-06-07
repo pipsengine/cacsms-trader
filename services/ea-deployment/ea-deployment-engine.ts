@@ -101,13 +101,74 @@ export interface EnginePolicy {
 
 export const DEFAULT_TARGET_FOLDER_NAME = 'CacsmsTrader';
 
+export interface DeploymentRuntime {
+  mt5TerminalRoot: string;
+  mt5MetaquotesRoot: string;
+  projectEaFolder: string;
+  dockerMount: boolean;
+  recommendedMethod: DeploymentMethod;
+  symlinkSupported: boolean;
+}
+
+export function resolveMt5TerminalRoot(): string {
+  const configured = String(process.env.CACSMS_MT5_TERMINAL_ROOT ?? '').trim();
+  if (configured) return normalizePath(path.resolve(configured));
+  return normalizePath(path.join(os.homedir(), 'AppData', 'Roaming', 'MetaQuotes', 'Terminal'));
+}
+
+export function resolveMt5MetaquotesRoot(): string {
+  const configured = String(process.env.CACSMS_MT5_METAQUOTES_ROOT ?? '').trim();
+  if (configured) return normalizePath(path.resolve(configured));
+  return normalizePath(path.join(os.homedir(), 'AppData', 'Roaming', 'MetaQuotes'));
+}
+
+export function resolveProjectEaFolder(): string {
+  const configured = String(process.env.CACSMS_EA_PROJECT_FOLDER ?? '').trim();
+  if (configured) return normalizePath(path.resolve(configured));
+  return normalizePath(path.join(process.cwd(), 'mt5', 'experts', 'CacsmsTraderEA'));
+}
+
+export async function resolveProjectEaVersion(): Promise<string> {
+  const folder = resolveProjectEaFolder();
+  try {
+    const mq5 = await fs.readFile(path.join(folder, 'CacsmsTraderEA.mq5'), 'utf8');
+    const match = mq5.match(/#property version "([^"]+)"/);
+    return match?.[1]?.trim() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+export function getDeploymentRuntime(): DeploymentRuntime {
+  const dockerMount = Boolean(String(process.env.CACSMS_MT5_TERMINAL_ROOT ?? '').trim());
+  const symlinkSupported = process.platform === 'win32' && !dockerMount;
+  return {
+    mt5TerminalRoot: resolveMt5TerminalRoot(),
+    mt5MetaquotesRoot: resolveMt5MetaquotesRoot(),
+    projectEaFolder: resolveProjectEaFolder(),
+    dockerMount,
+    recommendedMethod: symlinkSupported ? 'SYMLINK' : 'COPY',
+    symlinkSupported,
+  };
+}
+
 export function enginePolicyFromEnv(): EnginePolicy {
-  const enabled = process.env.CACSMS_ENABLE_EA_DEPLOYMENT_TOOL === 'true' || process.env.NODE_ENV !== 'production';
+  const env = String(process.env.CACSMS_ENV ?? 'development').toLowerCase();
+  const enabled =
+    env === 'development'
+    || process.env.CACSMS_ENABLE_EA_DEPLOYMENT_TOOL === 'true';
   const requireLocalhost = process.env.CACSMS_EA_DEPLOYMENT_ALLOW_REMOTE !== 'true';
+  const runtime = getDeploymentRuntime();
   const allowedRoots = normalizeAllowedRoots([
     process.cwd(),
+    path.dirname(runtime.projectEaFolder),
+    runtime.projectEaFolder,
+    runtime.mt5MetaquotesRoot,
+    runtime.mt5TerminalRoot,
     path.join(os.homedir(), 'AppData', 'Roaming', 'MetaQuotes', 'Terminal'),
     path.join(os.homedir(), 'AppData', 'Roaming', 'MetaQuotes'),
+    '/mt5-host/MetaQuotes',
+    '/mt5-host/MetaQuotes/Terminal',
   ]);
   return { enabled, requireLocalhost, allowedRoots };
 }
@@ -132,7 +193,7 @@ export function assertPolicy(policy: EnginePolicy, requestHeaders: Headers): voi
 
 export async function detectMt5DataFolders(policy: EnginePolicy): Promise<DetectResult> {
   const logs: DeploymentLog[] = [];
-  const root = path.join(os.homedir(), 'AppData', 'Roaming', 'MetaQuotes', 'Terminal');
+  const root = resolveMt5TerminalRoot();
   logs.push(log('INFO', 'detect_mt5_folders', 'Scanning MT5 terminal root.', root));
 
   const safeRoot = enforceSafePath(root, policy);
@@ -251,14 +312,29 @@ export async function copyEaFiles(policy: EnginePolicy, config: EADeploymentConf
 
   logs.push(log('INFO', 'copy_validate', 'Validating source and destination paths.'));
   logs.push(await verifyFolderExists('project_ea_folder', projectFolder));
-  await fs.mkdir(targetPath, { recursive: true });
+  logs.push(await verifyParentExists('mt5_experts_parent', targetPath));
 
   const destStat = await safeLstat(targetPath);
   if (destStat?.isSymbolicLink()) {
-    const message = 'Destination is a symlink. Use symlink mode or remove the link before copying.';
-    logs.push(log('WARNING', 'copy_blocked', message, targetPath));
-    const verification = await verifyDeployment(normalized, policy, 'COPY');
-    return { ok: false, message, verification, logs: logs.reverse(), error: message };
+    if (!force) {
+      const message = 'Destination is an existing symlink. Confirm overwrite to replace it with copied files.';
+      logs.push(log('WARNING', 'copy_symlink_confirmation_required', message, targetPath));
+      const verification = await verifyDeployment(normalized, policy, 'COPY');
+      return {
+        ok: false,
+        message,
+        verification,
+        logs: logs.reverse(),
+        requiresConfirmation: true,
+        confirmAction: 'overwrite',
+        error: message,
+      };
+    }
+    await fs.unlink(targetPath);
+    logs.push(log('WARNING', 'symlink_removed', 'Removed existing symlink before copy.', targetPath));
+    await fs.mkdir(targetPath, { recursive: true });
+  } else if (!destStat) {
+    await fs.mkdir(targetPath, { recursive: true });
   }
 
   const existingFiles = await listFilesRecursive(targetPath, 2);
@@ -350,14 +426,24 @@ export async function verifyDeployment(config: EADeploymentConfig, policy: Engin
   };
 }
 
+export function sanitizeEaDeploymentConfig(config: EADeploymentConfig): EADeploymentConfig {
+  return normalizeConfig(config);
+}
+
 function normalizeConfig(config: EADeploymentConfig): EADeploymentConfig {
-  const mt5ExpertsFolder = config.mt5ExpertsFolder || path.join(config.mt5DataFolder || '', 'MQL5', 'Experts', config.targetFolderName || DEFAULT_TARGET_FOLDER_NAME);
+  const projectEaFolder = resolveDeploymentPath(config.projectEaFolder);
+  const mt5DataFolder = config.mt5DataFolder ? resolveDeploymentPath(config.mt5DataFolder) : '';
+  const mt5ExpertsFolder = config.mt5ExpertsFolder
+    ? resolveDeploymentPath(config.mt5ExpertsFolder)
+    : joinPosix(mt5DataFolder, 'MQL5', 'Experts', config.targetFolderName || DEFAULT_TARGET_FOLDER_NAME);
   return {
     ...config,
-    projectEaFolder: normalizePath(config.projectEaFolder),
-    mt5DataFolder: normalizePath(config.mt5DataFolder),
+    projectEaFolder: normalizePath(projectEaFolder),
+    mt5DataFolder: normalizePath(mt5DataFolder),
     mt5ExpertsFolder: normalizePath(mt5ExpertsFolder),
     targetFolderName: config.targetFolderName || DEFAULT_TARGET_FOLDER_NAME,
+    eaSourceFolder: config.eaSourceFolder ? normalizePath(resolveDeploymentPath(config.eaSourceFolder)) : undefined,
+    eaCompiledFolder: config.eaCompiledFolder ? normalizePath(resolveDeploymentPath(config.eaCompiledFolder)) : undefined,
   };
 }
 
@@ -371,23 +457,100 @@ function validateConfig(config: EADeploymentConfig, policy: EnginePolicy): void 
 function enforceSafePath(input: string, policy: EnginePolicy): string {
   if (!input) throw new Error('Path is required.');
   if (input.includes('\0')) throw new Error('Invalid path.');
-  const resolved = path.resolve(input);
-  const normalized = normalizePath(resolved);
-  const allowed = policy.allowedRoots.some((root) => normalized.startsWith(root));
+  const normalized = normalizePath(resolveDeploymentPath(input));
+  const allowed = policy.allowedRoots.some((root) => pathWithinRoot(normalized, root));
   if (!allowed) {
     throw new Error(`Path is outside allowed roots: ${normalized}`);
   }
   return normalized;
 }
 
+function isWindowsDrivePath(value: string): boolean {
+  return /^[A-Za-z]:[/\\]/.test(value.trim());
+}
+
+function resolveDeploymentPath(input: string): string {
+  const remapped = remapWindowsPathToContainer(input);
+  if (remapped.startsWith('/')) {
+    return normalizePath(remapped);
+  }
+  if (process.platform === 'win32' && isWindowsDrivePath(remapped)) {
+    return normalizePath(path.resolve(remapped));
+  }
+  return normalizePath(path.resolve(remapped));
+}
+
+function remapWindowsPathToContainer(input: string): string {
+  const runtime = getDeploymentRuntime();
+  if (!runtime.dockerMount || process.platform === 'win32') {
+    return input;
+  }
+
+  const trimmed = input.trim();
+  if (!isWindowsDrivePath(trimmed)) {
+    return trimmed;
+  }
+
+  const unixish = normalizePath(trimmed);
+  const lower = unixish.toLowerCase();
+
+  const terminalMarker = 'metaquotes/terminal/';
+  const terminalMarkerIndex = lower.indexOf(terminalMarker);
+  if (terminalMarkerIndex >= 0) {
+    const afterMarker = unixish.slice(terminalMarkerIndex + terminalMarker.length);
+    const slashIndex = afterMarker.indexOf('/');
+    const hash = slashIndex >= 0 ? afterMarker.slice(0, slashIndex) : afterMarker;
+    const suffix = slashIndex >= 0 ? afterMarker.slice(slashIndex) : '';
+    return normalizePath(`${runtime.mt5TerminalRoot}/${hash}${suffix}`);
+  }
+
+  if (lower.includes('metaquotes/')) {
+    const markerIndex = lower.indexOf('metaquotes/');
+    const suffix = unixish.slice(markerIndex + 'metaquotes/'.length);
+    return normalizePath(`${runtime.mt5MetaquotesRoot}/${suffix}`);
+  }
+
+  if (lower.includes('mt5/experts/cacsmstraderea') || lower.includes('cacsms-trader/mt5/')) {
+    return runtime.projectEaFolder;
+  }
+
+  const projectMarker = 'cacsms-trader/';
+  const projectIndex = lower.indexOf(projectMarker);
+  if (projectIndex >= 0) {
+    const suffix = unixish.slice(projectIndex + projectMarker.length);
+    return normalizePath(`/app/${suffix}`);
+  }
+
+  throw new Error(
+    `Windows path "${trimmed}" cannot be used inside Docker. Click Detect MT5 folders and use Copy files, or clear saved paths and reload the page.`,
+  );
+}
+
+function joinPosix(...parts: string[]): string {
+  return parts
+    .filter(Boolean)
+    .map((part) => part.replace(/\\/g, '/').replace(/\/+$/, ''))
+    .join('/');
+}
+
 function normalizeAllowedRoots(roots: string[]): string[] {
-  return Array.from(new Set(roots.map((root) => normalizePath(path.resolve(root)))))
-    .map((root) => (root.endsWith(path.sep) ? root : `${root}${path.sep}`));
+  return Array.from(new Set(
+    roots
+      .map((root) => root.trim())
+      .filter(Boolean)
+      .map((root) => normalizePath(path.resolve(root))),
+  ));
+}
+
+function pathWithinRoot(candidate: string, root: string): boolean {
+  const normalizedCandidate = candidate.replace(/\\/g, '/');
+  const normalizedRoot = root.replace(/\\/g, '/').replace(/\/+$/, '');
+  return normalizedCandidate === normalizedRoot
+    || normalizedCandidate.startsWith(`${normalizedRoot}/`);
 }
 
 function normalizePath(value: string): string {
-  const replaced = value.replace(/\//g, path.sep);
-  return replaced.endsWith(path.sep) ? replaced : replaced;
+  return value.replace(/\\/g, '/').replace(/\/+$/, '');
 }
 
 async function safeReadDir(folder: string) {
@@ -455,19 +618,34 @@ async function readSymlinkTarget(targetPath: string): Promise<string | null> {
 }
 
 async function trySymlink(targetPath: string, sourcePath: string, logs: DeploymentLog[]) {
+  const runtime = getDeploymentRuntime();
+  if (!runtime.symlinkSupported) {
+    const message = 'Symlink deployment is not supported in this runtime. Use COPY mode instead.';
+    logs.push(log('WARNING', 'symlink_unsupported', message, targetPath));
+    return { ok: false, message };
+  }
+
   try {
-    await fs.symlink(sourcePath, targetPath, 'junction');
-    logs.push(log('SUCCESS', 'symlink_created', 'Symlink created with fs.symlink (junction).', targetPath));
+    const symlinkType = process.platform === 'win32' ? 'junction' : 'dir';
+    await fs.symlink(sourcePath, targetPath, symlinkType);
+    logs.push(log('SUCCESS', 'symlink_created', `Symlink created with fs.symlink (${symlinkType}).`, targetPath));
     return { ok: true, message: 'Symlink created.' };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Symlink creation failed.';
     logs.push(log('WARNING', 'symlink_failed', `fs.symlink failed: ${message}`, targetPath));
+    if (process.platform !== 'win32') {
+      return { ok: false, message };
+    }
     const mklink = await tryMklink(targetPath, sourcePath, logs);
     return mklink;
   }
 }
 
 async function tryMklink(targetPath: string, sourcePath: string, logs: DeploymentLog[]) {
+  if (process.platform !== 'win32') {
+    return { ok: false, message: 'mklink is only available on Windows hosts.' };
+  }
+
   try {
     const parent = path.dirname(targetPath);
     await fs.mkdir(parent, { recursive: true });

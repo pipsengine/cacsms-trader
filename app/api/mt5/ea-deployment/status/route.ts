@@ -1,6 +1,6 @@
 export const runtime = 'nodejs';
 
-import { enginePolicyFromEnv, assertPolicy, verifyDeployment } from '@/services/ea-deployment/ea-deployment-engine';
+import { enginePolicyFromEnv, assertPolicy, verifyDeployment, getDeploymentRuntime, sanitizeEaDeploymentConfig } from '@/services/ea-deployment/ea-deployment-engine';
 import { getLatestEaDeploymentSnapshot } from '@/lib/ea-deployment-store';
 
 export async function GET(request: Request): Promise<Response> {
@@ -9,7 +9,7 @@ export async function GET(request: Request): Promise<Response> {
     assertPolicy(policy, request.headers);
 
     const snapshot = await safeSnapshot();
-    const config = snapshot.config;
+    const config = snapshot.config ? sanitizeEaDeploymentConfig(snapshot.config) : null;
     const verification = config ? await verifyDeployment(config, policy, config.deploymentMethod) : null;
 
     return Response.json(
@@ -18,6 +18,7 @@ export async function GET(request: Request): Promise<Response> {
         config,
         verification,
         logs: snapshot.logs ?? [],
+        runtime: getDeploymentRuntime(),
       },
       { status: 200 },
     );

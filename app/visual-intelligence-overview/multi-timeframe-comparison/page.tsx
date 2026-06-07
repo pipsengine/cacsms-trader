@@ -152,11 +152,12 @@ export default function MultiTimeframeComparisonPage() {
     source.onmessage = (message) => {
       const event = safeJson(message.data) as { eventType?: string; payload?: Record<string, unknown>; createdAt?: string } | null;
       if (!event?.eventType?.startsWith('mtf.')) return;
-      const text = event.eventType === 'mtf.final.decision'
+      const eventType = event.eventType;
+      const text = eventType === 'mtf.final.decision'
         ? `Final decision updated: ${String(event.payload?.finalDecision ?? 'WAIT')}`
-        : event.eventType.replace(/\./g, ' ');
+        : eventType.replace(/\./g, ' ');
       setEvents((items) => [
-        { type: event.eventType, message: text, time: event.createdAt ? new Date(event.createdAt).toLocaleTimeString() : new Date().toLocaleTimeString() },
+        { type: eventType, message: text, time: event.createdAt ? new Date(event.createdAt).toLocaleTimeString() : new Date().toLocaleTimeString() },
         ...items,
       ].slice(0, 16));
     };

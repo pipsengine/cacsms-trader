@@ -71,7 +71,7 @@ export function buildInitialJob(captureId: string, jobType: string): VisionJobRe
 }
 
 export function analyzeCapture(capture: ChartCaptureRecord, job: VisionJobRecord, inputCandles: VisionCandleInput[]): VisionAnalysisResult {
-  const candles = reconstructCandles(inputCandles, capture.imageHash);
+  const candles = reconstructCandles(inputCandles);
   const features = engineerFeatures(candles);
   const detections = detectInstitutionalStructures(candles, features);
   const structureState = inferMarketStructure(capture, detections, features);
@@ -89,8 +89,11 @@ export function analyzeCapture(capture: ChartCaptureRecord, job: VisionJobRecord
   };
 }
 
-function reconstructCandles(inputCandles: VisionCandleInput[], hash: string): ReconstructedCandle[] {
-  const source = inputCandles.length > 0 ? inputCandles : synthesizeCandles(hash);
+function reconstructCandles(inputCandles: VisionCandleInput[]): ReconstructedCandle[] {
+  const source = inputCandles;
+  if (!source.length) {
+    return [];
+  }
   const minLow = Math.min(...source.map((candle) => candle.low));
   const maxHigh = Math.max(...source.map((candle) => candle.high));
   const range = Math.max(0.0001, maxHigh - minLow);
@@ -116,25 +119,23 @@ function reconstructCandles(inputCandles: VisionCandleInput[], hash: string): Re
   });
 }
 
-function synthesizeCandles(hash: string): VisionCandleInput[] {
-  let seed = parseInt(hash.slice(0, 8), 16);
-  const candles: VisionCandleInput[] = [];
-  let price = 2330 + (seed % 120) / 10;
-  for (let index = 0; index < 72; index += 1) {
-    seed = (seed * 1664525 + 1013904223) >>> 0;
-    const drift = (index > 22 ? 0.75 : index > 48 ? -0.18 : 0.25) + ((seed % 100) - 48) / 100;
-    const open = price;
-    const close = open + drift;
-    const wick = 1.2 + (seed % 17) / 10;
-    const high = Math.max(open, close) + wick;
-    const low = Math.min(open, close) - wick * (0.75 + (seed % 5) / 10);
-    candles.push({ open, high, low, close, confidence: 0.86 + (seed % 10) / 100 });
-    price = close;
-  }
-  return candles;
-}
-
 function engineerFeatures(candles: ReconstructedCandle[]) {
+  if (!candles.length) {
+    return {
+      atr: 0,
+      avgBody: 0,
+      bodyDominance: 0,
+      momentum: 0,
+      volatilityRegime: 'unknown',
+      trendDirection: 'range',
+      swingHighs: [] as ReturnType<typeof swingPoints>,
+      swingLows: [] as ReturnType<typeof swingPoints>,
+      recentHigh: 0,
+      recentLow: 0,
+      compression: 0,
+      lastClose: 0,
+    };
+  }
   const ranges = candles.map((candle) => candle.highPrice - candle.lowPrice);
   const bodies = candles.map((candle) => Math.abs(candle.closePrice - candle.openPrice));
   const atr = average(ranges.slice(-14));
@@ -166,6 +167,10 @@ function engineerFeatures(candles: ReconstructedCandle[]) {
 }
 
 function detectInstitutionalStructures(candles: ReconstructedCandle[], features: ReturnType<typeof engineerFeatures>): VisionDetection[] {
+  if (!candles.length) {
+    return [];
+  }
+
   const detections: VisionDetection[] = [];
   const lastIndex = candles.length - 1;
   const last = candles[lastIndex];

@@ -263,7 +263,7 @@ async function persistResult(jobId: string, result: ImageComparisonResult) {
     INSERT INTO visual_difference_maps (
       id, comparison_job_id, heatmap_url, difference_blocks_json, keypoint_matches_json, registration_json
     ) VALUES ($1, $2, $3, $4, $5, $6)
-  `, [randomUUID(), jobId, result.heatmapUrl, result.differenceBlocks, result.keypointMatches, result.registration]);
+  `, [randomUUID(), jobId, result.heatmapUrl, JSON.stringify(result.differenceBlocks), JSON.stringify(result.keypointMatches), JSON.stringify(result.registration)]);
   for (const event of result.changeEvents) {
     await queryPostgres(`
       INSERT INTO chart_change_events (

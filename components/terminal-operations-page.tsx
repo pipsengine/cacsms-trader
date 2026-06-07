@@ -1,9 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
+import Link from 'next/link';
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Activity, AlertTriangle, CheckCircle2, ClipboardCheck, Cpu, Database, Folder, Gauge, Globe2, KeyRound, Laptop2, Layers3, Link2, LockKeyhole, MapPin, MemoryStick, Network, PlugZap, Radio, RefreshCw, Router, Search, Server, ShieldAlert, ShieldCheck, TerminalSquare, UserCheck, Wifi, Wrench } from 'lucide-react';
 import { useMt5OpsState } from '@/components/mt5-ops-shell';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -147,6 +148,30 @@ interface DeploymentLog {
   path?: string;
 }
 
+interface DeploymentRuntime {
+  mt5TerminalRoot: string;
+  mt5MetaquotesRoot: string;
+  projectEaFolder: string;
+  dockerMount: boolean;
+  recommendedMethod: DeploymentMethod;
+  symlinkSupported: boolean;
+}
+
+function joinExpertsPath(dataFolder: string, targetFolderName: string): string {
+  const root = dataFolder.replace(/\\/g, '/').replace(/\/+$/, '');
+  return `${root}/MQL5/Experts/${targetFolderName}`;
+}
+
+function isWindowsDrivePath(value: string): boolean {
+  return /^[A-Za-z]:[/\\]/.test(value.trim());
+}
+
+function preferContainerPath(saved: string | undefined, runtimePath: string, dockerMount: boolean): string {
+  if (!saved) return runtimePath;
+  if (dockerMount && isWindowsDrivePath(saved)) return runtimePath;
+  return saved;
+}
+
 type FolderStatus = {
   path: string;
   exists: boolean;
@@ -155,12 +180,13 @@ type FolderStatus = {
 };
 
 export function EADeploymentLinkPage() {
+  const [runtime, setRuntime] = useState<DeploymentRuntime | null>(null);
   const [config, setConfig] = useState<EADeploymentConfig>({
-    projectEaFolder: 'C:\\Next-Generation\\cacsms-trader\\mt5\\experts\\CacsmsTraderEA',
+    projectEaFolder: '',
     mt5DataFolder: '',
     mt5ExpertsFolder: '',
     targetFolderName: 'CacsmsTrader',
-    deploymentMethod: 'SYMLINK',
+    deploymentMethod: 'COPY',
     environment: 'DEMO',
   });
   const [folders, setFolders] = useState<MT5DataFolder[]>([]);
@@ -182,7 +208,7 @@ export function EADeploymentLinkPage() {
 
   const derivedMt5ExpertsFolder = useMemo(() => {
     if (!config.mt5DataFolder) return '';
-    return `${config.mt5DataFolder}\\MQL5\\Experts\\${config.targetFolderName}`;
+    return joinExpertsPath(config.mt5DataFolder, config.targetFolderName);
   }, [config.mt5DataFolder, config.targetFolderName]);
 
   const showToast = (tone: 'success' | 'warning' | 'error' | 'info', message: string) => {
@@ -195,14 +221,41 @@ export function EADeploymentLinkPage() {
     try {
       const response = await fetch('/api/mt5/ea-deployment/status', { cache: 'no-store' });
       const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error ?? `Status failed with HTTP ${response.status}`);
+      }
       setStatus(payload.verification ?? null);
       setLogs(payload.logs ?? []);
+      if (payload.runtime) {
+        setRuntime(payload.runtime);
+      }
+      setConfig((current) => {
+        const saved = payload.config as Partial<EADeploymentConfig> | null | undefined;
+        const nextRuntime = payload.runtime as DeploymentRuntime | undefined;
+        const dockerMount = Boolean(nextRuntime?.dockerMount);
+        return {
+          ...current,
+          ...(saved ?? {}),
+          projectEaFolder: preferContainerPath(
+            saved?.projectEaFolder,
+            nextRuntime?.projectEaFolder || current.projectEaFolder,
+            dockerMount,
+          ),
+          mt5DataFolder: preferContainerPath(saved?.mt5DataFolder, current.mt5DataFolder, dockerMount),
+          mt5ExpertsFolder: preferContainerPath(saved?.mt5ExpertsFolder, current.mt5ExpertsFolder, dockerMount),
+          deploymentMethod: saved?.deploymentMethod || nextRuntime?.recommendedMethod || current.deploymentMethod,
+        };
+      });
     } catch (error) {
       showToast('error', error instanceof Error ? error.message : 'Failed to load status.');
     } finally {
       setLoading((c) => ({ ...c, refresh: false }));
     }
   };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
 
   const detectFolders = async () => {
     setLoading((c) => ({ ...c, detect: true }));
@@ -226,12 +279,12 @@ export function EADeploymentLinkPage() {
     setSelectedFolderId(folderId);
     const folder = folders.find((item) => item.id === folderId);
     if (!folder) return;
-    const mt5ExpertsFolder = `${folder.path}\\MQL5\\Experts\\${config.targetFolderName}`;
+    const mt5ExpertsFolder = joinExpertsPath(folder.path, config.targetFolderName);
     setConfig((current) => ({
       ...current,
       mt5DataFolder: folder.path,
       mt5ExpertsFolder,
-      mt5DataRoot: payloadDefaultRoot(),
+      mt5DataRoot: runtime?.mt5MetaquotesRoot ?? current.mt5DataRoot,
     }));
   };
 
@@ -309,7 +362,14 @@ export function EADeploymentLinkPage() {
           <h3 className="text-lg font-semibold tracking-tight text-slate-950">EA Deployment Link Manager</h3>
           <p className="text-sm text-slate-600">Link the Cacsms Trader EA folder to MetaTrader 5 Experts directory</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/mt5-infrastructure/terminal-operations/ea-deployment"
+            className={cn(buttonVariants({ variant: 'outline', size: 'sm' }), 'inline-flex items-center gap-1.5')}
+          >
+            <TerminalSquare className="h-4 w-4" />
+            Fleet dashboard
+          </Link>
           <span className="inline-flex items-center gap-2 rounded-full border border-violet-200 bg-violet-50 px-3 py-1 text-xs font-semibold text-violet-700">
             <LockKeyhole className="h-3.5 w-3.5" /> Development Tool / Admin Only / Requires Local Machine Access
           </span>
@@ -321,6 +381,16 @@ export function EADeploymentLinkPage() {
       </header>
 
       <WorkflowStepper steps={steps} />
+
+      {runtime?.dockerMount ? (
+        <Card className="border-amber-200 bg-amber-50 shadow-sm shadow-slate-900/5">
+          <CardContent className="p-4 text-sm text-amber-900">
+            Docker runtime detected. Your Windows MetaQuotes folder is mounted at{' '}
+            <span className="font-mono">{runtime.mt5TerminalRoot}</span>. Use <strong>Copy files</strong> to deploy
+            into MT5 (symlinks are not supported inside the container).
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <FolderStatusCard title="Project EA Folder Status" icon={Folder} status={statusFolder(config.projectEaFolder)} />
@@ -434,6 +504,8 @@ export function EADeploymentLinkPage() {
 
       <DeploymentMethodSelector
         method={config.deploymentMethod}
+        symlinkSupported={runtime?.symlinkSupported ?? true}
+        recommendedMethod={runtime?.recommendedMethod ?? 'SYMLINK'}
         onChange={(deploymentMethod) => setConfig((c) => ({ ...c, deploymentMethod }))}
       />
 
@@ -465,10 +537,6 @@ export function EADeploymentLinkPage() {
       {toast ? <Toast tone={toast.tone} message={toast.message} /> : null}
     </div>
   );
-}
-
-function payloadDefaultRoot(): string {
-  return 'C:\\Users\\';
 }
 
 function statusFolder(path: string): FolderStatus {
@@ -647,7 +715,15 @@ function MT5FolderTable(props: { folders: MT5DataFolder[]; selectedId: string; o
   );
 }
 
-function DeploymentMethodSelector(props: { method: DeploymentMethod; onChange: (method: DeploymentMethod) => void }) {
+function DeploymentMethodSelector(props: {
+  method: DeploymentMethod;
+  symlinkSupported?: boolean;
+  recommendedMethod?: DeploymentMethod;
+  onChange: (method: DeploymentMethod) => void;
+}) {
+  const symlinkSupported = props.symlinkSupported ?? true;
+  const recommendedMethod = props.recommendedMethod ?? 'SYMLINK';
+
   return (
     <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
       <CardHeader className="border-b border-slate-200 py-4">
@@ -659,17 +735,22 @@ function DeploymentMethodSelector(props: { method: DeploymentMethod; onChange: (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <button
             type="button"
+            disabled={!symlinkSupported}
             className={cn(
               'rounded-lg border p-4 text-left transition-colors',
+              !symlinkSupported && 'cursor-not-allowed opacity-60',
               props.method === 'SYMLINK' ? 'border-indigo-200 bg-indigo-50' : 'border-slate-200 bg-white hover:bg-slate-50',
             )}
-            onClick={() => props.onChange('SYMLINK')}
+            onClick={() => symlinkSupported && props.onChange('SYMLINK')}
           >
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-              <Link2 className="h-4 w-4 text-indigo-700" /> Symbolic Link (Recommended)
+              <Link2 className="h-4 w-4 text-indigo-700" /> Symbolic Link
+              {recommendedMethod === 'SYMLINK' ? <span className="text-xs font-normal text-indigo-700">(Recommended)</span> : null}
             </div>
             <div className="mt-1 text-xs text-slate-600">
-              MT5 reads the EA directly from the project folder (no copying). Requires admin on some systems.
+              {symlinkSupported
+                ? 'MT5 reads the EA directly from the project folder (no copying). Requires admin on some systems.'
+                : 'Not available in Docker. Use copy mode to deploy into the mounted MT5 folder.'}
             </div>
           </button>
           <button
@@ -681,7 +762,8 @@ function DeploymentMethodSelector(props: { method: DeploymentMethod; onChange: (
             onClick={() => props.onChange('COPY')}
           >
             <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
-              <Server className="h-4 w-4 text-amber-700" /> Copy EA Files Instead
+              <Server className="h-4 w-4 text-amber-700" /> Copy EA Files
+              {recommendedMethod === 'COPY' ? <span className="text-xs font-normal text-amber-700">(Recommended)</span> : null}
             </div>
             <div className="mt-1 text-xs text-slate-600">
               Copies .ex5/.mq5/.set and supporting files into MT5 Experts folder. Works without admin.
@@ -1149,38 +1231,37 @@ const SYNC_FLOW_LINES = [
 
 function enrichTerminal(terminal: any) {
   const terminalId = String(terminal.terminalId ?? 'unknown-terminal');
-  const seed = hashCode(terminalId);
   const latencyMs = Number(terminal.latencyMs ?? terminal.averageLatencyMs ?? 0);
   const heartbeatAgeMs = terminal.heartbeatAgeMs == null ? 999_999 : Number(terminal.heartbeatAgeMs);
   const status = String(terminal.status ?? 'disconnected');
-  const tickTime = String(terminal.lastTickTime ?? terminal.mt5ServerTime ?? terminal.receivedAt ?? new Date().toISOString());
-  const tickDelayMs = Math.max(0, Date.now() - Date.parse(tickTime || new Date().toISOString()));
+  const tickTime = String(terminal.lastTickTime ?? terminal.mt5ServerTime ?? terminal.receivedAt ?? '');
+  const tickDelayMs = tickTime ? Math.max(0, Date.now() - Date.parse(tickTime)) : 0;
   return {
     ...terminal,
     terminalId,
     status,
-    computerName: terminal.computerName || terminal.computerId || `VPS-${String((seed % 900) + 100)}`,
-    mt5Build: terminal.mt5Build ?? terminal.build ?? '4150',
+    computerName: terminal.computerName || terminal.computerId || 'Unassigned',
+    mt5Build: terminal.mt5Build ?? terminal.build ?? '—',
     brokerName: terminal.brokerName || 'Unknown broker',
     serverName: terminal.serverName || 'Unassigned server',
-    accountNumber: terminal.accountNumber || 'pending',
-    accountType: terminal.accountType || (seed % 2 === 0 ? 'Hedging' : 'Netting'),
+    accountNumber: terminal.accountNumber || '—',
+    accountType: terminal.accountType || 'Unknown',
     opsStatus: resolveOpsStatus(status, latencyMs, heartbeatAgeMs, tickDelayMs),
     latencyMs,
     heartbeatAgeMs,
-    lastTickTime: tickTime,
+    lastTickTime: tickTime || null,
     balance: Number(terminal.balance ?? 0),
     equity: Number(terminal.equity ?? 0),
     freeMargin: Number(terminal.freeMargin ?? 0),
     openPositions: Number(terminal.openPositions ?? terminal.openOrders ?? 0),
-    eaVersion: terminal.eaVersion ?? terminal.version ?? 'CACSMS-EA 1.0.0',
-    cpuUsage: Number(terminal.cpuUsage ?? (18 + (seed % 48))),
-    memoryUsage: Number(terminal.memoryUsage ?? (34 + (seed % 42))),
-    connectionUptimeMs: Number(terminal.connectionUptimeMs ?? Math.max(0, Date.now() - Date.parse(terminal.firstSeenAt ?? terminal.receivedAt ?? new Date().toISOString()))),
+    eaVersion: terminal.eaVersion ?? terminal.version ?? '—',
+    cpuUsage: Number(terminal.cpuUsage ?? 0),
+    memoryUsage: Number(terminal.memoryUsage ?? 0),
+    connectionUptimeMs: Number(terminal.connectionUptimeMs ?? 0),
     reconnectCount: Number(terminal.reconnectCount ?? terminal.missedSequenceCount ?? 0),
     tickDelayMs,
-    vpsLocation: terminal.vpsLocation ?? inferLocation(seed),
-    routingRegion: terminal.routingRegion ?? inferRoute(seed),
+    vpsLocation: terminal.vpsLocation ?? '—',
+    routingRegion: terminal.routingRegion ?? '—',
   };
 }
 
@@ -1356,12 +1437,13 @@ function ArchitectureCard(props: { title: string; lines: string[] }) {
 }
 
 function buildTickFeed(terminals: any[]) {
-  const baseDelay = terminals.length ? Math.round(terminals.reduce((sum, terminal) => sum + terminal.tickDelayMs, 0) / terminals.length) : 0;
-  return ['EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY'].map((symbol, index) => ({
-    symbol,
-    spread: symbol === 'XAUUSD' ? 18 + index : 0.7 + index * 0.2,
-    delayMs: Math.max(0, baseDelay + index * 37),
-  }));
+  return terminals
+    .filter((terminal) => terminal.symbol || terminal.lastSymbol)
+    .map((terminal) => ({
+      symbol: String(terminal.symbol ?? terminal.lastSymbol),
+      spread: Number(terminal.spread ?? terminal.spreadPoints ?? 0),
+      delayMs: Number(terminal.tickDelayMs ?? 0),
+    }));
 }
 
 function buildActivityFeed(terminals: any[]) {
@@ -1380,11 +1462,7 @@ function buildActivityFeed(terminals: any[]) {
     tone: terminal.status === 'connected' ? 'green' : terminal.status === 'degraded' ? 'amber' : 'red',
   }));
 
-  return latest.length ? latest : [
-    { time: now, message: 'Terminal connected stream is standing by', tone: 'blue' },
-    { time: now, message: 'Heartbeat ingestion ready', tone: 'green' },
-    { time: now, message: 'Tick synchronization monitor armed', tone: 'blue' },
-  ];
+  return latest;
 }
 
 function buildDistribution(items: any[], key: string) {
@@ -1408,18 +1486,6 @@ function formatDuration(ms: number): string {
   if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
   const hours = Math.floor(minutes / 60);
   return `${hours}h ${minutes % 60}m`;
-}
-
-function inferLocation(seed: number): string {
-  return ['NY4', 'LD4', 'TY3', 'FR2', 'Lagos Edge'][seed % 5];
-}
-
-function inferRoute(seed: number): string {
-  return ['US-East', 'EU-West', 'Asia-Pacific', 'Africa-West'][seed % 4];
-}
-
-function hashCode(value: string): number {
-  return Math.abs(value.split('').reduce((hash, char) => ((hash << 5) - hash + char.charCodeAt(0)) | 0, 0));
 }
 
 function TerminalRegistration({ terminals, registrations }: { terminals: any[]; registrations: any[] }) {
@@ -1964,10 +2030,7 @@ function buildRegistrationLogs(registrations: any[], terminals: any[]) {
     status: 'HEARTBEAT LOST',
     detail: 'Retry waits for the next heartbeat or manual bridge reconnect.',
   }));
-  return [...failedHeartbeats, ...registrationLogs].length ? [...failedHeartbeats, ...registrationLogs] : [
-    { time: now, message: 'Registration workflow initialized', status: 'BRIDGE HEALTHY', detail: 'No failed attempts recorded. Approval queue is clear.' },
-    { time: now, message: 'Secure enrollment service standing by', status: 'ONLINE', detail: 'Retry workflow activates automatically after failed verify or authorize calls.' },
-  ];
+  return [...failedHeartbeats, ...registrationLogs];
 }
 
 function TerminalHeartbeat({ terminals, registrations }: { terminals: any[]; registrations: any[] }) {
@@ -2289,11 +2352,10 @@ function enrichHeartbeatTerminal(terminal: any) {
   const enriched = enrichTerminal(terminal);
   const heartbeatAgeMs = Number(enriched.heartbeatAgeMs ?? 0);
   const heartbeatState = resolveHeartbeatState(heartbeatAgeMs);
-  const seed = hashCode(enriched.terminalId);
   const tickDelayMs = Number(enriched.tickDelayMs ?? 0);
-  const websocketLatencyMs = Number(terminal.websocketLatencyMs ?? Math.max(8, Math.round(enriched.latencyMs * 0.45) + (seed % 12)));
-  const mt5PingMs = Number(terminal.mt5PingMs ?? Math.max(1, Math.round(enriched.latencyMs * 0.65) + (seed % 18)));
-  const eaResponseMs = Number(terminal.eaResponseMs ?? Math.max(4, Math.round(enriched.latencyMs * 0.3) + (seed % 10)));
+  const websocketLatencyMs = Number(terminal.websocketLatencyMs ?? 0);
+  const mt5PingMs = Number(terminal.mt5PingMs ?? 0);
+  const eaResponseMs = Number(terminal.eaResponseMs ?? 0);
   const heartbeatStability = Number(terminal.heartbeatStability ?? calculateHeartbeatStability({
     heartbeatAgeMs,
     latencyMs: enriched.latencyMs,
@@ -2379,23 +2441,17 @@ function buildHeartbeatTimeline(rows: any[], history: any[]) {
     time: row.receivedAt ?? now,
     message: `${row.terminalId} heartbeat ${row.heartbeatState.toLowerCase()} (${formatDuration(row.heartbeatAgeMs)} age)`,
     state: row.heartbeatState,
-  })).concat(rows.length ? [] : [{ time: now, message: 'Heartbeat stream standing by', state: 'ONLINE' }]);
+  }));
 }
 
-function buildHeartbeatWaveform(selectedTerminal: any, history: any[]) {
-  if (history.length) {
-    return history.slice(0, 24).reverse().map((row: any) => Math.max(12, 100 - Math.min(88, Number(row.latencyMs ?? 0) / 20)));
-  }
-  const seed = selectedTerminal ? hashCode(selectedTerminal.terminalId) : 7;
-  return Array.from({ length: 24 }, (_, index) => 35 + ((seed + index * 17) % 55));
+function buildHeartbeatWaveform(_selectedTerminal: any, history: any[]) {
+  if (!history.length) return [];
+  return history.slice(0, 24).reverse().map((row: any) => Math.max(12, 100 - Math.min(88, Number(row.latencyMs ?? 0) / 20)));
 }
 
-function buildLatencyTrend(selectedTerminal: any, history: any[]) {
-  if (history.length) {
-    return history.slice(0, 16).reverse().map((row: any) => Number(row.latencyMs ?? 0));
-  }
-  const base = Number(selectedTerminal?.latencyMs ?? 40);
-  return Array.from({ length: 16 }, (_, index) => Math.max(5, base + ((index % 4) - 1) * 12));
+function buildLatencyTrend(_selectedTerminal: any, history: any[]) {
+  if (!history.length) return [];
+  return history.slice(0, 16).reverse().map((row: any) => Number(row.latencyMs ?? 0));
 }
 
 function buildDiagnostics(selectedTerminal: any) {
@@ -2676,7 +2732,7 @@ const HEALTH_ANALYTICS_LINES = [
 
 function enrichHealthTerminal(terminal: any) {
   const heartbeat = enrichHeartbeatTerminal(terminal);
-  const brokerResponseMs = Number(terminal.brokerResponseMs ?? Math.max(10, Math.round(heartbeat.latencyMs * 0.8) + (hashCode(heartbeat.terminalId) % 35)));
+  const brokerResponseMs = Number(terminal.brokerResponseMs ?? 0);
   const cpuScore = clampScore(100 - Math.max(0, heartbeat.cpuUsage - 45) * 1.4);
   const memoryScore = clampScore(100 - Math.max(0, heartbeat.memoryUsage - 55) * 1.2);
   const tickScore = clampScore(100 - Math.round(heartbeat.tickDelayMs / 35));
@@ -2748,7 +2804,7 @@ function buildHealthEvents(rows: any[]) {
     message: `${row.terminalId} health ${row.healthScore}% / ${row.anomalyLabel.toLowerCase()} / ${row.vpsLocation}`,
     severity: row.anomalyLabel,
   }));
-  return events.length ? events : [{ time: now, message: 'Infrastructure health monitor standing by', severity: 'HEALTHY' }];
+  return events;
 }
 
 function buildServiceDependencies(summary: ReturnType<typeof summarizeHealthFleet>) {
@@ -3068,12 +3124,11 @@ const SYNC_DATABASE_LINES = [
 
 function enrichSyncTerminal(terminal: any) {
   const health = enrichHealthTerminal(terminal);
-  const seed = hashCode(health.terminalId);
-  const syncLatencyMs = Number(terminal.syncLatencyMs ?? Math.max(8, health.latencyMs + (seed % 80)));
-  const tradeSyncCount = Number(terminal.tradeSyncCount ?? health.openPositions + (seed % 9));
-  const orderSyncCount = Number(terminal.orderSyncCount ?? health.openOrders + (seed % 7));
-  const positionSyncCount = Number(terminal.positionSyncCount ?? health.openPositions);
-  const missingTickCount = Number(terminal.missingTickCount ?? (health.tickDelayMs > 1500 ? 1 + (seed % 3) : 0));
+  const syncLatencyMs = Number(terminal.syncLatencyMs ?? 0);
+  const tradeSyncCount = Number(terminal.tradeSyncCount ?? health.openPositions ?? 0);
+  const orderSyncCount = Number(terminal.orderSyncCount ?? health.openOrders ?? 0);
+  const positionSyncCount = Number(terminal.positionSyncCount ?? health.openPositions ?? 0);
+  const missingTickCount = Number(terminal.missingTickCount ?? 0);
   const duplicateCount = Number(terminal.duplicateCount ?? (health.missedSequenceCount ? Math.min(3, health.missedSequenceCount) : 0));
   const retryCount = Number(terminal.retryCount ?? Math.max(0, missingTickCount + duplicateCount + (health.status === 'disconnected' ? 2 : 0)));
   const accountDrift = Math.abs(Number(health.balance ?? 0) - Number(health.equity ?? 0));
@@ -3139,7 +3194,7 @@ function buildSyncFailures(rows: any[]) {
 
 function buildSymbolSync(rows: any[]) {
   return ['EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY'].map((symbol, index) => {
-    const missing = rows.reduce((sum, row) => sum + (row.missingTickCount && (hashCode(row.terminalId + symbol) + index) % 3 === 0 ? 1 : 0), 0);
+    const missing = rows.reduce((sum, row) => sum + Number(row.missingTickCount ?? 0), 0);
     return {
       symbol,
       terminals: rows.length,
@@ -3168,7 +3223,7 @@ function buildSyncTimeline(rows: any[]) {
     message: `${row.terminalId} ${row.syncState.toLowerCase()} / latency ${row.syncLatencyMs}ms / retries ${row.retryCount}`,
     state: row.syncState,
   }));
-  return events.length ? events : [{ time: now, message: 'Synchronization service standing by', state: 'SYNCED' }];
+  return events;
 }
 
 function SyncBadge({ state }: { state: string }) {
@@ -3389,14 +3444,13 @@ const LATENCY_UI_STATE_LINES = [
 
 function enrichLatencyTerminal(terminal: any) {
   const sync = enrichSyncTerminal(terminal);
-  const seed = hashCode(sync.terminalId);
-  const dashboardLatencyMs = Number(terminal.dashboardLatencyMs ?? 12 + (seed % 45));
-  const backendBridgeLatencyMs = Number(terminal.backendBridgeLatencyMs ?? Math.max(6, Math.round(sync.latencyMs * 0.42) + (seed % 25)));
-  const eaBackendLatencyMs = Number(terminal.eaBackendLatencyMs ?? sync.latencyMs);
-  const brokerLatencyMs = Number(terminal.brokerLatencyMs ?? sync.brokerResponseMs ?? Math.max(20, Math.round(sync.latencyMs * 0.85) + (seed % 70)));
-  const dispatchDelayMs = Number(terminal.dispatchDelayMs ?? Math.max(10, sync.syncLatencyMs + (seed % 120)));
-  const ackDelayMs = Number(terminal.ackDelayMs ?? Math.max(12, Math.round(sync.syncLatencyMs * 0.75) + (seed % 160)));
-  const websocketLatencyMs = Number(terminal.websocketLatencyMs ?? sync.websocketLatencyMs ?? Math.max(8, Math.round(sync.latencyMs * 0.35) + (seed % 18)));
+  const dashboardLatencyMs = Number(terminal.dashboardLatencyMs ?? 0);
+  const backendBridgeLatencyMs = Number(terminal.backendBridgeLatencyMs ?? 0);
+  const eaBackendLatencyMs = Number(terminal.eaBackendLatencyMs ?? sync.latencyMs ?? 0);
+  const brokerLatencyMs = Number(terminal.brokerLatencyMs ?? sync.brokerResponseMs ?? 0);
+  const dispatchDelayMs = Number(terminal.dispatchDelayMs ?? 0);
+  const ackDelayMs = Number(terminal.ackDelayMs ?? 0);
+  const websocketLatencyMs = Number(terminal.websocketLatencyMs ?? sync.websocketLatencyMs ?? 0);
   const reconnectImpactMs = Number(terminal.reconnectImpactMs ?? Number(sync.reconnectCount ?? 0) * 45);
   const compositeLatencyMs = Math.round((dashboardLatencyMs + backendBridgeLatencyMs + eaBackendLatencyMs + brokerLatencyMs + sync.tickDelayMs + dispatchDelayMs + ackDelayMs + websocketLatencyMs) / 8 + reconnectImpactMs);
   const latencyLevel = resolveLatencyLevel({
@@ -3494,7 +3548,7 @@ function buildLatencyEvents(rows: any[]) {
     message: `${row.terminalId} ${row.latencyLevel.toLowerCase()} latency / composite ${row.compositeLatencyMs}ms / p2p broker ${row.brokerLatencyMs}ms`,
     level: row.latencyLevel,
   }));
-  return events.length ? events : [{ time: now, message: 'Latency monitor standing by for terminal heartbeat telemetry', level: 'Good' }];
+  return events;
 }
 
 function buildLatencyHeatmap(rows: any[]) {
@@ -3802,43 +3856,42 @@ function buildMachineRegistry(terminals: any[], registrations: any[]) {
 
   return Array.from(byMachine.values()).map((entry) => {
     const primary = entry.terminals[0] ?? entry.registrations[0] ?? {};
-    const seed = hashCode(entry.machineId);
     const terminalRows = entry.terminals.map(enrichHealthTerminal);
     const terminalCount = Math.max(entry.terminals.length, entry.registrations.length);
     const accounts = new Set([...entry.terminals, ...entry.registrations].map((item) => item.accountNumber).filter(Boolean));
     const connected = entry.terminals.filter((terminal) => terminal.status === 'connected').length;
     const degraded = entry.terminals.filter((terminal) => terminal.status === 'degraded').length;
     const offline = terminalCount > 0 && connected === 0 && degraded === 0;
-    const cpuUsage = terminalRows.length ? Math.round(terminalRows.reduce((sum, row) => sum + row.cpuUsage, 0) / terminalRows.length) : 18 + (seed % 48);
-    const memoryUsage = terminalRows.length ? Math.round(terminalRows.reduce((sum, row) => sum + row.memoryUsage, 0) / terminalRows.length) : 34 + (seed % 42);
-    const networkHealth = terminalRows.length ? Math.round(terminalRows.reduce((sum, row) => sum + row.networkScore, 0) / terminalRows.length) : 75 + (seed % 20);
+    const cpuUsage = terminalRows.length ? Math.round(terminalRows.reduce((sum, row) => sum + row.cpuUsage, 0) / terminalRows.length) : 0;
+    const memoryUsage = terminalRows.length ? Math.round(terminalRows.reduce((sum, row) => sum + row.memoryUsage, 0) / terminalRows.length) : 0;
+    const networkHealth = terminalRows.length ? Math.round(terminalRows.reduce((sum, row) => sum + row.networkScore, 0) / terminalRows.length) : 0;
     const healthScore = clampScore(100 - Math.max(0, cpuUsage - 70) - Math.max(0, memoryUsage - 75) - (offline ? 35 : 0) - (degraded ? 12 : 0));
-    const authorizationState = seed % 17 === 0 ? 'blocked' : seed % 11 === 0 ? 'revoked' : 'authorized';
-    const bridgeAgentStatus = offline ? 'offline' : seed % 9 === 0 ? 'upgrading' : 'healthy';
-    const connectionState = offline ? 'offline' : degraded ? 'degraded' : 'online';
-    const environmentType = inferMachineEnvironment(primary, seed);
-    const failoverEligible = authorizationState === 'authorized' && connectionState === 'online' && healthScore >= 80 && bridgeAgentStatus === 'healthy';
+    const authorizationState = String(primary.authorizationState ?? 'unknown');
+    const bridgeAgentStatus = String(primary.bridgeAgentStatus ?? (offline ? 'offline' : 'unknown'));
+    const connectionState = offline ? 'offline' : degraded ? 'degraded' : connected > 0 ? 'online' : 'unknown';
+    const environmentType = inferMachineEnvironment(primary);
+    const failoverEligible = Boolean(primary.failoverEligible ?? (authorizationState === 'authorized' && connectionState === 'online' && healthScore >= 80 && bridgeAgentStatus === 'healthy'));
     return {
       machineId: entry.machineId,
-      fingerprint: `FP-${hashCode(entry.machineId).toString(16).toUpperCase().padStart(8, '0')}`,
+      fingerprint: String(primary.fingerprint ?? primary.computerFingerprint ?? '—'),
       deviceName: primary.computerName || primary.vpsId || entry.machineId,
-      ipAddress: primary.ipAddress || `10.${seed % 240}.${(seed >> 3) % 240}.${(seed >> 6) % 240}`,
-      region: primary.region || primary.vpsLocation || inferLocation(seed),
+      ipAddress: String(primary.ipAddress ?? '—'),
+      region: String(primary.region || primary.vpsLocation || '—'),
       environmentType,
       terminalCount,
       accountCount: accounts.size,
       connectionState,
-      uptimeMs: terminalRows.length ? Math.max(...terminalRows.map((row) => row.connectionUptimeMs)) : seed * 1000,
-      lastSeenAt: primary.receivedAt || primary.updatedAt || primary.registeredAt || new Date().toISOString(),
+      uptimeMs: terminalRows.length ? Math.max(...terminalRows.map((row) => row.connectionUptimeMs)) : 0,
+      lastSeenAt: primary.receivedAt || primary.updatedAt || primary.registeredAt || null,
       cpuUsage,
       memoryUsage,
       networkHealth,
-      routingPriority: Number(primary.priority ?? 50 + (seed % 50)),
+      routingPriority: Number(primary.priority ?? 0),
       failoverEligible,
-      remoteDeploymentStatus: bridgeAgentStatus === 'upgrading' ? 'deploying' : 'current',
+      remoteDeploymentStatus: String(primary.remoteDeploymentStatus ?? 'unknown'),
       bridgeAgentStatus,
-      eaVersions: Array.from(new Set(entry.terminals.map((terminal) => terminal.version ?? terminal.eaVersion ?? 'CACSMS-EA 1.0.0'))),
-      syncScore: terminalRows.length ? Math.round(terminalRows.reduce((sum, row) => sum + row.healthScore, 0) / terminalRows.length) : healthScore,
+      eaVersions: Array.from(new Set(entry.terminals.map((terminal) => terminal.version ?? terminal.eaVersion).filter(Boolean))),
+      syncScore: terminalRows.length ? Math.round(terminalRows.reduce((sum, row) => sum + row.healthScore, 0) / terminalRows.length) : 0,
       authorizationState,
       healthScore,
       terminals: entry.terminals,
@@ -3860,12 +3913,14 @@ function summarizeMachineFleet(machines: any[]) {
   };
 }
 
-function inferMachineEnvironment(primary: any, seed: number) {
+function inferMachineEnvironment(primary: any) {
+  const explicit = String(primary.environmentType ?? primary.environment ?? '').trim();
+  if (explicit) return explicit;
   const label = `${primary.vpsId ?? ''} ${primary.computerName ?? ''}`.toLowerCase();
   if (label.includes('vps') || label.includes('ld4') || label.includes('ny4')) return 'VPS / Cloud';
   if (label.includes('office')) return 'Office PC';
   if (label.includes('home')) return 'Home PC';
-  return ['VPS / Cloud', 'Office PC', 'Home PC', 'Cloud Workstation'][seed % 4];
+  return 'Unknown';
 }
 
 function buildDeviceAuthorization(machines: any[]) {
@@ -3901,7 +3956,7 @@ function buildMachineLogs(machines: any[]) {
     state: machine.connectionState,
     message: `${machine.deviceName} ${machine.connectionState} / ${machine.terminalCount} terminal(s) / bridge agent ${machine.bridgeAgentStatus}`,
   }));
-  return logs.length ? logs : [{ time: now, state: 'online', message: 'Machine registry standing by for terminal registrations' }];
+  return logs;
 }
 
 function MachineSegment(props: { title: string; icon: any; machines: any[] }) {
@@ -4226,16 +4281,15 @@ function buildAccountRegistry(terminals: any[], routing: any[]) {
   return Array.from(byAccount.values()).map((entry) => {
     const primary = entry.terminals[0] ?? {};
     const route = entry.route ?? {};
-    const seed = hashCode(entry.accountNumber);
     const preferred = route.preferredTerminalIds ?? [];
     const primaryTerminalId = preferred[0] ?? primary.terminalId ?? '';
     const backupTerminalId = preferred[1] ?? entry.terminals.find((terminal: any) => terminal.terminalId !== primaryTerminalId)?.terminalId ?? '';
     const primaryTerminal = entry.terminals.find((terminal: any) => terminal.terminalId === primaryTerminalId) ?? primary;
     const connected = primaryTerminal?.status === 'connected';
-    const accountMode = seed % 5 === 0 ? 'live' : 'demo';
-    const permissionState = seed % 13 === 0 ? 'Execution disabled' : seed % 11 === 0 ? 'Read-only' : seed % 17 === 0 ? 'Risk blocked' : 'Execution enabled';
-    const locked = permissionState === 'Risk blocked' || seed % 19 === 0;
-    const newsBlocked = seed % 23 === 0;
+    const accountMode = String(route.accountMode ?? primary.accountMode ?? 'unknown');
+    const permissionState = String(route.permissionState ?? primary.permissionState ?? 'unknown');
+    const locked = Boolean(route.locked ?? primary.locked ?? permissionState === 'Risk blocked');
+    const newsBlocked = Boolean(route.newsBlocked ?? primary.newsBlocked);
     const status = !primaryTerminalId
       ? 'Awaiting terminal'
       : locked
@@ -4256,14 +4310,14 @@ function buildAccountRegistry(terminals: any[], routing: any[]) {
       terminals: entry.terminals,
       primaryTerminalId,
       backupTerminalId,
-      strategy: ['mean-reversion', 'breakout', 'news-filtered-scalper', 'gold-momentum'][seed % 4],
-      symbol: ['EURUSD', 'GBPUSD', 'XAUUSD', 'USDJPY'][seed % 4],
-      riskProfile: ['prop-firm-standard', 'low-risk', 'aggressive-demo', 'news-blocked'][seed % 4],
-      propFirmRule: ['FTMO', 'MyForexFunds', 'The5ers', 'Internal Demo'][seed % 4],
+      strategy: String(route.strategy ?? primary.strategy ?? '—'),
+      symbol: String(route.symbol ?? primary.symbol ?? '—'),
+      riskProfile: String(route.riskProfile ?? primary.riskProfile ?? '—'),
+      propFirmRule: String(route.propFirmRule ?? primary.propFirmRule ?? '—'),
       accountMode,
       permissionState,
       status,
-      routingPriority: Number(route.minStabilityScore ?? route.priority ?? 50),
+      routingPriority: Number(route.minStabilityScore ?? route.priority ?? 0),
       failoverReady: Boolean(backupTerminalId && connected),
       route,
     };
@@ -4654,28 +4708,18 @@ const VPS_FAILOVER_LINES = [
 ];
 
 function buildVpsNodes(vps: any[]) {
-  const source = vps.length
-    ? vps
-    : [
-        { vpsId: 'vps-ny4-01', label: 'NY4 Execution Node 01', provider: 'Equinix Metal', location: 'New York', status: 'online', terminalCount: 8, environment: 'production' },
-        { vpsId: 'vps-ld4-02', label: 'LD4 Bridge Node 02', provider: 'AWS Lightsail', location: 'London', status: 'degraded', terminalCount: 5, environment: 'production' },
-        { vpsId: 'vps-fr2-01', label: 'Frankfurt Sync Node', provider: 'Hetzner', location: 'Frankfurt', status: 'online', terminalCount: 4, environment: 'demo' },
-        { vpsId: 'vps-sg1-dr', label: 'Singapore DR Node', provider: 'Azure', location: 'Singapore', status: 'offline', terminalCount: 2, environment: 'production' }
-      ];
-
-  return source.map((node, index) => {
+  return vps.map((node, index) => {
     const id = String(node.vpsId ?? node.id ?? `vps-node-${index + 1}`);
-    const seed = Math.abs(hashCode(`${id}-${node.label ?? node.name ?? index}`));
-    const rawStatus = String(node.status ?? node.state ?? 'online').toLowerCase();
-    const status = rawStatus.includes('off') ? 'offline' : rawStatus.includes('degrad') || rawStatus.includes('warn') ? 'degraded' : 'online';
-    const cpuUsage = clampScore(Number(node.cpuUsage ?? node.cpu ?? 18 + (seed % 58)));
-    const memoryUsage = clampScore(Number(node.memoryUsage ?? node.memory ?? 32 + (seed % 52)));
-    const diskUsage = clampScore(Number(node.diskUsage ?? node.disk ?? 24 + (seed % 61)));
-    const networkLatencyMs = Number(node.networkLatencyMs ?? node.latencyMs ?? 18 + (seed % 190));
-    const bridgeAgentStatus = status === 'offline' ? 'offline' : seed % 7 === 0 ? 'degraded' : 'healthy';
-    const backupStatus = seed % 6 === 0 ? 'stale' : 'current';
-    const securityPatchStatus = seed % 9 === 0 ? 'patch due' : 'patched';
-    const deploymentState = seed % 8 === 0 ? 'deploying' : 'current';
+    const rawStatus = String(node.status ?? node.state ?? 'unknown').toLowerCase();
+    const status = rawStatus.includes('off') ? 'offline' : rawStatus.includes('degrad') || rawStatus.includes('warn') ? 'degraded' : rawStatus.includes('on') || rawStatus.includes('healthy') ? 'online' : 'unknown';
+    const cpuUsage = clampScore(Number(node.cpuUsage ?? node.cpu ?? 0));
+    const memoryUsage = clampScore(Number(node.memoryUsage ?? node.memory ?? 0));
+    const diskUsage = clampScore(Number(node.diskUsage ?? node.disk ?? 0));
+    const networkLatencyMs = Number(node.networkLatencyMs ?? node.latencyMs ?? 0);
+    const bridgeAgentStatus = String(node.bridgeAgentStatus ?? (status === 'offline' ? 'offline' : 'unknown'));
+    const backupStatus = String(node.backupStatus ?? 'unknown');
+    const securityPatchStatus = String(node.securityPatchStatus ?? 'unknown');
+    const deploymentState = String(node.deploymentState ?? 'unknown');
     const healthScore = clampScore(
       100
       - cpuUsage * 0.14
@@ -4692,27 +4736,27 @@ function buildVpsNodes(vps: any[]) {
     return {
       vpsId: id,
       label: String(node.label ?? node.name ?? `VPS Node ${index + 1}`),
-      provider: String(node.provider ?? ['AWS Lightsail', 'Azure', 'Equinix Metal', 'Hetzner', 'Google Cloud'][seed % 5]),
-      region: String(node.region ?? node.location ?? inferLocation(seed)),
-      ipAddress: String(node.ipAddress ?? node.ip ?? `10.${20 + (seed % 30)}.${seed % 240}.${20 + (seed % 180)}`),
-      operatingSystem: String(node.operatingSystem ?? node.os ?? 'Windows Server 2022'),
-      uptimeMs: Number(node.uptimeMs ?? node.uptime ?? (2 + (seed % 18)) * 86_400_000),
+      provider: String(node.provider ?? '—'),
+      region: String(node.region ?? node.location ?? '—'),
+      ipAddress: String(node.ipAddress ?? node.ip ?? '—'),
+      operatingSystem: String(node.operatingSystem ?? node.os ?? '—'),
+      uptimeMs: Number(node.uptimeMs ?? node.uptime ?? 0),
       cpuUsage,
       memoryUsage,
       diskUsage,
       networkLatencyMs,
-      terminalCount: Number(node.terminalCount ?? node.terminals ?? 1 + (seed % 9)),
-      eaVersionStatus: seed % 5 === 0 ? 'upgrade available' : 'current',
+      terminalCount: Number(node.terminalCount ?? node.terminals ?? 0),
+      eaVersionStatus: String(node.eaVersionStatus ?? 'unknown'),
       bridgeAgentStatus,
-      connectionQuality: networkLatencyMs > 180 || status === 'degraded' ? 'watch' : 'healthy',
-      rebootStatus: seed % 11 === 0 ? 'scheduled' : 'none',
+      connectionQuality: String(node.connectionQuality ?? (networkLatencyMs > 180 || status === 'degraded' ? 'watch' : 'unknown')),
+      rebootStatus: String(node.rebootStatus ?? 'none'),
       deploymentState,
       failoverReady,
       backupStatus,
       securityPatchStatus,
-      remoteAccessStatus: seed % 10 === 0 ? 'disabled' : 'enabled',
-      environmentType: String(node.environmentType ?? node.environment ?? (seed % 3 === 0 ? 'demo' : 'production')),
-      disasterRecoveryRole: seed % 4 === 0 ? 'standby' : seed % 6 === 0 ? 'primary' : 'regional',
+      remoteAccessStatus: String(node.remoteAccessStatus ?? 'unknown'),
+      environmentType: String(node.environmentType ?? node.environment ?? 'unknown'),
+      disasterRecoveryRole: String(node.disasterRecoveryRole ?? 'unknown'),
       healthScore,
       status
     };
@@ -4751,12 +4795,14 @@ function buildVpsAlerts(nodes: ReturnType<typeof buildVpsNodes>) {
 }
 
 function buildVpsLogs(nodes: ReturnType<typeof buildVpsNodes>) {
-  const verbs = ['heartbeat accepted', 'resource sample indexed', 'terminal allocation refreshed', 'backup policy verified', 'routing priority recalculated'];
-  return nodes.slice(0, 7).map((node, index) => ({
-    time: new Date(Date.now() - index * 48_000).toISOString(),
-    state: node.status,
-    message: `${node.label}: ${node.status === 'offline' ? 'heartbeat timeout detected' : verbs[index % verbs.length]}.`
-  }));
+  return nodes
+    .filter((node) => Array.isArray((node as { logs?: unknown[] }).logs))
+    .flatMap((node) => ((node as { logs?: Array<{ time?: string; state?: string; message?: string }> }).logs ?? []).map((log) => ({
+      time: log.time ?? new Date().toISOString(),
+      state: log.state ?? node.status,
+      message: log.message ?? `${node.label}: status update`,
+    })))
+    .slice(0, 20);
 }
 
 function VpsBadge({ state }: { state: string }) {
@@ -7049,7 +7095,7 @@ function buildDbExecutionLogs(events: any[]) {
     })
     .sort((a, b) => Date.parse(b.time) - Date.parse(a.time));
 
-  return rows.length ? rows : [{ time: new Date().toISOString(), state: 'QUEUED', message: 'Execution bridge standing by for validated commands' }];
+  return rows;
 }
 
 function enrichExecutionCommand(command: any, terminals: any[], acknowledgements: any[]) {
@@ -7115,7 +7161,7 @@ function enrichExecutionCommand(command: any, terminals: any[], acknowledgements
 
 function enrichExecutionAck(ack: any) {
   const latencyMs = Number(ack.latencyMs ?? 0);
-  const brokerLatencyMs = Number(ack.brokerLatencyMs ?? Math.max(5, latencyMs + (hashCode(ack.commandId ?? ack.terminalId ?? 'ack') % 80)));
+  const brokerLatencyMs = Number(ack.brokerLatencyMs ?? 0);
   const status = String(ack.status ?? '').toLowerCase();
   const lifecycleState = mapAckStatusToLifecycle(status);
   return {
@@ -7203,7 +7249,7 @@ function buildExecutionLogs(commands: any[], acknowledgements: any[]) {
     message: `${command.type} ${command.symbol} ${command.lifecycleState.toLowerCase()} for ${command.terminalId} attempt ${command.attempt ?? 0}`,
   }));
   const logs = [...ackLogs, ...commandLogs].sort((a, b) => Date.parse(b.time ?? '') - Date.parse(a.time ?? ''));
-  return logs.length ? logs : [{ time: new Date().toISOString(), state: 'QUEUED', message: 'Execution bridge standing by for validated commands' }];
+  return logs;
 }
 
 function buildExecutionIntegrity(commands: any[], acknowledgements: any[]) {
@@ -7236,11 +7282,65 @@ function ExecutionBadge({ state }: { state: string }) {
   );
 }
 
+type EaDeploymentSummaryPayload = {
+  ok: boolean;
+  toolEnabled: boolean;
+  runtime: DeploymentRuntime;
+  projectEaVersion: string;
+  config: EADeploymentConfig | null;
+  verification: DeploymentVerification | null;
+  logs: DeploymentLog[];
+  run: {
+    runId: string;
+    method: string;
+    status: string;
+    message: string;
+    createdAt: string;
+  } | null;
+  bridge: {
+    online: boolean;
+    terminalCount: number;
+    connectedCount: number;
+    degradedCount: number;
+    disconnectedCount: number;
+  };
+};
+
 function EaDeploymentDashboard({ terminals }: { terminals: any[] }) {
   const bridgeUrl = process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://127.0.0.1:8787';
-  const rows = useMemo(() => buildEaDeploymentRows(terminals), [terminals]);
-  const summary = summarizeEaDeployments(rows);
-  const logs = buildEaDeploymentLogs(rows);
+  const [summaryPayload, setSummaryPayload] = useState<EaDeploymentSummaryPayload | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+
+  const refreshSummary = useCallback(async () => {
+    setSummaryLoading(true);
+    try {
+      const response = await fetch('/api/mt5/ea-deployment/summary', { cache: 'no-store' });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload?.error ?? `Summary failed with HTTP ${response.status}`);
+      }
+      setSummaryPayload(payload as EaDeploymentSummaryPayload);
+      setSummaryError(null);
+    } catch (error) {
+      setSummaryError(error instanceof Error ? error.message : 'Failed to load EA deployment summary.');
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSummary();
+  }, [refreshSummary]);
+
+  const rows = useMemo(
+    () => buildEaDeploymentRows(terminals, summaryPayload),
+    [terminals, summaryPayload],
+  );
+  const summary = summarizeEaDeployments(rows, summaryPayload);
+  const deploymentLogs = summaryPayload?.logs ?? [];
+  const verification = summaryPayload?.verification ?? null;
+  const deploymentConfig = summaryPayload?.config ?? null;
 
   return (
     <div className="space-y-6">
@@ -7257,22 +7357,79 @@ function EaDeploymentDashboard({ terminals }: { terminals: any[] }) {
               </div>
             </div>
             <p className="mt-5 text-sm leading-6 text-slate-600">
-              Version, authorize, validate, monitor, and roll back the MT5 Expert Advisor across every connected terminal with secure tokens, build compatibility gates, and real-time heartbeat confirmation.
+              Live view of local EA file deployment, bridge-connected terminals, and deployment logs. Use the link manager to copy or symlink the EA into MT5.
             </p>
           </div>
-          <div className="grid min-w-[280px] gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
-            <EaVersionLine label="Current Version" value={summary.currentVersion} />
-            <EaVersionLine label="Latest Version" value={summary.latestVersion} accent />
-            <EaVersionLine label="Rollback Target" value={summary.rollbackVersion} />
+          <div className="flex flex-col gap-3">
+            <div className="grid min-w-[280px] gap-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <EaVersionLine label="Project EA Version" value={summaryPayload?.projectEaVersion ?? '—'} accent />
+              <EaVersionLine label="Deployment Method" value={deploymentConfig?.deploymentMethod ?? '—'} />
+              <EaVersionLine label="Bridge Terminals" value={String(summaryPayload?.bridge.connectedCount ?? 0)} />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => void refreshSummary()} disabled={summaryLoading}>
+                <RefreshCw className={cn('h-4 w-4', summaryLoading && 'animate-spin')} />
+                Refresh
+              </Button>
+              <Link
+                href="/mt5-infrastructure/terminal-operations/ea-deployment-link"
+                className={cn(buttonVariants({ size: 'sm' }), 'inline-flex items-center gap-1.5')}
+              >
+                <Link2 className="h-4 w-4" />
+                Open Deployment Link Manager
+              </Link>
+            </div>
           </div>
         </div>
       </section>
 
+      {summaryError ? (
+        <Card className="border-rose-200 bg-rose-50">
+          <CardContent className="p-4 text-sm text-rose-800">{summaryError}</CardContent>
+        </Card>
+      ) : null}
+
+      {verification ? (
+        <Card className={cn(
+          'shadow-sm shadow-slate-900/5',
+          verification.status === 'SUCCESS' || verification.status === 'REQUIRES_MT5_REFRESH' ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white',
+        )}>
+          <CardContent className="flex flex-col gap-3 p-4 md:flex-row md:items-center md:justify-between">
+            <div>
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-slate-500">Local file deployment</div>
+              <div className="mt-1 flex items-center gap-2">
+                <EaStatusBadge status={verification.status} />
+                <span className="text-sm text-slate-700">{verification.message}</span>
+              </div>
+              <div className="mt-2 font-mono text-xs text-slate-600 break-all">
+                {deploymentConfig?.mt5ExpertsFolder ?? 'No experts folder configured'}
+              </div>
+            </div>
+            <div className="grid gap-1 text-xs text-slate-600">
+              <div>MQ5: {verification.eaMq5Exists ? 'present' : 'missing'}</div>
+              <div>EX5: {verification.eaEx5Exists ? 'present' : 'missing'}</div>
+              <div>Files: {verification.filesCount}</div>
+              {verification.lastModified ? <div>Updated: {formatTime(verification.lastModified)}</div> : null}
+            </div>
+          </CardContent>
+        </Card>
+      ) : (
+        <Card className="border-amber-200 bg-amber-50 shadow-sm shadow-slate-900/5">
+          <CardContent className="p-4 text-sm text-amber-900">
+            No local EA deployment is configured yet. Open the{' '}
+            <Link href="/mt5-infrastructure/terminal-operations/ea-deployment-link" className="font-semibold underline">
+              Deployment Link Manager
+            </Link>{' '}
+            to detect MT5 folders and copy the EA into Experts.
+          </CardContent>
+        </Card>
+      )}
+
       <section className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <OpsSummaryCard icon={Layers3} title="Managed terminals" value={String(summary.total)} detail="Terminals tracked by EA deployment policy." tone="blue" />
-        <OpsSummaryCard icon={CheckCircle2} title="Healthy installs" value={String(summary.healthy)} detail="Installed, authorized, and heartbeat-confirmed." tone="green" />
-        <OpsSummaryCard icon={RefreshCw} title="Updates pending" value={String(summary.pending)} detail="Outdated or pending update terminals." tone="amber" />
-        <OpsSummaryCard icon={ShieldAlert} title="Deployment issues" value={String(summary.issues)} detail="Failed, incompatible, or unauthorized installs." tone={summary.issues ? 'red' : 'slate'} />
+        <OpsSummaryCard icon={Layers3} title="Bridge terminals" value={String(summaryPayload?.bridge.terminalCount ?? 0)} detail={summaryPayload?.bridge.online ? 'MT5 bridge online' : 'MT5 bridge offline'} tone="blue" />
+        <OpsSummaryCard icon={CheckCircle2} title="Connected EAs" value={String(summary.connected)} detail="Heartbeat-active bridge sessions." tone="green" />
+        <OpsSummaryCard icon={Folder} title="Deployed files" value={String(verification?.filesCount ?? 0)} detail={verification?.deploymentMethod ? `Via ${verification.deploymentMethod}` : 'No deployment run yet'} tone="violet" />
+        <OpsSummaryCard icon={ShieldAlert} title="Attention needed" value={String(summary.attention)} detail="Stale heartbeat, version drift, or deployment warnings." tone={summary.attention ? 'amber' : 'slate'} />
       </section>
 
       <section className="grid grid-cols-1 gap-6 xl:grid-cols-[1.6fr_0.9fr]">
@@ -7284,14 +7441,11 @@ function EaDeploymentDashboard({ terminals }: { terminals: any[] }) {
                   <TableRow>
                     <TableHead>Terminal</TableHead>
                     <TableHead>Broker</TableHead>
-                    <TableHead>MT5 Build</TableHead>
+                    <TableHead>Source</TableHead>
                     <TableHead>EA Version</TableHead>
                     <TableHead>Status</TableHead>
-                    <TableHead>Channel</TableHead>
                     <TableHead>Environment</TableHead>
-                    <TableHead>Permissions</TableHead>
                     <TableHead>Heartbeat</TableHead>
-                    <TableHead>Deploy Date</TableHead>
                     <TableHead>Flags</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -7303,29 +7457,18 @@ function EaDeploymentDashboard({ terminals }: { terminals: any[] }) {
                         <div className="text-xs text-slate-500">{row.vpsName}</div>
                       </TableCell>
                       <TableCell className="text-xs text-slate-600">{row.broker}</TableCell>
-                      <TableCell className="font-mono text-xs">{row.mt5Build}</TableCell>
+                      <TableCell className="text-xs text-slate-600">{row.source}</TableCell>
                       <TableCell>
                         <div className="font-mono text-xs font-black text-slate-900">{row.installedVersion}</div>
-                        <div className="font-mono text-[11px] text-slate-500">latest {row.latestVersion}</div>
+                        <div className="font-mono text-[11px] text-slate-500">project {row.latestVersion}</div>
                       </TableCell>
                       <TableCell><EaStatusBadge status={row.status} /></TableCell>
-                      <TableCell className="text-xs font-semibold text-slate-700">{row.channel}</TableCell>
                       <TableCell className="text-xs font-semibold capitalize text-slate-700">{row.environment}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap gap-1">
-                          <EaMiniBadge label="algo" ok={row.algoTradingEnabled} />
-                          <EaMiniBadge label="web" ok={row.webRequestAllowed} />
-                          <EaMiniBadge label="dll" ok={row.dllPermission} />
-                          <EaMiniBadge label="auth" ok={row.permissionStatus === 'authorized'} />
-                        </div>
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{row.heartbeatAgeSec}s</TableCell>
-                      <TableCell className="font-mono text-xs">{row.deploymentDate}</TableCell>
+                      <TableCell className="font-mono text-xs">{row.heartbeatAgeSec >= 0 ? `${row.heartbeatAgeSec}s` : '—'}</TableCell>
                       <TableCell>
                         <div className="flex flex-col gap-1">
-                          {row.updateAvailable && <EaFlag label="update available" />}
-                          {row.restartRequired && <EaFlag label="restart required" />}
-                          {row.forcedUpgrade && <EaFlag label="forced upgrade" />}
+                          {row.updateAvailable && <EaFlag label="version drift" />}
+                          {row.localDeployment && <EaFlag label="local deploy" />}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -7334,247 +7477,196 @@ function EaDeploymentDashboard({ terminals }: { terminals: any[] }) {
               </Table>
             </ScrollArea>
           ) : (
-            <EmptyPanel title="No EA deployments" detail="Register terminals to begin tracking Expert Advisor deployment state." />
+            <EmptyPanel
+              title="No terminals or local deployment rows"
+              detail="Connect an EA to the bridge or run a file deployment from the link manager."
+            />
           )}
         </OpsPanel>
 
         <div className="space-y-6">
-          <OpsPanel title="Release Notes" icon={ClipboardCheck}>
-            <div className="space-y-3 text-sm text-slate-700">
-              <EaReleaseLine title="v2.8.4" detail="Execution acknowledgement hardening, heartbeat signature rotation, and symbol subscription repair." active />
-              <EaReleaseLine title="v2.8.3" detail="Rollback-safe bridge polling and MT5 build 4150 compatibility patch." />
-              <EaReleaseLine title="v2.7.9" detail="Stable recovery baseline used for emergency rollback." />
-            </div>
+          <OpsPanel title="Local Deployment Config" icon={Folder}>
+            {deploymentConfig ? (
+              <div className="space-y-3 text-xs text-slate-700">
+                <EaConfigLine label="Project EA folder" value={deploymentConfig.projectEaFolder} />
+                <EaConfigLine label="MT5 data folder" value={deploymentConfig.mt5DataFolder} />
+                <EaConfigLine label="Experts target" value={deploymentConfig.mt5ExpertsFolder} />
+                <EaConfigLine label="Environment" value={deploymentConfig.environment} />
+                {summaryPayload?.runtime.dockerMount ? (
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-amber-900">
+                    Docker mount active at {summaryPayload.runtime.mt5TerminalRoot}. COPY mode is recommended.
+                  </p>
+                ) : null}
+              </div>
+            ) : (
+              <EmptyPanel title="Not configured" detail="No saved deployment config in the database." />
+            )}
           </OpsPanel>
-          <OpsPanel title="Security Controls" icon={LockKeyhole}>
-            <div className="space-y-3">
-              {EA_SECURITY_CONTROLS.map((item) => (
-                <div key={item.title} className="rounded-lg border border-slate-200 bg-white p-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm font-black text-slate-900">{item.title}</span>
-                    <EaStatusBadge status={item.status} />
-                  </div>
-                  <p className="mt-2 text-xs leading-5 text-slate-600">{item.detail}</p>
+          <OpsPanel title="Last Deployment Run" icon={ClipboardCheck}>
+            {summaryPayload?.run ? (
+              <div className="space-y-2 text-sm text-slate-700">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-semibold text-slate-900">{summaryPayload.run.method}</span>
+                  <EaStatusBadge status={summaryPayload.run.status} />
                 </div>
-              ))}
-            </div>
+                <p className="text-xs leading-5 text-slate-600">{summaryPayload.run.message}</p>
+                <p className="font-mono text-[11px] text-slate-500">{formatTime(summaryPayload.run.createdAt)}</p>
+              </div>
+            ) : (
+              <EmptyPanel title="No runs yet" detail="Deployment runs appear after copy or symlink actions." />
+            )}
           </OpsPanel>
         </div>
       </section>
 
-      <section className="grid grid-cols-1 gap-6 xl:grid-cols-4">
-        <OpsPanel title="Deployment Status Mix" icon={Gauge}><BarTrend values={Object.values(summary.statusCounts)} suffix="" /></OpsPanel>
-        <OpsPanel title="Compatibility Rules" icon={Wrench}><EaBulletList items={EA_COMPATIBILITY_RULES} /></OpsPanel>
+      <section className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <OpsPanel title="Manual Deployment Guide" icon={KeyRound}><EaBulletList items={buildManualEaGuide(bridgeUrl)} /></OpsPanel>
-        <OpsPanel title="Auto Deployment Preparation" icon={Radio}><EaBulletList items={EA_AUTO_DEPLOYMENT_STEPS} /></OpsPanel>
+        <OpsPanel title="Compatibility Notes" icon={Wrench}><EaBulletList items={EA_COMPATIBILITY_RULES} /></OpsPanel>
+        <OpsPanel title="Available APIs" icon={Radio}><EaBulletList items={EA_OPERATIONAL_APIS} /></OpsPanel>
       </section>
 
       <section className="grid grid-cols-1 gap-6 xl:grid-cols-2">
         <OpsPanel title="Deployment Logs" icon={Activity}>
-          <div className="space-y-3">
-            {logs.map((log) => (
-              <div key={`${log.time}-${log.message}`} className="flex gap-3 rounded-lg border border-slate-200 bg-white p-3">
-                <div className={cn('mt-1 h-2 w-2 rounded-full', log.tone === 'green' && 'bg-emerald-500', log.tone === 'amber' && 'bg-amber-500', log.tone === 'red' && 'bg-rose-500')} />
-                <div>
-                  <p className="text-sm font-bold text-slate-900">{log.message}</p>
-                  <p className="mt-1 font-mono text-[11px] text-slate-500">{formatTime(log.time)}</p>
+          {deploymentLogs.length ? (
+            <div className="space-y-3">
+              {deploymentLogs.slice(0, 12).map((log) => (
+                <div key={log.id} className="flex gap-3 rounded-lg border border-slate-200 bg-white p-3">
+                  <div className={cn(
+                    'mt-1 h-2 w-2 rounded-full',
+                    log.severity === 'SUCCESS' && 'bg-emerald-500',
+                    log.severity === 'WARNING' && 'bg-amber-500',
+                    log.severity === 'ERROR' && 'bg-rose-500',
+                    log.severity === 'INFO' && 'bg-blue-500',
+                    log.severity === 'DEBUG' && 'bg-slate-400',
+                  )} />
+                  <div>
+                    <p className="text-sm font-bold text-slate-900">{log.message}</p>
+                    <p className="mt-1 font-mono text-[11px] text-slate-500">
+                      {formatTime(log.timestamp)} · {log.action}
+                    </p>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyPanel title="No deployment logs" detail="Logs are recorded when you detect folders, copy files, or create symlinks." />
+          )}
         </OpsPanel>
-        <OpsPanel title="Error and Empty States" icon={AlertTriangle}>
-          <div className="grid gap-3 md:grid-cols-2">
-            <EaStateCard title="Failed deployment" detail="Shows terminal, error code, retry count, and rollback target." />
-            <EaStateCard title="Unauthorized EA" detail="Blocks command polling until token signature is rotated." />
-            <EaStateCard title="Incompatible build" detail="Requires MT5 build upgrade before deployment can continue." />
-            <EaStateCard title="No terminals" detail="Shows registration call to action and manual EA setup instructions." />
-          </div>
+        <OpsPanel title="Planned Fleet Controls" icon={LockKeyhole}>
+          <p className="mb-3 text-xs text-slate-500">Roadmap capabilities not yet wired to live APIs.</p>
+          <EaBulletList items={EA_FLEET_ROADMAP} />
         </OpsPanel>
-      </section>
-
-      <section className="grid grid-cols-1 gap-4 xl:grid-cols-3">
-        <ArchitectureCard title="Versioning Architecture" lines={EA_VERSIONING_ARCHITECTURE} />
-        <ArchitectureCard title="Deployment Schema" lines={EA_DEPLOYMENT_SCHEMA} />
-        <ArchitectureCard title="Authorization Workflow" lines={EA_AUTH_WORKFLOW} />
-        <ArchitectureCard title="Rollback Workflow" lines={EA_ROLLBACK_WORKFLOW} />
-        <ArchitectureCard title="Terminal Compatibility" lines={EA_TERMINAL_COMPATIBILITY} />
-        <ArchitectureCard title="Operational APIs" lines={EA_OPERATIONAL_APIS} />
       </section>
     </div>
   );
 }
 
-const EA_SECURITY_CONTROLS = [
-  { title: 'Token signing', status: 'Healthy', detail: 'EA tokens are scoped to terminal fingerprint, account number, broker server, and environment.' },
-  { title: 'Permission guard', status: 'Healthy', detail: 'Algo trading, WebRequest, and DLL capability checks are evaluated before deployment approval.' },
-  { title: 'Forced upgrade policy', status: 'Pending update', detail: 'Critical releases can force terminals into update-required state before execution resumes.' },
-  { title: 'Rollback authorization', status: 'Rollback available', detail: 'Rollback requires signed operator intent and compatible schema version.' },
+const EA_FLEET_ROADMAP = [
+  'Remote authorize/revoke EA tokens per terminal fingerprint.',
+  'Staged rollout channels (stable, beta, hotfix) with checksum verification.',
+  'Automatic rollback to prior release with signed operator intent.',
+  'Permission gates for algo trading, WebRequest, and DLL before execution resumes.',
+  'Fleet-wide forced upgrade policy for critical bridge protocol changes.',
 ];
 
 const EA_COMPATIBILITY_RULES = [
-  'MT5 build must be 4150 or newer for signed heartbeat packets.',
-  'EA major version must match bridge protocol major version.',
-  'Production deployments require release channel stable or hotfix.',
-  'Symbol subscriptions must include routed strategy symbols before execution is enabled.',
-  'Unauthorized terminals are read-only until token verification succeeds.',
-];
-
-const EA_AUTO_DEPLOYMENT_STEPS = [
-  'Stage EA package and checksum in deployment registry.',
-  'Lock terminal command queue during replacement window.',
-  'Validate auth token, build version, account route, and broker server.',
-  'Restart terminal only when the package requires runtime reload.',
-  'Confirm heartbeat, permission state, and symbol subscription after deployment.',
-];
-
-const EA_VERSIONING_ARCHITECTURE = [
-  'ReleaseRegistry stores stable, beta, hotfix, and rollback EA artifacts with checksums.',
-  'DeploymentPolicy maps environments, brokers, and terminal cohorts to allowed versions.',
-  'CompatibilityService validates MT5 build, bridge protocol, account mode, and permission state.',
-  'WebSocket events: ea.deployment.started, ea.version.updated, ea.health.changed, ea.rollback.completed.',
-];
-
-const EA_DEPLOYMENT_SCHEMA = [
-  'ea_releases(id, version, channel, checksum, release_notes, min_mt5_build, rollback_version).',
-  'ea_terminal_state(terminal_id, installed_version, status, heartbeat_at, permission_json, updated_at).',
-  'ea_deployments(id, terminal_id, target_version, state, error_code, started_at, completed_at).',
-  'ea_authorizations(terminal_id, token_hash, fingerprint, broker_server, expires_at, revoked_at).',
-  'ea_deployment_logs(deployment_id, severity, event_type, message, metadata_json, created_at).',
-];
-
-const EA_AUTH_WORKFLOW = [
-  'Generate token from terminal fingerprint, account number, broker server, and environment.',
-  'EA sends signed handshake through bridge before command polling is enabled.',
-  'Backend verifies token hash, terminal registration, MT5 build, and account route ownership.',
-  'Authorization failure sets Unauthorized status and blocks execution without disabling monitoring.',
-];
-
-const EA_ROLLBACK_WORKFLOW = [
-  'Operator selects rollback version from release registry and signs rollback intent.',
-  'Deployment service freezes queue, snapshots terminal state, and stages prior artifact.',
-  'Terminal confirms package load, heartbeat, symbol subscription, and permission state.',
-  'Rollback is marked complete only after bridge protocol and account sync validation pass.',
-];
-
-const EA_TERMINAL_COMPATIBILITY = [
-  'Installed version below latest sets Outdated or Pending update based on policy severity.',
-  'MT5 build below minimum sets Incompatible and suppresses auto deployment.',
-  'Missing WebRequest or algo trading permission sets Update required for execution terminals.',
-  'Missing heartbeat after deployment sets Awaiting heartbeat until timeout escalates to Failed.',
+  'Use COPY mode when running inside Docker; symlinks require native Windows.',
+  'EA heartbeat version is reported as version in bridge payloads (see CacsmsTraderEA.mq5).',
+  'Allow WebRequest for the bridge URL in MT5 Expert Advisors settings.',
+  'Refresh MT5 Navigator after file deployment so the EA appears under Experts.',
+  'Attach the EA chart and confirm bridge heartbeats on the connected terminals page.',
 ];
 
 const EA_OPERATIONAL_APIS = [
-  'GET /api/mt5/ea/deployments returns terminal version matrix and deployment summary.',
-  'POST /api/mt5/ea/authorize issues scoped EA token after fingerprint validation.',
-  'POST /api/mt5/ea/deploy starts staged deployment for one terminal or a terminal cohort.',
-  'POST /api/mt5/ea/rollback restores a validated rollback release with audit trail.',
+  'GET /api/mt5/ea-deployment/summary — fleet dashboard, config, verification, bridge health.',
+  'GET /api/mt5/ea-deployment/status — saved config, verification, runtime context.',
+  'POST /api/mt5/ea-deployment/detect — scan mounted/local MetaQuotes Terminal folders.',
+  'POST /api/mt5/ea-deployment/copy-files — copy project EA into MT5 Experts.',
+  'POST /api/mt5/ea-deployment/create-link — symlink/junction project EA into Experts.',
+  'GET /api/mt5/ea-deployment/logs — latest deployment run logs.',
 ];
 
-function buildEaDeploymentRows(terminals: any[]) {
-  const source = terminals.length
-    ? terminals
-    : [
-        { terminalId: 'T-NY4-001', broker: 'IC Markets', mt5Build: 4210, status: 'connected', vpsName: 'NY4 Execution Node 01', environment: 'production' },
-        { terminalId: 'T-LD4-014', broker: 'Pepperstone', mt5Build: 4180, status: 'degraded', vpsName: 'LD4 Bridge Node 02', environment: 'production' },
-        { terminalId: 'T-FR2-006', broker: 'Eightcap', mt5Build: 4090, status: 'connected', vpsName: 'Frankfurt Sync Node', environment: 'demo' },
-        { terminalId: 'T-SG1-DR', broker: 'Fusion Markets', mt5Build: 4210, status: 'disconnected', vpsName: 'Singapore DR Node', environment: 'production' },
-      ];
+function terminalHashFromDataFolder(dataFolder: string): string {
+  const parts = dataFolder.replace(/[/\\]+$/, '').split(/[/\\]/);
+  return parts[parts.length - 1] ?? '';
+}
 
-  return source.map((terminal, index) => {
+function buildEaDeploymentRows(terminals: any[], summaryPayload: EaDeploymentSummaryPayload | null) {
+  const projectVersion = summaryPayload?.projectEaVersion ?? '—';
+  const rows = terminals.map((terminal, index) => {
     const terminalId = String(terminal.terminalId ?? terminal.id ?? `EA-TERM-${index + 1}`);
-    const seed = Math.abs(hashCode(`${terminalId}-${terminal.broker ?? index}`));
-    const latestVersion = '2.8.4';
-    const installedVersion = String(terminal.eaVersion ?? terminal.installedEaVersion ?? ['2.8.4', '2.8.3', '2.7.9', '2.6.8'][seed % 4]);
-    const mt5Build = Number(terminal.mt5Build ?? terminal.build ?? 4100 + (seed % 170));
-    const heartbeatAgeSec = Number(terminal.heartbeatAgeSec ?? Math.round(Number(terminal.heartbeatAgeMs ?? seed % 28_000) / 1000));
-    const permissionStatus = seed % 9 === 0 ? 'unauthorized' : 'authorized';
-    const algoTradingEnabled = seed % 8 !== 0;
-    const webRequestAllowed = seed % 6 !== 0;
-    const dllPermission = seed % 5 !== 0;
-    const symbolSubscriptionStatus = seed % 7 === 0 ? 'missing symbols' : 'subscribed';
-    const updateAvailable = installedVersion !== latestVersion;
-    const incompatible = mt5Build < 4150;
-    const forcedUpgrade = updateAvailable && seed % 3 === 0;
-    const restartRequired = updateAvailable && seed % 2 === 0;
-    const failed = String(terminal.status ?? '').toLowerCase() === 'disconnected' && heartbeatAgeSec > 20;
-
-    const status = incompatible
-      ? 'Incompatible'
-      : permissionStatus !== 'authorized'
-        ? 'Unauthorized'
-        : failed
-          ? 'Failed'
-          : heartbeatAgeSec > 15
-            ? 'Awaiting heartbeat'
-            : forcedUpgrade
-              ? 'Update required'
-              : updateAvailable
-                ? (restartRequired ? 'Pending update' : 'Outdated')
-                : 'Healthy';
-    const issueCount = [incompatible, permissionStatus !== 'authorized', failed, !algoTradingEnabled, !webRequestAllowed, symbolSubscriptionStatus !== 'subscribed'].filter(Boolean).length;
+    const installedVersion = String(terminal.version ?? terminal.eaVersion ?? terminal.installedEaVersion ?? '—');
+    const heartbeatAgeSec = Number.isFinite(Number(terminal.heartbeatAgeSec))
+      ? Number(terminal.heartbeatAgeSec)
+      : Math.round(Number(terminal.heartbeatAgeMs ?? 0) / 1000);
+    const bridgeStatus = String(terminal.status ?? terminal.connectionStatus ?? 'unknown').toLowerCase();
+    const updateAvailable = projectVersion !== '—' && installedVersion !== '—' && installedVersion !== projectVersion;
+    const status = bridgeStatus === 'connected'
+      ? (updateAvailable ? 'Version drift' : 'Connected')
+      : bridgeStatus === 'degraded'
+        ? 'Degraded'
+        : bridgeStatus === 'disconnected'
+          ? 'Disconnected'
+          : 'Unknown';
 
     return {
       terminalId,
-      vpsName: String(terminal.vpsName ?? terminal.computerName ?? terminal.host ?? `VPS-${seed % 12}`),
-      broker: String(terminal.broker ?? 'Cacsms Prime'),
-      mt5Build,
+      vpsName: String(terminal.computerName ?? terminal.vpsName ?? terminal.host ?? '—'),
+      broker: String(terminal.brokerName ?? terminal.broker ?? '—'),
+      source: 'bridge',
       installedVersion,
-      latestVersion,
-      compatibleBuild: mt5Build >= 4150,
-      deploymentDate: new Date(Date.now() - (seed % 16) * 86_400_000).toISOString().slice(0, 10),
+      latestVersion: projectVersion,
       status,
-      channel: seed % 5 === 0 ? 'hotfix' : seed % 4 === 0 ? 'beta' : 'stable',
-      environment: String(terminal.environment ?? (seed % 3 === 0 ? 'demo' : 'production')),
-      rollbackVersion: installedVersion === '2.8.4' ? '2.8.3' : '2.7.9',
-      eaHealthCheck: issueCount ? 'watch' : 'healthy',
-      heartbeatConfirmed: heartbeatAgeSec <= 15,
-      permissionStatus,
-      algoTradingEnabled,
-      webRequestAllowed,
-      dllPermission,
-      symbolSubscriptionStatus,
-      deploymentErrors: issueCount ? issueCount : 0,
-      restartRequired,
-      updateAvailable,
-      forcedUpgrade,
+      environment: String(terminal.environment ?? terminal.accountType ?? '—'),
       heartbeatAgeSec,
-      issueCount,
+      updateAvailable,
+      localDeployment: false,
+      issueCount: bridgeStatus === 'disconnected' || bridgeStatus === 'degraded' ? 1 : updateAvailable ? 1 : 0,
     };
   });
+
+  const config = summaryPayload?.config;
+  const verification = summaryPayload?.verification;
+  if (config?.mt5DataFolder) {
+    const localHash = terminalHashFromDataFolder(config.mt5DataFolder);
+    const alreadyListed = rows.some((row) => row.terminalId === localHash);
+    if (!alreadyListed) {
+      rows.unshift({
+        terminalId: localHash || 'local-mt5',
+        vpsName: config.mt5TerminalName ?? 'Local MT5 data folder',
+        broker: config.brokerAccountLabel ?? '—',
+        source: 'file deploy',
+        installedVersion: verification?.eaMq5Exists || verification?.eaEx5Exists ? projectVersion : '—',
+        latestVersion: projectVersion,
+        status: verification?.status ?? 'NOT_CONFIGURED',
+        environment: config.environment,
+        heartbeatAgeSec: -1,
+        updateAvailable: false,
+        localDeployment: true,
+        issueCount: verification?.status === 'FAILED' ? 1 : 0,
+      });
+    }
+  }
+
+  return rows;
 }
 
-function summarizeEaDeployments(rows: ReturnType<typeof buildEaDeploymentRows>) {
-  const statusCounts = rows.reduce<Record<string, number>>((acc, row) => {
-    acc[row.status] = (acc[row.status] ?? 0) + 1;
-    return acc;
-  }, {});
+function summarizeEaDeployments(rows: ReturnType<typeof buildEaDeploymentRows>, summaryPayload: EaDeploymentSummaryPayload | null) {
   return {
     total: rows.length,
-    currentVersion: '2.8.4',
-    latestVersion: '2.8.4',
-    rollbackVersion: '2.8.3',
-    healthy: rows.filter((row) => row.status === 'Healthy').length,
-    pending: rows.filter((row) => row.updateAvailable || row.status === 'Pending update' || row.status === 'Outdated').length,
-    issues: rows.filter((row) => ['Failed', 'Incompatible', 'Unauthorized'].includes(row.status)).length,
-    statusCounts,
+    connected: rows.filter((row) => row.status === 'Connected').length,
+    attention: rows.filter((row) => row.issueCount > 0).length,
+    localConfigured: summaryPayload?.config ? 1 : 0,
   };
-}
-
-function buildEaDeploymentLogs(rows: ReturnType<typeof buildEaDeploymentRows>) {
-  return rows.slice(0, 8).map((row, index) => ({
-    time: new Date(Date.now() - index * 54_000).toISOString(),
-    tone: row.issueCount ? (row.status === 'Incompatible' || row.status === 'Unauthorized' || row.status === 'Failed' ? 'red' : 'amber') : 'green',
-    message: `${row.terminalId}: ${row.status} on EA ${row.installedVersion} (${row.channel}).`,
-  }));
 }
 
 function buildManualEaGuide(bridgeUrl: string) {
   return [
-    'Compile mt5/experts/CacsmsTraderEA/CacsmsTraderEA.mq5 in MetaEditor.',
+    'Open Deployment Link Manager, detect MT5 folders, and copy EA files into Experts.',
+    'Compile mt5/experts/CacsmsTraderEA/CacsmsTraderEA.mq5 in MetaEditor if needed.',
     `Set BridgeUrl to ${bridgeUrl}.`,
-    'Set TerminalId to the registered terminal identifier.',
-    'Set BridgeSecret from the issued EA authorization token.',
+    'Set TerminalId to a unique identifier per MT5 installation.',
+    'Set BridgeSecret to match MT5_BRIDGE_SHARED_SECRET in your environment.',
     'Enable Algo Trading and allow WebRequest for the bridge URL.',
   ];
 }
@@ -7588,33 +7680,29 @@ function EaVersionLine({ label, value, accent }: { label: string; value: string;
   );
 }
 
+function EaConfigLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-[11px] font-bold uppercase tracking-[0.14em] text-slate-500">{label}</div>
+      <div className="mt-1 font-mono text-xs text-slate-800 break-all">{value || '—'}</div>
+    </div>
+  );
+}
+
 function EaStatusBadge({ status }: { status: string }) {
   const value = status.toLowerCase();
-  const tone = value.includes('healthy') || value.includes('installed')
+  const tone = value.includes('healthy') || value.includes('installed') || value.includes('success') || value.includes('connected')
     ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
-    : value.includes('pending') || value.includes('outdated') || value.includes('awaiting') || value.includes('rollback') || value.includes('required')
+    : value.includes('pending') || value.includes('outdated') || value.includes('awaiting') || value.includes('rollback') || value.includes('required') || value.includes('refresh') || value.includes('drift') || value.includes('degraded')
       ? 'border-amber-200 bg-amber-50 text-amber-700'
-      : value.includes('failed') || value.includes('unauthorized') || value.includes('incompatible')
+      : value.includes('failed') || value.includes('unauthorized') || value.includes('incompatible') || value.includes('disconnected')
         ? 'border-rose-200 bg-rose-50 text-rose-700'
         : 'border-blue-200 bg-blue-50 text-blue-700';
   return <span className={cn('inline-flex whitespace-nowrap rounded-md border px-2 py-1 font-mono text-[10px] font-semibold uppercase', tone)}>{status}</span>;
 }
 
-function EaMiniBadge({ label, ok }: { label: string; ok: boolean }) {
-  return <span className={cn('rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase', ok ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-700')}>{label}</span>;
-}
-
 function EaFlag({ label }: { label: string }) {
   return <span className="whitespace-nowrap rounded border border-amber-200 bg-amber-50 px-2 py-0.5 font-mono text-[10px] uppercase text-amber-700">{label}</span>;
-}
-
-function EaReleaseLine({ title, detail, active }: { title: string; detail: string; active?: boolean }) {
-  return (
-    <div className={cn('rounded-lg border p-3', active ? 'border-blue-200 bg-blue-50' : 'border-slate-200 bg-white')}>
-      <p className="font-mono text-xs font-black text-slate-950">{title}</p>
-      <p className="mt-1 text-xs leading-5 text-slate-600">{detail}</p>
-    </div>
-  );
 }
 
 function EaBulletList({ items }: { items: string[] }) {
@@ -7627,45 +7715,6 @@ function EaBulletList({ items }: { items: string[] }) {
         </div>
       ))}
     </div>
-  );
-}
-
-function EaStateCard({ title, detail }: { title: string; detail: string }) {
-  return (
-    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-      <p className="text-sm font-black text-slate-900">{title}</p>
-      <p className="mt-2 text-xs leading-5 text-slate-600">{detail}</p>
-    </div>
-  );
-}
-
-function EaDeployment() {
-  const bridgeUrl = process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://127.0.0.1:8787';
-  return (
-    <Card className="bg-white border-slate-200 shadow-sm shadow-slate-900/5">
-      <CardHeader className="border-b border-slate-200 py-4">
-        <CardTitle className="text-sm font-semibold flex items-center gap-2">
-          <TerminalSquare className="w-4 h-4 text-indigo-700" /> EA Deployment
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="p-4 space-y-3">
-        <div className="text-sm text-slate-700">
-          Compile and attach the EA in MetaEditor, then configure the inputs for your terminal.
-        </div>
-        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 font-mono text-xs text-slate-700 space-y-1">
-          <div>EA file: mt5/experts/CacsmsTraderEA/CacsmsTraderEA.mq5</div>
-          <div>BridgeUrl: {bridgeUrl}</div>
-          <div>TerminalId: &lt;unique per terminal&gt;</div>
-          <div>BridgeSecret: &lt;matches MT5_BRIDGE_SHARED_SECRET&gt;</div>
-          <div>HeartbeatSeconds: 5</div>
-          <div>CommandPollSeconds: 2</div>
-          <div>EnableExecution: false (set true for demo execution)</div>
-        </div>
-        <div className="text-xs text-slate-500">
-          In MT5, add the BridgeUrl domain to Tools → Options → Expert Advisors → Allow WebRequest for listed URL.
-        </div>
-      </CardContent>
-    </Card>
   );
 }
 

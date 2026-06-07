@@ -254,7 +254,7 @@ function buildBreakoutPressure(channel: ChannelDetection, candles: Reconstructed
       repeatedTouchScore,
       displacementScore: context.displacementScore,
       liquidityBuildUpScore,
-      breakoutDirection: boundary === 'upper' ? 'bullish' : 'bearish',
+      breakoutDirection: (boundary === 'upper' ? 'bullish' : 'bearish') as 'bullish' | 'bearish',
       explanationText: `${boundary} channel boundary has ${percent(pressureScore)} breakout pressure with ${percent(liquidityBuildUpScore)} liquidity build-up.`,
       metadata: { channelType: channel.channelType, volatilityState: channel.volatilityState },
     };

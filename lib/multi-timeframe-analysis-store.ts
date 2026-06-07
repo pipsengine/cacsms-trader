@@ -121,9 +121,9 @@ export async function analyzeSymbolMultiTimeframe(input: {
     alignments: result.alignments,
   });
   for (const conflict of result.conflicts) {
-    await publishVisualIntelligenceEvent('mtf.conflict.detected', null, null, conflict);
+    await publishVisualIntelligenceEvent('mtf.conflict.detected', null, null, { ...conflict });
   }
-  await publishVisualIntelligenceEvent('mtf.final.decision', null, null, result.decision);
+  await publishVisualIntelligenceEvent('mtf.final.decision', null, null, { ...result.decision });
   return result;
 }
 

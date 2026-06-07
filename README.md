@@ -16,6 +16,70 @@ The dashboard is prepared for broker demo account connectivity through the local
 
 Forex trading carries substantial risk. This system can be engineered for stability and strict safeguards, but it cannot be guaranteed loss-free or profitable.
 
+## Run with Docker Desktop
+
+Prerequisites:
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) running
+
+Copy the environment template and start the stack:
+
+```bash
+cp .env.example .env
+npm run docker:up
+```
+
+On Windows PowerShell:
+
+```powershell
+Copy-Item .env.example .env
+npm run docker:up
+```
+
+`docker:up` builds the Next.js app on your machine, packages the standalone output into a Docker image, starts PostgreSQL/Redis, applies database migrations, and runs the dashboard plus MT5 bridge.
+
+Services:
+
+- Dashboard: [http://localhost:3001](http://localhost:3001) (default Docker host port; override with `APP_HOST_PORT`)
+- MT5 bridge: [http://localhost:8787/health](http://localhost:8787/health)
+- PostgreSQL: `localhost:5433` (container uses internal port 5432)
+- Redis: `localhost:6380`
+
+Database migrations run automatically on app startup. View logs with:
+
+```bash
+npm run docker:logs
+```
+
+Stop the stack:
+
+```bash
+npm run docker:down
+```
+
+In MT5 on your host machine, add `http://127.0.0.1:8787` to allowed WebRequest URLs (the bridge port is published from the container).
+
+### EA deployment in Docker (Windows)
+
+The EA deployment tool can symlink or copy `mt5/experts/CacsmsTraderEA` into your local MT5 `Experts` folder when the container can see your MetaQuotes data directory.
+
+1. Set your host MetaQuotes path in `.env` (forward slashes):
+
+```env
+CACSMS_MT5_METAQUOTES_HOST_PATH=C:/Users/YourUser/AppData/Roaming/MetaQuotes
+```
+
+2. Restart the stack:
+
+```powershell
+npm run docker:down
+npm run docker:up
+```
+
+3. Open **MT5 Infrastructure → EA Deployment Link Manager**, click **Detect MT5 folders**, then use **Copy files** (recommended in Docker; symlinks are for native Windows runs).
+
+If `CACSMS_MT5_METAQUOTES_HOST_PATH` is empty, Compose mounts a local stub (`.docker/mt5-host-stub`) so the stack still starts; EA detect will find no folders until you set your real MetaQuotes path.
+
 ## Run Locally
 
 Prerequisites:

@@ -6,14 +6,68 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-cacsms}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-Adm1n.c0m}
     ports:
-      - "5432:5432"
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cacsms} -d ${POSTGRES_DB:-db_cacsms-trader}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - type: bind
+        source: ${CACSMS_MT5_METAQUOTES_HOST_PATH:-./.docker/mt5-host-stub}
+        target: /mt5-host/MetaQuotes
+        bind:
+          create_host_path: false
+    ports:
+      - "${APP_HOST_PORT:-3001}:3000"
+      - "${MT5_BRIDGE_HOST_PORT:-8787}:8787"
+    environment:
+      APP_URL: ${APP_URL:-http://localhost:3001}
+      CACSMS_ENV: ${CACSMS_ENV:-development}
+      CACSMS_TIMEZONE: ${CACSMS_TIMEZONE:-Africa/Lagos}
+      NEXT_PUBLIC_TRADING_MODE: ${NEXT_PUBLIC_TRADING_MODE:-demo}
+      NEXT_PUBLIC_MT5_BRIDGE_URL: ${NEXT_PUBLIC_MT5_BRIDGE_URL:-http://localhost:8787}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-db_cacsms-trader}
+      POSTGRES_USER: ${POSTGRES_USER:-cacsms}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-Adm1n.c0m}
+      REDIS_URL: redis://redis:6379
+      MT5_BRIDGE_SHARED_SECRET: ${MT5_BRIDGE_SHARED_SECRET:-mt5_cacsms}
+      MT5_BRIDGE_PORT: ${MT5_BRIDGE_PORT:-8787}
+      MT5_HEARTBEAT_TIMEOUT_MS: ${MT5_HEARTBEAT_TIMEOUT_MS:-15000}
+      CACSMS_ENABLE_EXECUTION: ${CACSMS_ENABLE_EXECUTION:-false}
+      CACSMS_ENABLE_EA_DEPLOYMENT_TOOL: ${CACSMS_ENABLE_EA_DEPLOYMENT_TOOL:-true}
+      CACSMS_EA_DEPLOYMENT_ALLOW_REMOTE: ${CACSMS_EA_DEPLOYMENT_ALLOW_REMOTE:-false}
+      CACSMS_MT5_METAQUOTES_ROOT: /mt5-host/MetaQuotes
+      CACSMS_MT5_TERMINAL_ROOT: /mt5-host/MetaQuotes/Terminal
+      CACSMS_EA_PROJECT_FOLDER: /app/mt5/experts/CacsmsTraderEA
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:
