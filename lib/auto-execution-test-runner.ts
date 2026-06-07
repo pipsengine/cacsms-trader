@@ -70,6 +70,7 @@ function envBool(name: string, fallback = false): boolean {
 
 function envNumber(name: string, fallback: number): number {
   const raw = envValue(name).trim();
+  if (!raw) return fallback;
   const value = Number(raw);
   return Number.isFinite(value) ? value : fallback;
 }
@@ -93,6 +94,29 @@ function normalizeAccountType(value: unknown): 'demo' | 'live' | 'prop_firm' | '
   if (raw === 'live' || raw === 'real') return 'live';
   if (raw === 'prop' || raw === 'prop_firm' || raw === 'propfirm') return 'prop_firm';
   return 'unknown';
+}
+
+function pickBestBridgeTerminal(terminals: BridgeTerminal[], heartbeatFreshMs: number): BridgeTerminal | null {
+  if (!terminals.length) return null;
+  const connectedFresh = terminals.find(
+    (terminal) => terminal.status === 'connected' && Number(terminal.heartbeatAgeMs ?? 0) <= heartbeatFreshMs,
+  );
+  if (connectedFresh) return connectedFresh;
+  const connected = terminals.find((terminal) => terminal.status === 'connected');
+  if (connected) return connected;
+  return [...terminals].sort((a, b) => Number(a.heartbeatAgeMs ?? Number.MAX_SAFE_INTEGER) - Number(b.heartbeatAgeMs ?? Number.MAX_SAFE_INTEGER))[0] ?? null;
+}
+
+function describeTerminalPresence(terminal: BridgeTerminal | null, heartbeatFreshMs: number): string {
+  if (!terminal) return 'No terminal has heartbeated the bridge yet.';
+  const heartbeatAgeMs = Math.round(Number(terminal.heartbeatAgeMs ?? 0));
+  if (terminal.status === 'connected' && heartbeatAgeMs <= heartbeatFreshMs) {
+    return `Terminal ${terminal.terminalId} is connected (heartbeat age ${heartbeatAgeMs}ms).`;
+  }
+  if (terminal.status === 'connected') {
+    return `Terminal ${terminal.terminalId} is connected but heartbeat age ${heartbeatAgeMs}ms exceeds ${heartbeatFreshMs}ms.`;
+  }
+  return `Terminal ${terminal.terminalId} is ${terminal.status} (last heartbeat ${heartbeatAgeMs}ms ago). Keep the EA attached and recompile the latest EA if sequence stays at 1.`;
 }
 
 function pickSymbol(terminal: BridgeTerminal, maxSpreadPoints: number): { symbol: 'EURUSD' | 'XAUUSD' | null; reason: string } {
@@ -605,8 +629,11 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
   const elapsedMs = Number.isFinite(detectedAtMs) ? Math.max(0, Date.now() - detectedAtMs) : 0;
   const countdownSeconds = enabled && terminalId ? Math.max(0, delaySeconds - Math.floor(elapsedMs / 1000)) : null;
 
-  const terminal = bridge?.terminals?.find((t) => t.terminalId === terminalId) ?? bridge?.terminals?.find((t) => t.status === 'connected') ?? null;
-  const heartbeatFresh = terminal ? Number(terminal.heartbeatAgeMs ?? 0) <= heartbeatFreshMs : false;
+  const bridgeTerminals = bridge?.terminals ?? [];
+  const terminal =
+    (terminalId ? bridgeTerminals.find((t) => t.terminalId === terminalId) : null)
+    ?? pickBestBridgeTerminal(bridgeTerminals, heartbeatFreshMs);
+  const heartbeatFresh = terminal ? Number(terminal.heartbeatAgeMs ?? 0) <= heartbeatFreshMs && terminal.status === 'connected' : false;
   const accountType = terminal ? normalizeAccountType(terminal.accountType) : 'unknown';
   const assumedDemo = accountType === 'unknown' && String(process.env.NEXT_PUBLIC_TRADING_MODE ?? '').trim().toLowerCase() === 'demo';
   const enableExecution = terminal ? Boolean(terminal.enableExecution) : false;
@@ -620,10 +647,26 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
     { name: 'Event log table', ok: hasEvents, detail: hasEvents ? 'ea_comm_events table exists.' : 'Missing ea_comm_events table. Run migration 006_ea_communication_engine.sql.' },
     { name: 'Bridge online', ok: bridgeOnline, detail: bridgeOnline ? 'Bridge reachable.' : 'Bridge unreachable.' },
     { name: 'Execution gate', ok: executionGateOk, detail: executionGateOk ? 'CACSMS_ENABLE_EXECUTION=true' : 'CACSMS_ENABLE_EXECUTION is false.' },
-    { name: 'Terminal online', ok: Boolean(terminal) && terminal?.status === 'connected', detail: terminal ? `Terminal status: ${terminal.status}` : 'No connected terminal.' },
-    { name: 'Heartbeat fresh', ok: heartbeatFresh, detail: terminal ? `Heartbeat age ${Math.round(Number(terminal.heartbeatAgeMs ?? 0))}ms (limit ${heartbeatFreshMs}ms).` : 'No heartbeat telemetry.' },
+    {
+      name: 'Terminal online',
+      ok: Boolean(terminal) && terminal?.status === 'connected',
+      detail: describeTerminalPresence(terminal, heartbeatFreshMs),
+    },
+    {
+      name: 'Heartbeat fresh',
+      ok: heartbeatFresh,
+      detail: terminal
+        ? `Heartbeat age ${Math.round(Number(terminal.heartbeatAgeMs ?? 0))}ms (limit ${heartbeatFreshMs}ms, status ${terminal.status}).`
+        : 'No heartbeat telemetry.',
+    },
     { name: 'Account DEMO', ok: accountType === 'demo' || assumedDemo, detail: assumedDemo ? 'Account type telemetry missing; assuming DEMO because NEXT_PUBLIC_TRADING_MODE=demo.' : terminal ? `Account type: ${terminal.accountType ?? 'unknown'}` : 'No account type telemetry.' },
-    { name: 'EA EnableExecution', ok: enableExecution, detail: enableExecution ? 'EnableExecution=true' : 'EnableExecution=false' },
+    {
+      name: 'EA EnableExecution',
+      ok: enableExecution,
+      detail: terminal
+        ? (enableExecution ? 'EnableExecution=true in last EA heartbeat.' : 'EnableExecution=false in last EA heartbeat. Set EnableExecution=true in MT5 inputs and re-attach the EA.')
+        : 'No EA telemetry yet.',
+    },
     { name: 'Trade allowed', ok: accountTradeAllowed && terminalTradeAllowed, detail: `Account allowed=${accountTradeAllowed}, Terminal allowed=${terminalTradeAllowed}` },
     { name: 'No open orders', ok: openOrders === 0, detail: `Open orders: ${openOrders}` },
     { name: 'Spread & symbol', ok: Boolean(symbolChoice.symbol), detail: symbolChoice.reason },
@@ -636,7 +679,7 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
   else if (lastLifecycle === 'EXECUTED') state = 'EXECUTED';
   else if (lastLifecycle === 'FAILED' || lastLifecycle === 'TIMEOUT' || lastLifecycle === 'CANCELLED') state = 'FAILED';
   else if (lastCommand) state = 'DISPATCHING';
-  else if (!bridgeOnline || !terminal) state = 'WAITING_FOR_TERMINAL';
+  else if (!bridgeOnline || !terminal || terminal.status !== 'connected') state = 'WAITING_FOR_TERMINAL';
   else if (countdownSeconds != null && countdownSeconds > 0) state = 'WAITING_FOR_TERMINAL';
   else if (!safetyChecks.every((s) => s.ok)) state = 'VALIDATING';
   else state = 'READY';
@@ -660,7 +703,7 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
     enabled,
     state,
     runId: runId ?? null,
-    terminalId,
+    terminalId: terminalId ?? terminal?.terminalId ?? null,
     countdownSeconds,
     safetyChecks,
     lastResult,

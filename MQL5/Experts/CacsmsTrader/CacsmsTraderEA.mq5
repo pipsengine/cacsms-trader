@@ -122,7 +122,8 @@ void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest 
 
 void OnTimer()
 {
-   datetime now = TimeCurrent();
+   // Use local clock for timer cadence. TimeCurrent() freezes when the broker feed is idle.
+   datetime now = TimeLocal();
    if (lastHeartbeat == 0 || (now - lastHeartbeat) >= HeartbeatSeconds)
    {
       SendHeartbeat();
@@ -136,7 +137,7 @@ void OnTimer()
 
 void SendHeartbeat()
 {
-   lastHeartbeat = TimeCurrent();
+   lastHeartbeat = TimeLocal();
    heartbeatSequence++;
 
    string computerId = TerminalInfoString(TERMINAL_DATA_PATH);

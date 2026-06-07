@@ -4,6 +4,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { isLocalMachineHeaders } from '@/lib/local-access';
 
 const execFileAsync = promisify(execFile);
 
@@ -174,12 +175,7 @@ export function enginePolicyFromEnv(): EnginePolicy {
 }
 
 export function isLocalRequest(headers: Headers): boolean {
-  const forwardedFor = headers.get('x-forwarded-for');
-  const realIp = headers.get('x-real-ip');
-  const host = headers.get('host') ?? '';
-  const candidate = (realIp || forwardedFor || '').split(',')[0]?.trim();
-  const looksLocal = candidate === '127.0.0.1' || candidate === '::1' || candidate === '' || host.startsWith('localhost') || host.startsWith('127.0.0.1');
-  return looksLocal;
+  return isLocalMachineHeaders(headers);
 }
 
 export function assertPolicy(policy: EnginePolicy, requestHeaders: Headers): void {

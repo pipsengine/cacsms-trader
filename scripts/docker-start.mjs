@@ -1,5 +1,7 @@
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import http from 'node:http';
+import path from 'node:path';
 
 const bridgePort = Number(process.env.MT5_BRIDGE_PORT ?? 8787);
 const appPort = Number(process.env.PORT ?? 3000);
@@ -8,10 +10,17 @@ const children = [];
 async function main() {
   console.log('[docker-start] Waiting for PostgreSQL and applying migrations...');
   await runNodeScript('scripts/apply-all-migrations.mjs');
+  try {
+    await runNodeScript('scripts/sync-bridge-secret.mjs');
+  } catch (error) {
+    console.warn('[docker-start] Bridge secret sync skipped:', error instanceof Error ? error.message : error);
+  }
+  hydrateBridgeSecretFromRuntimeFile();
 
   console.log(`[docker-start] Starting MT5 bridge on port ${bridgePort}...`);
   const bridge = startProcess('mt5-bridge', process.execPath, ['mt5/bridge/server.mjs'], {
     MT5_BRIDGE_PORT: String(bridgePort),
+    MT5_BRIDGE_SHARED_SECRET: process.env.MT5_BRIDGE_SHARED_SECRET ?? '',
   });
   children.push(bridge);
 
@@ -22,6 +31,7 @@ async function main() {
   const app = startProcess('next', process.execPath, ['server.js'], {
     PORT: String(appPort),
     HOSTNAME: process.env.HOSTNAME ?? '0.0.0.0',
+    MT5_BRIDGE_SHARED_SECRET: process.env.MT5_BRIDGE_SHARED_SECRET ?? '',
   });
   children.push(app);
 
@@ -102,6 +112,19 @@ function waitForHttp(url, maxAttempts) {
 
     tryOnce();
   });
+}
+
+function hydrateBridgeSecretFromRuntimeFile() {
+  const secretFile = path.join(process.cwd(), 'data', 'mt5-bridge-secret');
+  try {
+    const secret = fs.readFileSync(secretFile, 'utf8').trim();
+    if (secret) {
+      process.env.MT5_BRIDGE_SHARED_SECRET = secret;
+      console.log('[docker-start] Bridge secret loaded from runtime file.');
+    }
+  } catch {
+    // runtime secret file not present yet; keep env default
+  }
 }
 
 function shutdown(code = 0) {

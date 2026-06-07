@@ -1,4 +1,6 @@
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 
 const PORT = Number(process.env.MT5_BRIDGE_PORT ?? 8787);
 const HEARTBEAT_TIMEOUT_MS = Number(process.env.MT5_HEARTBEAT_TIMEOUT_MS ?? 15000);
@@ -9,7 +11,8 @@ const MAX_COMMAND_COUNT = Number(process.env.MT5_BRIDGE_MAX_COMMANDS ?? 500);
 const MAX_ACK_COUNT = Number(process.env.MT5_BRIDGE_MAX_ACKS ?? 300);
 const COMMAND_LEASE_MS = Number(process.env.MT5_COMMAND_LEASE_MS ?? 12000);
 const COMMAND_MAX_ATTEMPTS = Number(process.env.MT5_COMMAND_MAX_ATTEMPTS ?? 5);
-const SHARED_SECRET = process.env.MT5_BRIDGE_SHARED_SECRET ?? "";
+const SHARED_SECRET_FILE = process.env.CACSMS_BRIDGE_SECRET_FILE ?? path.join(process.cwd(), "data", "mt5-bridge-secret");
+let cachedSharedSecret = { value: String(process.env.MT5_BRIDGE_SHARED_SECRET ?? ""), mtimeMs: 0 };
 
 const terminals = new Map();
 const registrations = new Map();
@@ -906,13 +909,33 @@ function calculateTimeDriftMs(sourceTime, receivedAt) {
   return Math.round(receivedMs - sourceMs);
 }
 
+function getSharedSecret() {
+  const envSecret = String(process.env.MT5_BRIDGE_SHARED_SECRET ?? "").trim();
+  try {
+    const stat = fs.statSync(SHARED_SECRET_FILE);
+    if (stat.mtimeMs !== cachedSharedSecret.mtimeMs) {
+      cachedSharedSecret = {
+        value: fs.readFileSync(SHARED_SECRET_FILE, "utf8").trim(),
+        mtimeMs: stat.mtimeMs,
+      };
+    }
+    if (cachedSharedSecret.value) {
+      return cachedSharedSecret.value;
+    }
+  } catch {
+    // runtime secret file not present yet
+  }
+  return envSecret;
+}
+
 function assertAuthorized(request) {
-  if (!SHARED_SECRET) {
+  const sharedSecret = getSharedSecret();
+  if (!sharedSecret) {
     return;
   }
 
   const providedSecret = request.headers["x-cacsms-secret"];
-  if (providedSecret !== SHARED_SECRET) {
+  if (providedSecret !== sharedSecret) {
     throw new Error("Unauthorized heartbeat: invalid bridge secret.");
   }
 }

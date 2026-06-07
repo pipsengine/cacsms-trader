@@ -8,3 +8,4 @@ tsconfig.tsbuildinfo
 *.log
 .env*
 !.env.example
+data/mt5-bridge-secret

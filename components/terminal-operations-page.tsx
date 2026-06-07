@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
+import { Mt5BridgeSecretPanel } from '@/components/mt5-bridge-secret-panel';
 
 type EnqueueState = { status: 'idle' | 'submitting' | 'ok' | 'error'; message: string };
 
@@ -391,6 +392,8 @@ export function EADeploymentLinkPage() {
           </CardContent>
         </Card>
       ) : null}
+
+      <Mt5BridgeSecretPanel compact />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <FolderStatusCard title="Project EA Folder Status" icon={Folder} status={statusFolder(config.projectEaFolder)} />
@@ -1545,6 +1548,35 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
       eaVersion: terminal.eaVersion ?? terminal.version ?? 'CACSMS-EA 1.0.0',
       vpsId: terminal.vpsId ?? '',
     }));
+    setAuthorize({ status: 'idle', message: '' });
+    setVerify({ status: 'idle', message: '' });
+    setSubmit({ status: 'idle', message: '' });
+  };
+
+  const onLoadRegistration = (terminalId: string) => {
+    const registration = registrations.find((item) => item.terminalId === terminalId);
+    if (!registration) return;
+    setForm((current) => ({
+      ...current,
+      terminalId: registration.terminalId,
+      terminalName: registration.terminalName ?? registration.terminalId,
+      computerId: registration.computerId ?? '',
+      computerName: registration.computerName ?? '',
+      accountNumber: registration.accountNumber ?? '',
+      brokerName: registration.brokerName ?? '',
+      serverName: registration.serverName ?? '',
+      mt5Build: String(registration.mt5Build ?? '4150'),
+      eaVersion: registration.eaVersion ?? 'CACSMS-EA 1.0.0',
+      terminalType: registration.terminalType ?? current.terminalType,
+      region: registration.region ?? current.region,
+      environment: registration.environment ?? current.environment,
+      vpsId: registration.vpsId ?? '',
+      priority: String(registration.priority ?? current.priority),
+    }));
+    setAuthorize({ status: 'idle', message: 'Load this registration, then click Issue EA key or Generate EA token, and Save registration again.' });
+    setVerify({ status: 'idle', message: '' });
+    setSubmit({ status: 'idle', message: '' });
+    setActiveStep(2);
   };
 
   const generateTerminalId = () => {
@@ -1688,11 +1720,22 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
                 <div className="text-xs font-semibold uppercase text-slate-500">1. Terminal identity</div>
                 <OpsStatusBadge status={identityReady ? 'READY' : 'PENDING'} />
               </div>
+              <Mt5BridgeSecretPanel compact />
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+                The dashboard authentication key below is for registration records only. The EA uses the bridge secret above as <span className="font-mono">BridgeSecret</span>, plus the same <span className="font-mono">TerminalId</span> in MT5 inputs.
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 <label className="space-y-1.5">
-                  <span className="text-xs font-medium uppercase text-slate-500">Existing heartbeat</span>
-                  <select className="h-10 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={selectedTerminalId} onChange={(e) => onPrefill(e.target.value)}>
-                    <option value="">Manual enrollment</option>
+                  <span className="text-xs font-medium uppercase text-slate-500">Saved registration</span>
+                  <select className="h-10 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={selectedTerminalId && registrations.some((r) => r.terminalId === selectedTerminalId) ? selectedTerminalId : ''} onChange={(e) => onLoadRegistration(e.target.value)}>
+                    <option value="">Select registered terminal</option>
+                    {registrations.map((registration) => <option key={registration.terminalId} value={registration.terminalId}>{registration.terminalId}</option>)}
+                  </select>
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs font-medium uppercase text-slate-500">Live heartbeat</span>
+                  <select className="h-10 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700" value={selectedTerminalId && terminals.some((t) => t.terminalId === selectedTerminalId) ? selectedTerminalId : ''} onChange={(e) => onPrefill(e.target.value)}>
+                    <option value="">Select connected terminal</option>
                     {terminals.map((terminal) => <option key={terminal.terminalId} value={terminal.terminalId}>{terminal.terminalId}</option>)}
                   </select>
                 </label>
@@ -1809,7 +1852,7 @@ function TerminalRegistration({ terminals, registrations }: { terminals: any[]; 
                       <TableCell colSpan={5} className="h-40 text-center text-sm text-slate-500">No terminal registrations yet.</TableCell>
                     </TableRow>
                   ) : registrations.map((r) => (
-                    <TableRow key={r.terminalId} className="border-slate-100 hover:bg-slate-50">
+                    <TableRow key={r.terminalId} className="border-slate-100 hover:bg-slate-50 cursor-pointer" onClick={() => onLoadRegistration(r.terminalId)}>
                       <TableCell className="font-mono text-xs text-slate-700">{r.terminalId}</TableCell>
                       <TableCell className="font-mono text-xs text-slate-700">{r.vpsId || r.computerId || r.computerName}</TableCell>
                       <TableCell className="text-xs text-slate-700">{r.brokerName} / <span className="font-mono">{r.accountNumber}</span></TableCell>
@@ -4872,39 +4915,54 @@ function AutomaticExecutionTestPanel() {
   const [status, setStatus] = useState<AutoTestStatusView | null>(null);
   const [busy, setBusy] = useState<'idle' | 'enabling' | 'disabling'>('idle');
   const [error, setError] = useState<string>('');
+  const [notice, setNotice] = useState<string>('');
+
+  const load = useCallback(async () => {
+    const response = await fetch('/api/mt5/auto-test/status', { cache: 'no-store' });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error ?? `Auto test status failed with HTTP ${response.status}`);
+    }
+    setStatus(payload as AutoTestStatusView);
+    setError('');
+    return payload as AutoTestStatusView;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    const load = async () => {
+    const refresh = async () => {
       try {
-        const response = await fetch('/api/mt5/auto-test/status', { cache: 'no-store' });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok) {
-          throw new Error(payload?.error ?? `Auto test status failed with HTTP ${response.status}`);
-        }
-        if (cancelled) return;
-        setStatus(payload as AutoTestStatusView);
-        setError('');
+        await load();
       } catch (err) {
         if (cancelled) return;
         setError(err instanceof Error ? err.message : 'Unable to load auto test status.');
       }
     };
 
-    load();
-    const interval = window.setInterval(load, 2000);
+    void refresh();
+    const interval = window.setInterval(() => {
+      void refresh();
+    }, 2000);
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, []);
+  }, [load]);
 
   const onEnable = async () => {
     setBusy('enabling');
+    setNotice('');
     try {
       const response = await fetch('/api/mt5/auto-test/enable', { method: 'POST' });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload?.error ?? `Enable failed with HTTP ${response.status}`);
+      const next = await load();
+      const failedChecks = (next?.safetyChecks ?? []).filter((check) => !check.ok).map((check) => check.name);
+      setNotice(
+        failedChecks.length
+          ? `Auto test enabled (run ${String(payload?.runId ?? '—').slice(0, 8)}…). Waiting on: ${failedChecks.join(', ')}.`
+          : `Auto test enabled (run ${String(payload?.runId ?? '—').slice(0, 8)}…). Safety checks passed — dispatch will start after the countdown.`,
+      );
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Enable failed.');
@@ -4915,10 +4973,13 @@ function AutomaticExecutionTestPanel() {
 
   const onDisable = async () => {
     setBusy('disabling');
+    setNotice('');
     try {
       const response = await fetch('/api/mt5/auto-test/disable', { method: 'POST' });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload?.error ?? `Disable failed with HTTP ${response.status}`);
+      await load();
+      setNotice('Auto test disabled.');
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Disable failed.');
@@ -4936,19 +4997,30 @@ function AutomaticExecutionTestPanel() {
     <OpsPanel title="Automatic Execution Test" icon={ClipboardCheck}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <ExecutionBadge state={enabled ? 'ACKNOWLEDGED' : 'CANCELLED'} />
-          <span className="font-mono text-xs text-slate-700">{enabled ? 'Enabled' : 'Disabled'}</span>
-          <span className="font-mono text-xs text-slate-500">State: {state}</span>
+          <span
+            className={cn(
+              'inline-flex whitespace-nowrap rounded-md border px-2 py-1 font-mono text-[10px] font-semibold uppercase',
+              enabled ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-600',
+            )}
+          >
+            {enabled ? 'Enabled' : 'Disabled'}
+          </span>
+          <span className="inline-flex whitespace-nowrap rounded-md border border-blue-200 bg-blue-50 px-2 py-1 font-mono text-[10px] font-semibold uppercase text-blue-700">
+            {state}
+          </span>
+          {status?.runId ? <span className="font-mono text-[11px] text-slate-500">Run {status.runId.slice(0, 8)}…</span> : null}
         </div>
         <div className="flex items-center gap-2">
-          <Button size="sm" variant="secondary" disabled={busy !== 'idle'} onClick={onEnable}>
-            Enable
+          <Button size="sm" variant="secondary" disabled={busy !== 'idle' || enabled} onClick={() => void onEnable()}>
+            {busy === 'enabling' ? 'Enabling…' : 'Enable'}
           </Button>
-          <Button size="sm" variant="destructive" disabled={busy !== 'idle'} onClick={onDisable}>
-            Disable
+          <Button size="sm" variant="destructive" disabled={busy !== 'idle' || !enabled} onClick={() => void onDisable()}>
+            {busy === 'disabling' ? 'Disabling…' : 'Disable'}
           </Button>
         </div>
       </div>
+
+      {notice ? <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">{notice}</div> : null}
 
       {status?.terminalId ? (
         <div className="mt-3 grid grid-cols-1 gap-2 rounded-md border border-slate-200 bg-white p-3">
@@ -4964,6 +5036,10 @@ function AutomaticExecutionTestPanel() {
             <span className="font-mono text-xs font-semibold text-slate-900">Run ID</span>
             <span className="font-mono text-xs text-slate-500">{status.runId ?? '—'}</span>
           </div>
+        </div>
+      ) : state === 'VALIDATING' ? (
+        <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          Terminal is connected. Waiting for remaining safety checks to pass before dispatch.
         </div>
       ) : (
         <div className="mt-3 rounded-md border border-slate-200 bg-white p-3 text-xs text-slate-600">
@@ -5292,6 +5368,7 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
 
   return (
     <div className="space-y-6">
+      <Mt5BridgeSecretPanel />
       <section className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
         <OpsSummaryCard icon={ShieldCheck} title="Bridge health score" value={`${bridgeSummary.healthScore}%`} detail="Execution infrastructure readiness" tone={bridgeSummary.healthScore >= 85 ? 'green' : 'amber'} />
         <OpsSummaryCard icon={Server} title="Queued commands" value={String(bridgeSummary.queued)} detail="Awaiting EA lease" tone="blue" />
@@ -7584,6 +7661,8 @@ const EA_OPERATIONAL_APIS = [
   'POST /api/mt5/ea-deployment/copy-files — copy project EA into MT5 Experts.',
   'POST /api/mt5/ea-deployment/create-link — symlink/junction project EA into Experts.',
   'GET /api/mt5/ea-deployment/logs — latest deployment run logs.',
+  'GET /api/mt5/bridge-secret — read active MT5 bridge secret.',
+  'POST /api/mt5/bridge-secret — generate or apply bridge secret.',
 ];
 
 function terminalHashFromDataFolder(dataFolder: string): string {
@@ -7666,7 +7745,7 @@ function buildManualEaGuide(bridgeUrl: string) {
     'Compile mt5/experts/CacsmsTraderEA/CacsmsTraderEA.mq5 in MetaEditor if needed.',
     `Set BridgeUrl to ${bridgeUrl}.`,
     'Set TerminalId to a unique identifier per MT5 installation.',
-    'Set BridgeSecret to match MT5_BRIDGE_SHARED_SECRET in your environment.',
+    'Generate and apply the bridge secret in the portal, then paste the same value into the EA BridgeSecret input.',
     'Enable Algo Trading and allow WebRequest for the bridge URL.',
   ];
 }
