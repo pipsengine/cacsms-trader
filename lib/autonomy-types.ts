@@ -6,6 +6,7 @@ export type AutonomyJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 
 export type AutonomyDecision = 'BUY' | 'SELL' | 'WAIT' | 'AVOID' | 'MONITOR';
 
 export const AUTONOMY_WORKERS = [
+  'AutonomousPairSelectorWorker',
   'AutonomousSymbolScannerWorker',
   'AutonomousChartCaptureWorker',
   'AutonomousTimeframeSchedulerWorker',
@@ -41,6 +42,10 @@ export type AutonomyWorkerName = typeof AUTONOMY_WORKERS[number];
 
 export interface AutonomyConfig {
   activeSymbols: string[];
+  watchlistSymbols: string[];
+  maxSpreadPoints: number;
+  pairSelectionEnabled: boolean;
+  maxSelectedSymbols: number;
   activeTimeframes: AutonomyTimeframe[];
   mode: AutonomyMode;
   confidenceThreshold: number;

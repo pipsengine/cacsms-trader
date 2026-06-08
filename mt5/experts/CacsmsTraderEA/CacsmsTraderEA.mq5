@@ -150,33 +150,21 @@ void SendHeartbeat()
    bool terminalTradeAllowed = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
    bool eurusdAvailable = SymbolSelect("EURUSD", true);
    bool xauusdAvailable = SymbolSelect("XAUUSD", true);
-   int eurusdSpreadPoints = 0;
-   int xauusdSpreadPoints = 0;
-   if (eurusdAvailable)
-   {
-      double bidE = 0.0;
-      double askE = 0.0;
-      SymbolInfoDouble("EURUSD", SYMBOL_BID, bidE);
-      SymbolInfoDouble("EURUSD", SYMBOL_ASK, askE);
-      double pointE = SymbolInfoDouble("EURUSD", SYMBOL_POINT);
-      eurusdSpreadPoints = pointE > 0.0 ? (int)MathRound((askE - bidE) / pointE) : 0;
-   }
-   if (xauusdAvailable)
-   {
-      double bidX = 0.0;
-      double askX = 0.0;
-      SymbolInfoDouble("XAUUSD", SYMBOL_BID, bidX);
-      SymbolInfoDouble("XAUUSD", SYMBOL_ASK, askX);
-      double pointX = SymbolInfoDouble("XAUUSD", SYMBOL_POINT);
-      xauusdSpreadPoints = pointX > 0.0 ? (int)MathRound((askX - bidX) / pointX) : 0;
-   }
+   bool gbpusdAvailable = SymbolSelect("GBPUSD", true);
+   bool usdjpyAvailable = SymbolSelect("USDJPY", true);
+   int eurusdSpreadPoints = SymbolSpreadPoints("EURUSD", eurusdAvailable);
+   int xauusdSpreadPoints = SymbolSpreadPoints("XAUUSD", xauusdAvailable);
+   int gbpusdSpreadPoints = SymbolSpreadPoints("GBPUSD", gbpusdAvailable);
+   int usdjpySpreadPoints = SymbolSpreadPoints("USDJPY", usdjpyAvailable);
    string enableExecutionJson = EnableExecution ? "true" : "false";
    string accountTradeAllowedJson = accountTradeAllowed ? "true" : "false";
    string terminalTradeAllowedJson = terminalTradeAllowed ? "true" : "false";
    string eurusdAvailableJson = eurusdAvailable ? "true" : "false";
    string xauusdAvailableJson = xauusdAvailable ? "true" : "false";
+   string gbpusdAvailableJson = gbpusdAvailable ? "true" : "false";
+   string usdjpyAvailableJson = usdjpyAvailable ? "true" : "false";
    string heartbeat = StringFormat(
-      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"accountType\":\"%s\",\"enableExecution\":%s,\"accountTradeAllowed\":%s,\"terminalTradeAllowed\":%s,\"eurusdAvailable\":%s,\"xauusdAvailable\":%s,\"eurusdSpreadPoints\":%d,\"xauusdSpreadPoints\":%d,\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.001\"}",
+      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"accountType\":\"%s\",\"enableExecution\":%s,\"accountTradeAllowed\":%s,\"terminalTradeAllowed\":%s,\"eurusdAvailable\":%s,\"xauusdAvailable\":%s,\"gbpusdAvailable\":%s,\"usdjpyAvailable\":%s,\"eurusdSpreadPoints\":%d,\"xauusdSpreadPoints\":%d,\"gbpusdSpreadPoints\":%d,\"usdjpySpreadPoints\":%d,\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.001\"}",
       EscapeJson(TerminalId),
       EscapeJson(computerId),
       EscapeJson(computerName),
@@ -189,8 +177,12 @@ void SendHeartbeat()
       terminalTradeAllowedJson,
       eurusdAvailableJson,
       xauusdAvailableJson,
+      gbpusdAvailableJson,
+      usdjpyAvailableJson,
       eurusdSpreadPoints,
       xauusdSpreadPoints,
+      gbpusdSpreadPoints,
+      usdjpySpreadPoints,
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_MARGIN),
@@ -334,7 +326,7 @@ void PollNextCommand()
       ackStatus = "failed";
       brokerMessage = "{\"status\":\"FAILED\",\"reason\":\"missing_type\",\"receivedType\":\"\"}";
    }
-   else if (!EnableExecution)
+   else if (!EnableExecution && !IsChartControlCommand(typeUpper))
    {
       ackStatus = "rejected";
       brokerMessage = "execution_disabled";
@@ -349,6 +341,14 @@ void PollNextCommand()
    }
 
    PostAck(commandId, terminalId, ackStatus, ticket, brokerMessage, executedPrice, executedVolumeLots, slippagePoints, spreadPoints, latencyMs, commandType);
+}
+
+bool IsChartControlCommand(string commandType)
+{
+   return commandType == "OPEN_CHART"
+      || commandType == "SET_TIMEFRAME"
+      || commandType == "CAPTURE_CHART"
+      || commandType == "CLOSE_CHART";
 }
 
 void ExecuteCommand(string commandType, string payloadJson, string &ackStatus, string &ticket, string &brokerMessage, double &executedPrice, double &executedVolumeLots, int &slippagePointsOut, int &spreadPointsOut)
@@ -368,8 +368,186 @@ void ExecuteCommand(string commandType, string payloadJson, string &ackStatus, s
       ExecutePlaceOrder(payloadJson, ackStatus, ticket, brokerMessage, executedPrice, executedVolumeLots, slippagePointsOut, spreadPointsOut);
       return;
    }
+   if (normalized == "open_chart")
+   {
+      ExecuteOpenChart(payloadJson, ackStatus, brokerMessage);
+      return;
+   }
+   if (normalized == "set_timeframe")
+   {
+      ExecuteSetTimeframe(payloadJson, ackStatus, brokerMessage);
+      return;
+   }
+   if (normalized == "capture_chart")
+   {
+      ExecuteCaptureChart(payloadJson, ackStatus, brokerMessage);
+      return;
+   }
+   if (normalized == "close_chart")
+   {
+      ExecuteCloseChart(payloadJson, ackStatus, brokerMessage);
+      return;
+   }
    ackStatus = "failed";
    brokerMessage = StringFormat("{\"status\":\"FAILED\",\"reason\":\"unsupported_command_type\",\"receivedType\":\"%s\"}", EscapeJson(commandType));
+}
+
+void ExecuteOpenChart(string payloadJson, string &ackStatus, string &brokerMessage)
+{
+   string symbol;
+   if (!ExtractJsonString(payloadJson, "symbol", symbol))
+   {
+      ackStatus = "failed";
+      brokerMessage = "missing_symbol";
+      return;
+   }
+   if (!SymbolSelect(symbol, true))
+   {
+      ackStatus = "failed";
+      brokerMessage = "symbol_not_available";
+      return;
+   }
+   long chartId = ChartOpen(symbol, PERIOD_H1);
+   if (chartId <= 0)
+   {
+      ackStatus = "failed";
+      brokerMessage = "chart_open_failed";
+      return;
+   }
+   ackStatus = "accepted";
+   brokerMessage = StringFormat("{\"status\":\"OK\",\"chartId\":%I64d,\"symbol\":\"%s\"}", chartId, EscapeJson(symbol));
+}
+
+void ExecuteSetTimeframe(string payloadJson, string &ackStatus, string &brokerMessage)
+{
+   string symbol;
+   string timeframe;
+   if (!ExtractJsonString(payloadJson, "symbol", symbol))
+   {
+      ackStatus = "failed";
+      brokerMessage = "missing_symbol";
+      return;
+   }
+   if (!ExtractJsonString(payloadJson, "timeframe", timeframe))
+   {
+      if (!ExtractJsonString(payloadJson, "period", timeframe))
+      {
+         ackStatus = "failed";
+         brokerMessage = "missing_timeframe";
+         return;
+      }
+   }
+   if (!SymbolSelect(symbol, true))
+   {
+      ackStatus = "failed";
+      brokerMessage = "symbol_not_available";
+      return;
+   }
+   ENUM_TIMEFRAMES period = ParseTimeframePeriod(timeframe);
+   long chartId = ChartOpen(symbol, period);
+   if (chartId <= 0)
+   {
+      ackStatus = "failed";
+      brokerMessage = "chart_timeframe_failed";
+      return;
+   }
+   ChartSetSymbolPeriod(chartId, symbol, period);
+   ChartRedraw(chartId);
+   ackStatus = "accepted";
+   brokerMessage = StringFormat("{\"status\":\"OK\",\"chartId\":%I64d,\"symbol\":\"%s\",\"timeframe\":\"%s\"}", chartId, EscapeJson(symbol), EscapeJson(timeframe));
+}
+
+void ExecuteCaptureChart(string payloadJson, string &ackStatus, string &brokerMessage)
+{
+   string symbol;
+   string timeframe;
+   double barCount = 120.0;
+   if (!ExtractJsonString(payloadJson, "symbol", symbol))
+   {
+      ackStatus = "failed";
+      brokerMessage = "missing_symbol";
+      return;
+   }
+   if (!ExtractJsonString(payloadJson, "timeframe", timeframe))
+   {
+      if (!ExtractJsonString(payloadJson, "period", timeframe)) timeframe = "PERIOD_H1";
+   }
+   ExtractJsonNumber(payloadJson, "barCount", barCount);
+   if (!SymbolSelect(symbol, true))
+   {
+      ackStatus = "failed";
+      brokerMessage = "symbol_not_available";
+      return;
+   }
+   ENUM_TIMEFRAMES period = ParseTimeframePeriod(timeframe);
+   int bars = (int)MathMax(20, MathMin(500, barCount));
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+   int copied = CopyRates(symbol, period, 0, bars, rates);
+   if (copied <= 0)
+   {
+      ackStatus = "failed";
+      brokerMessage = "copy_rates_failed";
+      return;
+   }
+   string barsJson = "[";
+   for (int i = copied - 1; i >= 0; i--)
+   {
+      if (i != copied - 1) barsJson += ",";
+      barsJson += StringFormat(
+         "{\"time\":\"%s\",\"open\":%s,\"high\":%s,\"low\":%s,\"close\":%s,\"volume\":%s}",
+         TimeToString(rates[i].time, TIME_DATE | TIME_SECONDS),
+         DoubleToJson(rates[i].open),
+         DoubleToJson(rates[i].high),
+         DoubleToJson(rates[i].low),
+         DoubleToJson(rates[i].close),
+         DoubleToJson((double)rates[i].tick_volume)
+      );
+   }
+   barsJson += "]";
+   ackStatus = "accepted";
+   brokerMessage = StringFormat("{\"status\":\"OK\",\"symbol\":\"%s\",\"timeframe\":\"%s\",\"bars\":%s}", EscapeJson(symbol), EscapeJson(timeframe), barsJson);
+}
+
+void ExecuteCloseChart(string payloadJson, string &ackStatus, string &brokerMessage)
+{
+   string symbol;
+   if (!ExtractJsonString(payloadJson, "symbol", symbol))
+   {
+      ackStatus = "accepted";
+      brokerMessage = "{\"status\":\"OK\",\"detail\":\"no_symbol_provided\"}";
+      return;
+   }
+   long chartId = ChartFirst();
+   bool closedAny = false;
+   while (chartId >= 0)
+   {
+      long nextChartId = ChartNext(chartId);
+      if (ChartSymbol(chartId) == symbol)
+      {
+         ChartClose(chartId);
+         closedAny = true;
+      }
+      chartId = nextChartId;
+   }
+   ackStatus = "accepted";
+   brokerMessage = closedAny ? "{\"status\":\"OK\",\"detail\":\"chart_closed\"}" : "{\"status\":\"OK\",\"detail\":\"chart_not_found\"}";
+}
+
+ENUM_TIMEFRAMES ParseTimeframePeriod(string timeframe)
+{
+   string normalized = timeframe;
+   StringToUpper(normalized);
+   StringTrimLeft(normalized);
+   StringTrimRight(normalized);
+   if (normalized == "W" || normalized == "PERIOD_W1") return PERIOD_W1;
+   if (normalized == "D" || normalized == "PERIOD_D1") return PERIOD_D1;
+   if (normalized == "H4" || normalized == "PERIOD_H4") return PERIOD_H4;
+   if (normalized == "H1" || normalized == "PERIOD_H1") return PERIOD_H1;
+   if (normalized == "M15" || normalized == "PERIOD_M15") return PERIOD_M15;
+   if (normalized == "M5" || normalized == "PERIOD_M5") return PERIOD_M5;
+   if (normalized == "M1" || normalized == "PERIOD_M1") return PERIOD_M1;
+   return PERIOD_H1;
 }
 
 void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage, double &executedPrice, double &executedVolumeLots, int &slippagePointsOut, int &spreadPointsOut)
@@ -640,6 +818,17 @@ void PostAck(string commandId, string terminalId, string status, string ticket, 
    {
       Print("Cacsms ack failed. HTTP status: ", statusCode, " MT5 error: ", GetLastError(), " CommandId: ", commandId);
    }
+}
+
+int SymbolSpreadPoints(string symbol, bool available)
+{
+   if (!available) return 0;
+   double bid = 0.0;
+   double ask = 0.0;
+   SymbolInfoDouble(symbol, SYMBOL_BID, bid);
+   SymbolInfoDouble(symbol, SYMBOL_ASK, ask);
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   return point > 0.0 ? (int)MathRound((ask - bid) / point) : 0;
 }
 
 string EscapeJson(string value)

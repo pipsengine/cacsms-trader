@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 
 import { buildAutonomousDecision } from './autonomous-decision-engine';
+import { DEFAULT_PAIR_SELECTION_CONFIG, runAutonomousPairSelection } from './pair-selector';
 import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
 import { analyzeAiVisualInterpretation } from './ai-visual-interpretation-store';
 import { analyzeCaptureCandles } from './candle-detection-store';
@@ -216,8 +217,12 @@ CREATE INDEX IF NOT EXISTS idx_autonomous_decisions_symbol_tf ON autonomous_deci
 
 const defaultConfig: AutonomyConfig = {
   activeSymbols: ['XAUUSD'],
+  watchlistSymbols: [...DEFAULT_PAIR_SELECTION_CONFIG.watchlistSymbols],
+  maxSpreadPoints: DEFAULT_PAIR_SELECTION_CONFIG.maxSpreadPoints,
+  pairSelectionEnabled: DEFAULT_PAIR_SELECTION_CONFIG.pairSelectionEnabled,
+  maxSelectedSymbols: DEFAULT_PAIR_SELECTION_CONFIG.maxSelectedSymbols,
   activeTimeframes: [...AUTONOMY_TIMEFRAMES],
-  mode: 'assisted_trade',
+  mode: 'full_auto',
   confidenceThreshold: 60,
   alertThreshold: 72,
   riskThreshold: 70,
@@ -228,7 +233,7 @@ const defaultConfig: AutonomyConfig = {
   captureSources: ['mt5_bridge', 'chart_capture_service'],
   dataSources: ['visual_intelligence', 'economic_calendar', 'cot', 'interest_rates', 'sentiment'],
   signalGenerationRules: { requireTimeframeAlignment: true, blockHighImpactNews: true, blockCriticalAnomalies: true },
-  tradeExecutionMode: 'assisted_trade',
+  tradeExecutionMode: 'full_auto',
 };
 
 let schemaReady: Promise<void> | null = null;
@@ -416,7 +421,7 @@ export async function resumeAutonomy() {
 
 async function runAutonomyTick(triggerSource: string) {
   if ((await isEmergencyStopped())) return;
-  const config = defaultConfig;
+  const config = await getAutonomyConfig();
   const cycleId = randomUUID();
   await queryPostgres('INSERT INTO autonomous_scan_cycles (id, cycle_type, status, symbols_json, timeframes_json) VALUES ($1,$2,$3,$4,$5)', [cycleId, triggerSource, 'running', config.activeSymbols, config.activeTimeframes]);
   await publishAutonomyEvent('autonomy.scan.started', { cycleId, triggerSource });
@@ -479,6 +484,7 @@ async function executeAutonomyJob(jobId: string) {
 async function runWorker(workerName: AutonomyWorkerName, symbol: string | null, timeframe: string | null, input: Record<string, unknown>): Promise<Record<string, unknown>> {
   const normalizedSymbol = (symbol ?? String(input.symbol ?? 'XAUUSD')).toUpperCase();
   const normalizedTimeframe = normalizeTimeframe(timeframe ?? String(input.timeframe ?? 'H1'));
+  if (workerName === 'AutonomousPairSelectorWorker') return toPayload(await selectAutonomousPairs());
   if (workerName === 'AutonomousSymbolScannerWorker') return toPayload(await scanSymbols());
   if (workerName === 'AutonomousTimeframeSchedulerWorker') return toPayload(await enqueueTimeframes(normalizedSymbol));
   if (workerName === 'AutonomousChartCaptureWorker') return toPayload(await runCaptureReadiness(normalizedSymbol, normalizedTimeframe));
@@ -562,12 +568,40 @@ async function generateAlerts() {
   return { alertsCreated: result.rows.length, confidenceScore: 100 };
 }
 
+async function selectAutonomousPairs() {
+  const config = await getAutonomyConfig();
+  if (!config.pairSelectionEnabled) {
+    return { selectedSymbol: config.activeSymbols[0] ?? 'XAUUSD', selectedSymbols: config.activeSymbols, confidenceScore: 100, status: 'disabled' };
+  }
+  const selection = await runAutonomousPairSelection({
+    watchlistSymbols: config.watchlistSymbols,
+    maxSpreadPoints: config.maxSpreadPoints,
+    pairSelectionEnabled: config.pairSelectionEnabled,
+    maxSelectedSymbols: config.maxSelectedSymbols,
+  });
+  await saveAutonomyConfig({ activeSymbols: selection.selectedSymbols });
+  await publishAutonomyEvent('autonomy.pair.selected', {
+    selectedSymbol: selection.selectedSymbol,
+    selectedSymbols: selection.selectedSymbols,
+    source: selection.source,
+    session: selection.session,
+  });
+  return {
+    selectedSymbol: selection.selectedSymbol,
+    selectedSymbols: selection.selectedSymbols,
+    candidates: selection.candidates,
+    confidenceScore: selection.candidates[0]?.compositeScore ?? 100,
+    status: 'selected',
+  };
+}
+
 async function scanSymbols() {
   const config = await getAutonomyConfig();
-  for (const symbol of config.activeSymbols) {
+  const symbols = config.activeSymbols.length > 0 ? config.activeSymbols : ['XAUUSD'];
+  for (const symbol of symbols) {
     await queryPostgres('INSERT INTO autonomous_symbol_queue (id, symbol, reason) VALUES ($1,$2,$3)', [randomUUID(), symbol, 'scheduled_autonomous_scan']);
   }
-  return { symbolsQueued: config.activeSymbols.length, confidenceScore: 100 };
+  return { symbolsQueued: symbols.length, confidenceScore: 100 };
 }
 
 async function enqueueTimeframes(symbol: string) {
@@ -579,11 +613,47 @@ async function enqueueTimeframes(symbol: string) {
 }
 
 async function runCaptureReadiness(symbol: string, timeframe: string) {
-  const captureId = await latestCaptureId(symbol, timeframe);
-  if (!captureId) {
-    throw new Error(`No autonomous chart capture found for ${symbol} ${timeframe}. Configure MT5/chart capture source before analysis can proceed.`);
+  const config = await getAutonomyConfig();
+  let activeSymbol = symbol.toUpperCase();
+  if (config.pairSelectionEnabled && (activeSymbol === 'AUTO' || !config.activeSymbols.includes(activeSymbol))) {
+    const selection = await selectAutonomousPairs();
+    activeSymbol = selection.selectedSymbol;
   }
-  return { symbol, timeframe, captureId, confidenceScore: 100, status: 'capture_available' };
+
+  const captureId = await latestCaptureId(activeSymbol, timeframe);
+  if (captureId) {
+    return { symbol: activeSymbol, timeframe, captureId, confidenceScore: 100, status: 'capture_available' };
+  }
+
+  const terminalId = await resolveConnectedTerminalId();
+  if (!terminalId) {
+    throw new Error(`No autonomous chart capture found for ${activeSymbol} ${timeframe}. Connect an MT5 terminal before top-down capture can proceed.`);
+  }
+
+  const { startTopDownSession } = await import('./top-down-orchestrator');
+  const session = await startTopDownSession({ symbol: activeSymbol, terminalId, mode: 'full_auto' });
+  return {
+    symbol: activeSymbol,
+    timeframe,
+    sessionId: session.sessionId,
+    confidenceScore: 80,
+    status: 'top_down_session_started',
+  };
+}
+
+async function resolveConnectedTerminalId(): Promise<string | null> {
+  try {
+    const response = await fetch(`${process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787'}/terminals`, {
+      cache: 'no-store',
+    });
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const terminals = Array.isArray(payload.terminals) ? payload.terminals : [];
+    const connected = terminals.find((terminal: { status?: string; terminalId?: string }) => terminal.status === 'connected');
+    return connected?.terminalId ? String(connected.terminalId) : null;
+  } catch {
+    return null;
+  }
 }
 
 async function runMacroSyncPlaceholder(workerName: string) {
@@ -641,7 +711,7 @@ async function seedAutonomyDefaults() {
       ON CONFLICT (worker_name) DO NOTHING
     `, [worker]);
   }
-  const config = await getAutonomyConfig();
+  const config = await readAutonomyConfigRow();
   for (const symbol of config.activeSymbols) {
     for (const timeframe of config.activeTimeframes) {
       await seedSchedule('AutonomousChartCaptureWorker', symbol, timeframe, cadenceForTimeframe(timeframe));
@@ -651,7 +721,8 @@ async function seedAutonomyDefaults() {
     }
     await seedSchedule('AutonomousMultiTimeframeComparisonWorker', symbol, null, 3600);
   }
-  await seedSchedule('AutonomousSymbolScannerWorker', null, null, config.scanFrequencySeconds);
+  await seedSchedule('AutonomousPairSelectorWorker', null, null, config.scanFrequencySeconds);
+  await seedSchedule('AutonomousSymbolScannerWorker', null, null, config.scanFrequencySeconds + 5);
   await seedSchedule('AutonomousFailureRecoveryWorker', null, null, 120);
   await seedSchedule('AutonomousAlertWorker', null, null, 60);
   await seedSchedule('AutonomousMacroDataSyncWorker', null, null, 900);
@@ -670,10 +741,14 @@ async function seedSchedule(workerName: string, symbol: string | null, timeframe
   `, [randomUUID(), workerName, key, symbol, timeframe, cadenceSeconds, { autonomousFirst: true }]);
 }
 
-async function getAutonomyConfig(): Promise<AutonomyConfig> {
-  await ensureAutonomySchema();
+async function readAutonomyConfigRow(): Promise<AutonomyConfig> {
   const result = await queryPostgres('SELECT value_json FROM autonomous_config WHERE key = $1', ['default']);
   return { ...defaultConfig, ...objectValue(result.rows[0]?.value_json) } as AutonomyConfig;
+}
+
+async function getAutonomyConfig(): Promise<AutonomyConfig> {
+  await ensureAutonomySchema();
+  return readAutonomyConfigRow();
 }
 
 async function saveAutonomyConfig(patch: Partial<AutonomyConfig>) {

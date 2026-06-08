@@ -304,8 +304,12 @@ function normalizeHeartbeat(payload, existing) {
   const terminalTradeAllowed = payload.terminalTradeAllowed == null ? null : Boolean(payload.terminalTradeAllowed);
   const eurusdAvailable = payload.eurusdAvailable == null ? null : Boolean(payload.eurusdAvailable);
   const xauusdAvailable = payload.xauusdAvailable == null ? null : Boolean(payload.xauusdAvailable);
+  const gbpusdAvailable = payload.gbpusdAvailable == null ? null : Boolean(payload.gbpusdAvailable);
+  const usdjpyAvailable = payload.usdjpyAvailable == null ? null : Boolean(payload.usdjpyAvailable);
   const eurusdSpreadPoints = Number.isFinite(Number(payload.eurusdSpreadPoints)) ? Number(payload.eurusdSpreadPoints) : null;
   const xauusdSpreadPoints = Number.isFinite(Number(payload.xauusdSpreadPoints)) ? Number(payload.xauusdSpreadPoints) : null;
+  const gbpusdSpreadPoints = Number.isFinite(Number(payload.gbpusdSpreadPoints)) ? Number(payload.gbpusdSpreadPoints) : null;
+  const usdjpySpreadPoints = Number.isFinite(Number(payload.usdjpySpreadPoints)) ? Number(payload.usdjpySpreadPoints) : null;
   const historyItem = {
     sequence,
     receivedAt: now,
@@ -333,8 +337,12 @@ function normalizeHeartbeat(payload, existing) {
     terminalTradeAllowed,
     eurusdAvailable,
     xauusdAvailable,
+    gbpusdAvailable,
+    usdjpyAvailable,
     eurusdSpreadPoints,
     xauusdSpreadPoints,
+    gbpusdSpreadPoints,
+    usdjpySpreadPoints,
     balance: historyItem.balance,
     equity: historyItem.equity,
     margin: finiteNumber(payload.margin, "margin"),
@@ -651,6 +659,10 @@ function enqueueCommand(payload) {
     "move_to_breakeven",
     "set_trailing_stop",
     "emergency_close_all",
+    "open_chart",
+    "set_timeframe",
+    "capture_chart",
+    "close_chart",
   ]);
   if (!allowedTypes.has(normalizedType)) {
     throw new Error(`Unsupported command type: ${normalizedType}.`);
@@ -670,7 +682,15 @@ function enqueueCommand(payload) {
                 ? "SET_TRAILING_STOP"
                 : normalizedType === "emergency_close_all"
                   ? "EMERGENCY_CLOSE_ALL"
-                  : rawType.trim();
+                  : normalizedType === "open_chart"
+                    ? "OPEN_CHART"
+                    : normalizedType === "set_timeframe"
+                      ? "SET_TIMEFRAME"
+                      : normalizedType === "capture_chart"
+                        ? "CAPTURE_CHART"
+                        : normalizedType === "close_chart"
+                          ? "CLOSE_CHART"
+                          : rawType.trim();
   const createdAt = String(payload.createdAt ?? now);
   const expiresAt = String(payload.expiresAt ?? new Date(Date.now() + 60_000).toISOString());
 

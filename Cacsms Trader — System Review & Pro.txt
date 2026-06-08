@@ -1,0 +1,354 @@
+Cacsms Trader — System Review & Production Workflow
+1. The Idea Behind the System
+Cacsms Trader is a safety-first, self-driving forex trading platform. The design goal is not “automate trades as fast as possible,” but to build a governed pipeline where every trade passes through connectivity checks, risk rules, and audit before it reaches a broker.
+
+The canonical safety chain is documented in docs/architecture/foundation.md:
+
+1. MT5 terminals report heartbeats and account snapshots.
+2. The server resolves terminal health from heartbeat freshness and latency.
+3. Trade intents pass through risk-core before any execution command is queued.
+4. Execution commands require terminal acknowledgment.
+5. Every risk decision and execution acknowledgment is persisted for audit.
+And the hard rule:
+
+No strategy may send an order directly to MT5. Strategies produce trade intents. Risk-core approves or blocks. Execution services convert approved intents into MT5 commands.
+Target users: demo-account operators first, then prop-firm/challenge traders (FTMO-style guardrails), multi-terminal/VPS operators, and traders wanting SMC/ICT-style visual + macro intelligence fused into decisions.
+
+What the platform aspires to cover (9 architecture domains in services/architecture-registry):
+
+Domain	Purpose
+Web Dashboard
+Operator command center
+Economic Data Engine
+Calendar, COT, rates, news risk
+Computer Vision / Visual Intelligence
+Chart capture → structure detection → interpretation
+Cacsms Vision
+Fused AI-style market room (scan → bias → readiness)
+Strategy Engine
+SMC, ICT, price action, news-aware, hybrid selector
+Risk & Prop Firm Engine
+Drawdown, trade limits, blackout, kill switch
+Execution Engine
+Command queue → MT5 → ack → reconcile
+Trade Monitoring
+BE, trail, partial close, emergency close
+Multi-Terminal MT5 Manager
+Registration, routing, failover
+Important reality check: The architecture registry marks all domains as “implemented,” but that means typed foundations and UI/API surfaces exist — not that the full autonomous trading loop is production-ready. The README is more honest: the project is still in foundation phase, demo-only until execution, risk, audit, and forward-testing are verified.
+
+2. End-to-End Process Flow
+Master runtime diagram
+External World
+Docker Runtime
+Analysis Layer (lib/*)
+Execution (gated)
+heartbeat, poll commands, ack
+heartbeat API
+COT sync APIs
+Playwright collectors
+capture APIs
+decision logs only
+forward / reconcile
+state not in PG
+MT5 EA + Terminal
+CFTC COT
+ForexFactory / Investing.com
+Chart Upload / Browser Capture
+MT5 Bridge :8787(in-memory state)
+Next.js App :3000
+PostgreSQL
+Redis (provisioned, unused)
+Visual detectors + Cacsms Vision
+Autonomy scheduler (30s tick)
+risk-core + execution-risk-gate
+execution-bridge/enqueue
+Flow A — Terminal connectivity (operational)
+MT5 EA → POST /heartbeat (bridge :8787 + Next.js API)
+       → PostgreSQL: trading_accounts, mt5_terminals, heartbeats
+       → Bridge: in-memory health, latency, stability score
+       → Dashboard: terminal ops, status, EA deployment
+Status: Works for demo heartbeat. EA polls commands every ~2s. EnableExecution=false by default in EA.
+
+Flow B — Execution pipeline (implemented, heavily gated)
+Trade intent source (manual API / auto-test runner)
+  → assertExecutionRiskGate() [prop-firm rules → risk_decisions table]
+  → upsertExecutionCommand() [PostgreSQL lifecycle]
+  → POST bridge /commands/enqueue
+  → EA polls → PLACE_ORDER (if enabled)
+  → Ack → reconcile → execution_audit_journal
+Gates today:
+
+CACSMS_ENABLE_LIVE_EXECUTION for non-sandbox
+EA EnableExecution=false
+Risk gate on every PLACE_ORDER
+CACSMS_ENABLE_EXECUTION checked in auto-test only (not all paths)
+Gap: Autonomous BUY/SELL decisions in autonomous_decision_logs never reach the execution bridge.
+
+Flow C — Macro intelligence (mostly operational)
+Economic calendar APIs / 15s monitoring worker
+  → Playwright scraping → economic_events, conflicts, restrictions
+COT sync APIs / weekly scheduler
+  → CFTC ZIP → XLSX → cot_institutional_positions
+Rate history sync
+  → central_bank_rate_history
+Status: Real data ingestion with ~190 events and ~936 COT positions in your restored backup. Autonomy macro workers (calendar/COT/rate sync via scheduler) are stubs — they throw instead of calling the live collectors.
+
+Flow D — Visual intelligence + Cacsms Vision (partial)
+Chart capture (upload/browser)
+  → chart_captures
+  → detector chain: candles → swings → patterns → trendlines → channels
+    → S/R → order blocks → liquidity → structure → MTF → anomaly → interpretation
+  → Cacsms Vision scan fuses outputs → cacsms_vision_analysis
+  → autonomous_decision_logs (advisory BUY/SELL/MONITOR/AVOID)
+Status: Rich schema (~128 tables), ~90 vision API routes. Engines are rule-based weighted fusion, not true computer vision or LLM (@google/genai is unused; ComputerVisionChartEngine.detectCandles() returns empty). No automated MT5 chart capture worker.
+
+Flow E — Autonomy runtime (partial)
+ensureAutonomyRuntime() → 30s tick
+  → due schedules → autonomous_jobs
+  → visual detector workers (if captures exist)
+  → AutonomousSignalGenerationWorker → decision logs + alerts
+  → paper trade = audit log only
+Status: Scheduler, health, emergency-stop APIs work. No closed loop to execution. tradeExecutionMode: 'assisted_trade' is config-only.
+
+What actually runs end-to-end today
+MT5 EA ↔ Bridge ↔ Next.js ↔ PostgreSQL, with optional sandbox PLACE_ORDER after risk checks; parallel macro ingestion into PG; optional chart analysis producing advisory decisions — not auto-trades.
+
+3. Current Maturity Assessment
+Layer	Maturity	Notes
+Docker / local dev
+Ready
+Postgres, migrations, bridge + app in one container
+MT5 bridge + EA protocol
+Ready (demo)
+Heartbeat, command lease, ack, reconcile
+Risk core + execution gate
+Strong foundation
+Prop-firm rules, persisted decisions
+Execution audit
+Strong foundation
+Lifecycle states, journal view, replay APIs
+Economic calendar / COT / rates
+Operational
+Real collectors, Playwright-dependent
+Visual intelligence APIs
+Broad but shallow
+Rule-based, not ML/CV
+Cacsms Vision / Autonomy
+Advisory only
+Decisions logged, not executed
+Strategy / trade-monitor services
+Skeleton
+Not wired into runtime
+services/* layer
+Disconnected
+Monolith uses lib/* instead
+Auth / security
+Missing
+~200 unauthenticated API routes
+Testing / CI/CD
+Missing
+No test suite, no pipelines
+Observability / backup / HA
+Missing
+Console logs, single instance, Redis unused
+4. Production-Ready Workflow — Phased Implementation Plan
+This follows the README’s 7-step foundation order, expanded into operational phases with hard gates. No phase should be skipped; each gate must pass before the next phase opens.
+
+Phase 0Stabilize Foundation
+Phase 1Trusted Connectivity
+Phase 2Execution Loop
+Phase 3Intelligence Pipelines
+Phase 4Decision → Execution Bridge
+Phase 5Forward Testing
+Phase 6Controlled Strategies
+Phase 7Production Hardening
+Phase 8Live / Prop Go-Live
+Phase 0 — Stabilize the Foundation (2–3 weeks)
+Goal: One honest architecture, one runtime path, reproducible environments.
+
+Work item	Deliverable
+Reconcile services/ vs lib/
+Pick lib/ as runtime; migrate or delete unused services/* skeletons
+Fix architecture registry
+Status values: implemented / integration_pending / production_ready
+Unify terminal state
+Bridge state persisted to PG (or Redis); eliminate in-memory drift
+Wire Redis or remove it
+Use for command queue + rate limits + job locks, or drop from compose
+Document all env vars
+Complete .env.example (live execution, tool flags, AI keys)
+Backup/restore runbook
+Scripted pg_dump / restore (you already have a manual path)
+Gate: docker:up + backup restore + migrations + bridge health pass on a clean machine.
+
+Phase 1 — Trusted Terminal Connectivity (2–3 weeks)
+Goal: Reliable, auditable MT5 connectivity across one or more demo terminals.
+
+Work item	Deliverable
+Harden bridge secret
+Required always; no no-op when unset; rotation tested
+Terminal registration lifecycle
+PG-backed registration reconciled with bridge on startup
+Heartbeat SLOs
+Alerts when terminal disconnected/degraded > N seconds
+EA deployment tool
+Verified in Docker with real MetaQuotes path (already configured for you)
+Multi-terminal routing
+Primary/backup terminal selection wired to execution enqueue
+VPS monitoring data model
+Connect heartbeat metrics to real agent data (not UI-only)
+Gate: 72-hour demo terminal uptime test; failover simulation passes; all terminal events in audit trail.
+
+Phase 2 — Complete the Execution Loop (3–4 weeks)
+Goal: Every order path goes through the same risk + audit pipeline.
+
+Work item	Deliverable
+Enforce CACSMS_ENABLE_EXECUTION on all enqueue paths
+Single execution policy module
+Implement remaining bridge commands
+modify_order, close_order, partial_close, move_to_breakeven, set_trailing_stop, emergency_close_all
+Wire TradeMonitoringEngine
+Live position feed → modify/close commands
+Command timeout + retry policy
+Documented and tested per command type
+Reconciliation hardening
+Bridge ↔ PG state machine with idempotency
+Operator kill switch API
+Authenticated, immediate halt (not env-restart-only)
+Gate: End-to-end demo trade: intent → risk approve → enqueue → EA fill → ack → audit journal → position modify → close. Zero unaudited commands.
+
+Phase 3 — Intelligence Pipelines (4–6 weeks)
+Goal: Reliable, scheduled macro + visual data feeding decisions.
+
+Work item	Deliverable
+Wire autonomy macro workers
+Calendar/COT/rate collectors called from scheduler (not stubs)
+Chart capture automation
+Scheduled browser or MT5-tagged capture worker
+News blackout integration
+economic_trade_restriction_windows → risk gate (not env flag only)
+COT/calendar freshness SLOs
+Stale-data blocks or downgrades decisions
+Decide on AI/CV scope
+Either integrate @google/genai with keys + guardrails, or rename “AI” features to “rule-based”
+Consolidate vision pipeline
+Single orchestrator entry point; reduce 90+ routes to stable internal APIs
+Gate: Autonomous scan produces decisions from fresh macro + visual data without manual upload for 7 days.
+
+Phase 4 — Decision → Execution Bridge (3–4 weeks)
+Goal: Close the loop from signal to sandbox execution.
+
+Work item	Deliverable
+Execution adapter for autonomy
+autonomous_decision_logs BUY/SELL → trade intent → risk gate → enqueue
+Cacsms Vision execution readiness
+execution-readiness score gates auto-enqueue
+Mode switch
+monitor / assisted / sandbox_auto / live with explicit operator consent
+Strategy engine integration
+At least one strategy module producing intents (not direct orders)
+Pre-trade checklist
+Terminal health + macro blackout + vision confidence + risk all green
+Gate: Sandbox auto-execution on demo account for 2 weeks with kill switch tested daily; zero trades bypass risk gate.
+
+Phase 5 — Forward Testing Harness (4–6 weeks)
+Goal: Prove the system behaves safely under real market conditions before strategies scale.
+
+Work item	Deliverable
+Forward-test runner service
+Continuous demo trading with daily reports
+Outcome tracking
+autonomous_outcome_tracking populated from real fills
+Performance dashboard
+Win rate, R-multiple, drawdown vs prop limits
+Regression on risk blocks
+Verify kill switch, blackout, consecutive-loss lockout
+Incident playbooks
+Bridge down, EA crash, partial fill, broker reject
+Paper vs sandbox modes
+Clear separation; paper never touches bridge
+Gate: 30-day forward test on demo with documented metrics; no risk-limit breaches; all incidents logged and recoverable.
+
+Phase 6 — Controlled Strategy Implementations (ongoing)
+Goal: First real strategies, one at a time, each forward-tested independently.
+
+Work item	Deliverable
+Strategy #1 (e.g. news-aware SMC)
+Isolated module, versioned config, audit trail
+Backtesting harness
+Historical replay against stored captures + macro data
+Strategy selector
+Hybrid selector chooses strategy by regime — after individual strategies proven
+Prop-firm profiles
+Per-firm rule packs (FTMO, FundingPips, etc.) — config, not just sidebar labels
+Gate: Each strategy passes 30-day forward test before selector can route capital to it.
+
+Phase 7 — Production Hardening (4–8 weeks)
+Goal: Safe to expose beyond localhost.
+
+Work item	Deliverable
+Authentication
+Operator auth on all mutating + sensitive read APIs
+Secrets management
+Vault / cloud secrets; no defaults in prod
+CI/CD
+Lint, typecheck, test, security scan, staged deploy
+Test suite
+Risk core, execution gate, bridge protocol, migrations
+Observability
+Structured logs, metrics, tracing, alerting
+Rate limiting + WAF
+Edge protection on execution/autonomy APIs
+Security headers + TLS
+HSTS, CSP, narrow CORS
+HA design
+Externalized bridge queue/state; or explicit single-instance constraint
+Backup automation
+Scheduled dumps, tested PITR, RTO/RPO documented
+Immutable audit
+Append-only operator actions; retention policy
+Gate: Penetration test / security review pass; disaster recovery drill; staging environment mirrors prod.
+
+Phase 8 — Live / Prop Go-Live (gated, not scheduled)
+Goal: Funded or live accounts only after all prior gates.
+
+Preconditions (all required)
+Phase 5 forward test: 30+ days clean
+Phase 7 security review complete
+Operator auth + audited kill switch live
+CACSMS_ENABLE_LIVE_EXECUTION with dual-control approval
+Prop-firm profile matched to account rules
+Legal/compliance sign-off for jurisdiction
+Capital limits and daily loss caps enforced in code, not config alone
+Gate: Manual go-live checklist signed by operator + second reviewer. Start with minimum lot size and single pair.
+
+5. Recommended Operating Workflow (Day-to-Day)
+Once phases are underway, run the project on this weekly cycle:
+
+Monday    — Review terminal health, data freshness, open execution commands
+Tuesday   — Run macro sync verification (calendar, COT, rates)
+Wednesday — Visual pipeline QA (capture → detectors → vision scan)
+Thursday  — Risk/audit review (blocked trades, kill switch tests)
+Friday    — Forward-test report + incident log review
+Ongoing   — No new strategy until previous strategy passes its gate
+Branching strategy:
+
+main = production/demo-stable
+feature/phase-N-* = one phase workstream at a time
+No merging execution or autonomy changes without integration test on demo MT5
+6. Priority Order (If You Can Only Do 5 Things Next)
+Unify execution policy — one gate for all order paths, including autonomy
+Persist bridge state — terminal/command state survives restarts and scales
+Wire decision → execution — close the autonomous loop in sandbox only
+Add auth + kill switch API — before any network exposure beyond localhost
+Forward-test harness — 30-day demo proof before any live talk
+7. Bottom Line
+Cacsms Trader is a well-architected safety-first trading platform skeleton with substantial surface area already built. The hardest remaining work is not more UI or more detectors — it is:
+
+Closing the loop (decision → risk → execution → monitor → outcome)
+Making one runtime truthful (bridge state, services layer, registry honesty)
+Proving safety (forward testing, auth, audit, ops) before live capital
+The README’s 7-step build order is correct. The workflow above turns it into an executable production program with gates that prevent skipping straight to automation — which is exactly what a forex system should do.
+
+If you want to go deeper next, I can turn Phase 0–2 into a concrete sprint backlog with specific files, APIs, and acceptance tests per task.

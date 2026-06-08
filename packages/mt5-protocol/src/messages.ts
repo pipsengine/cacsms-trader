@@ -8,6 +8,10 @@ export type Mt5CommandType =
   | "move_to_breakeven"
   | "set_trailing_stop"
   | "emergency_close_all"
+  | "open_chart"
+  | "set_timeframe"
+  | "capture_chart"
+  | "close_chart"
   | "heartbeat";
 
 export interface Mt5CommandEnvelope<TPayload> {
