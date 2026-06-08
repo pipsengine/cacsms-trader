@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { appendEaCommEvent } from '@/lib/ea-communication-store';
 import { queryPostgres } from '@/lib/postgres';
-import { appendExecutionEvent, upsertExecutionCommand } from '@/lib/execution-bridge-store';
+import { appendExecutionEvent, reconcileBridgeExecutionState, upsertExecutionCommand } from '@/lib/execution-bridge-store';
+import { assertExecutionRiskGate } from '@/lib/execution-risk-gate';
 
 export const runtime = 'nodejs';
 
@@ -314,7 +315,7 @@ async function enqueueAutoTestOrder(input: {
   const createdAt = nowIso();
   const expiresAt = new Date(Date.now() + 60_000).toISOString();
   const commandId = `${input.terminalId}-AUTO-TEST-${randomUUID()}`;
-  const dedupeKey = `AUTO_TEST_RUNNER:${input.terminalId}:${input.symbol}:BUY:0.01:SANDBOX:DEMO`;
+  const dedupeKey = `AUTO_TEST_RUNNER:${input.runId}:${input.terminalId}:${input.symbol}:BUY:0.01:SANDBOX:DEMO`;
 
   const payload = {
     type: 'PLACE_ORDER',
@@ -330,6 +331,17 @@ async function enqueueAutoTestOrder(input: {
     tp: 0,
     comment: 'Cacsms Trader automatic sandbox test',
   } as Record<string, unknown>;
+
+  await assertExecutionRiskGate({
+    terminalId: input.terminalId,
+    commandId,
+    intentId: `AUTO_TEST:${input.runId}`,
+    requestedLots: 0.01,
+    stopLoss: 0,
+    takeProfit: 0,
+    sandboxMode: true,
+    environment: 'DEMO',
+  });
 
   const { command } = await upsertExecutionCommand({
     commandId,
@@ -452,6 +464,7 @@ export async function disableAutoExecutionTestRunner(reason: 'manual' | 'success
 }
 
 export async function tickAutoExecutionTestRunner(input: { bridgeOnline: boolean; terminals: BridgeTerminal[] }): Promise<void> {
+  await reconcileBridgeExecutionState().catch(() => null);
   const maxSpreadPoints = envNumber('CACSMS_AUTO_TEST_MAX_SPREAD_POINTS', 30);
   const delaySeconds = envNumber('CACSMS_AUTO_TEST_DELAY_SECONDS', 30);
   const heartbeatFreshMs = envNumber('CACSMS_AUTO_TEST_HEARTBEAT_FRESH_MS', 5000);
@@ -674,9 +687,9 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
 
   let state: AutoTestRunnerState = 'IDLE';
   if (executedForRun) state = 'DISABLED_AFTER_SUCCESS';
+  else if (lastLifecycle === 'EXECUTED') state = 'EXECUTED';
   else if (!enabled) state = 'IDLE';
   else if (lastLifecycle === 'ACKNOWLEDGED') state = 'ACKNOWLEDGED';
-  else if (lastLifecycle === 'EXECUTED') state = 'EXECUTED';
   else if (lastLifecycle === 'FAILED' || lastLifecycle === 'TIMEOUT' || lastLifecycle === 'CANCELLED') state = 'FAILED';
   else if (lastCommand) state = 'DISPATCHING';
   else if (!bridgeOnline || !terminal || terminal.status !== 'connected') state = 'WAITING_FOR_TERMINAL';

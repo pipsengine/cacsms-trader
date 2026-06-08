@@ -331,7 +331,11 @@ export async function recordAck(input: AckEventInput): Promise<void> {
             spread_points = COALESCE($9, spread_points),
             acknowledged_at = $10::timestamptz,
             last_updated_at = now(),
-            last_error = CASE WHEN $2 IN ('FAILED','TIMEOUT') THEN COALESCE($4, last_error) ELSE last_error END
+            last_error = CASE
+              WHEN $2 = 'EXECUTED' THEN NULL
+              WHEN $2 IN ('FAILED','TIMEOUT') THEN COALESCE($4, last_error)
+              ELSE last_error
+            END
         WHERE command_id = $1
       `,
       [
@@ -392,6 +396,8 @@ export async function markTimeouts(now = new Date()): Promise<number> {
               last_updated_at = now()
           WHERE lifecycle_state IN ('QUEUED','ROUTING','SENT')
             AND expires_at < $1::timestamptz
+            AND ticket IS NULL
+            AND COALESCE(ack_status, '') NOT IN ('filled', 'accepted')
           RETURNING command_id, terminal_id
         `,
         [now.toISOString()],
@@ -409,6 +415,8 @@ export async function markTimeouts(now = new Date()): Promise<number> {
           AND sent_at IS NOT NULL
           AND sent_at < (now() - interval '5 seconds')
           AND expires_at > now()
+          AND ticket IS NULL
+          AND COALESCE(ack_status, '') NOT IN ('filled', 'accepted')
         RETURNING command_id, terminal_id
       `,
     );
@@ -425,6 +433,7 @@ export async function markTimeouts(now = new Date()): Promise<number> {
           AND acknowledged_at IS NOT NULL
           AND acknowledged_at < (now() - interval '15 seconds')
           AND expires_at > now()
+          AND ticket IS NULL
         RETURNING command_id, terminal_id
       `,
     );
@@ -439,6 +448,8 @@ export async function markTimeouts(now = new Date()): Promise<number> {
         WHERE lifecycle_state IN ('QUEUED','ROUTING','SENT','ACKNOWLEDGED')
           AND created_at < (now() - interval '20 seconds')
           AND expires_at > now()
+          AND ticket IS NULL
+          AND COALESCE(ack_status, '') NOT IN ('filled', 'accepted')
         RETURNING command_id, terminal_id
       `,
     );
@@ -495,6 +506,75 @@ export async function markTimeouts(now = new Date()): Promise<number> {
   );
 
   return result.rows.length;
+}
+
+function bridgeUrl(): string {
+  return process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787';
+}
+
+function bridgeSecretHeader(): Record<string, string> {
+  const secret = process.env.MT5_BRIDGE_SHARED_SECRET ?? '';
+  return secret ? { 'X-Cacsms-Secret': secret } : {};
+}
+
+export async function reconcileBridgeExecutionState(): Promise<number> {
+  let reconciled = 0;
+  try {
+    const response = await fetch(`${bridgeUrl()}/commands`, {
+      cache: 'no-store',
+      headers: bridgeSecretHeader(),
+    });
+    if (!response.ok) return 0;
+    const payload = await response.json().catch(() => ({} as Record<string, unknown>));
+    const commands = Array.isArray((payload as { commands?: unknown[] }).commands)
+      ? (payload as { commands: unknown[] }).commands
+      : [];
+
+    for (const raw of commands) {
+      const command = raw as Record<string, unknown>;
+      const commandId = String(command.commandId ?? '').trim();
+      const terminalId = String(command.terminalId ?? '').trim();
+      if (!commandId || !terminalId) continue;
+
+      const dispatchedAt = String(command.leasedAt ?? command.lastDispatchedAt ?? '').trim();
+      if (dispatchedAt) {
+        await recordDispatch({
+          terminalId,
+          dispatchedAt,
+          command: {
+            commandId,
+            terminalId,
+            type: String(command.type ?? ''),
+            payload: (command.payload ?? {}) as Record<string, unknown>,
+            createdAt: String(command.createdAt ?? dispatchedAt),
+            expiresAt: String(command.expiresAt ?? dispatchedAt),
+            attempt: Number(command.attempt ?? 1),
+            leaseExpiresAt: String(command.leasedUntil ?? ''),
+          },
+        }).catch(() => null);
+        reconciled += 1;
+      }
+
+      const ack = command.ack as Record<string, unknown> | null | undefined;
+      if (ack && typeof ack === 'object') {
+        await recordAck({
+          commandId,
+          terminalId,
+          status: String(ack.status ?? ''),
+          ticket: ack.ticket != null ? String(ack.ticket) : undefined,
+          brokerMessage: ack.brokerMessage != null ? String(ack.brokerMessage) : undefined,
+          executedPrice: ack.executedPrice != null ? Number(ack.executedPrice) : null,
+          executedVolumeLots: ack.executedVolumeLots != null ? Number(ack.executedVolumeLots) : null,
+          latencyMs: ack.latencyMs != null ? Number(ack.latencyMs) : null,
+          receivedAt: String(ack.receivedAt ?? new Date().toISOString()),
+        }).catch(() => null);
+        reconciled += 1;
+      }
+    }
+  } catch {
+    return reconciled;
+  }
+  return reconciled;
 }
 
 export async function listExecutionCommands(filter: {

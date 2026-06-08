@@ -1,6 +1,7 @@
 import { approvePendingRegistrationsFromHeartbeats, listTerminalRegistrations } from '@/lib/mt5-registration-store';
 import { listTerminalSnapshots, purgeTestTerminals, recordTerminalHeartbeat } from '@/lib/mt5-heartbeat-store';
 import { tickAutoExecutionTestRunner } from '@/lib/auto-execution-test-runner';
+import { reconcileBridgeExecutionState } from '@/lib/execution-bridge-store';
 
 export const runtime = 'nodejs';
 
@@ -43,6 +44,7 @@ export async function GET(): Promise<Response> {
   }
 
   try {
+    await reconcileBridgeExecutionState().catch(() => null);
     const response = await fetch(`${bridgeUrl()}/terminal-operations`, { cache: 'no-store' });
     const payload = await response.json();
     const bridgeTerminals = (Array.isArray(payload?.terminals) ? payload.terminals : []).filter(

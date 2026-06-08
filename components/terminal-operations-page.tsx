@@ -5182,8 +5182,9 @@ function Mt5ExecutionBridge(props: { terminals: any[]; commands: any[]; recentAc
   }, []);
 
   const mergedCommands = useMemo(() => mergeExecutionCommandSources(props.commands, dbState.commands), [props.commands, dbState.commands]);
-  const commandRows = useMemo(() => mergedCommands.map((command) => enrichExecutionCommand(command, props.terminals, props.recentAcks)), [mergedCommands, props.recentAcks, props.terminals]);
-  const ackRows = useMemo(() => mergeExecutionAckSources(props.recentAcks, dbState.commands).map((ack) => enrichExecutionAck(ack)), [props.recentAcks, dbState.commands]);
+  const mergedAcks = useMemo(() => mergeExecutionAckSources(props.recentAcks, dbState.commands), [props.recentAcks, dbState.commands]);
+  const commandRows = useMemo(() => mergedCommands.map((command) => enrichExecutionCommand(command, props.terminals, mergedAcks)), [mergedCommands, mergedAcks, props.terminals]);
+  const ackRows = useMemo(() => mergedAcks.map((ack) => enrichExecutionAck(ack)), [mergedAcks]);
   const bridgeSummary = summarizeExecutionBridge(commandRows, ackRows, props.commandSummary, connected.length);
   const diagnostics = buildExecutionDiagnostics(props.terminals, commandRows, ackRows);
   const lifecycle = buildOrderLifecycle(commandRows, ackRows);
@@ -7047,6 +7048,40 @@ function mapAckStatusToLifecycle(status: unknown): CanonicalExecutionLifecycleSt
   return 'ACKNOWLEDGED';
 }
 
+const STALE_FAILURE_LIFECYCLE = new Set<CanonicalExecutionLifecycleState>(['FAILED', 'TIMEOUT', 'CANCELLED']);
+
+function executionAckEvidence(command: any, ack?: any) {
+  const ackStatus = String(ack?.status ?? command?.ackStatus ?? command?.ack_status ?? command?.ack?.status ?? '').toLowerCase();
+  const ticket = String(ack?.ticket ?? command?.ticket ?? command?.ack?.ticket ?? '').trim();
+  const bridgeStatus = String(command?.status ?? '').toLowerCase();
+  return {
+    ackStatus,
+    ticket,
+    bridgeAcknowledged: bridgeStatus === 'acknowledged',
+    hasSuccessfulExecution: ackStatus === 'filled' || ackStatus === 'executed' || Boolean(ticket),
+    hasPositiveAck: ackStatus === 'filled' || ackStatus === 'executed' || ackStatus === 'accepted' || ackStatus === 'acknowledged' || Boolean(ticket),
+  };
+}
+
+function resolveExecutionLifecycle(command: any, ack?: any): CanonicalExecutionLifecycleState {
+  const evidence = executionAckEvidence(command, ack);
+  if (evidence.hasSuccessfulExecution) return 'EXECUTED';
+  if (evidence.ackStatus === 'failed') return 'FAILED';
+  if (evidence.ackStatus === 'rejected') return 'CANCELLED';
+  if (evidence.hasPositiveAck) return mapAckStatusToLifecycle(evidence.ackStatus);
+
+  const rawLifecycle = command?.lifecycleState ?? command?.lifecycle_state ?? null;
+  if (isCanonicalLifecycleState(rawLifecycle)) {
+    if (STALE_FAILURE_LIFECYCLE.has(rawLifecycle) && evidence.bridgeAcknowledged) {
+      return 'ACKNOWLEDGED';
+    }
+    return rawLifecycle;
+  }
+
+  if (evidence.bridgeAcknowledged) return 'ACKNOWLEDGED';
+  return mapBridgeStatusToLifecycle(command?.status);
+}
+
 function mergeExecutionCommandSources(bridgeCommands: any[], dbCommands: any[]): any[] {
   const byId = new Map<string, any>();
 
@@ -7095,15 +7130,23 @@ function mergeExecutionCommandSources(bridgeCommands: any[], dbCommands: any[]):
       continue;
     }
 
-    byId.set(commandId, {
-      ...existing,
+    const bridgeAck = existing.ack ?? null;
+    const merged = {
       ...mapped,
-      ack: existing.ack ?? null,
-      leasedAt: existing.leasedAt ?? existing.lastDispatchedAt ?? null,
+      ...existing,
+      ack: bridgeAck,
+      ackStatus: bridgeAck?.status ?? mapped.ackStatus ?? existing.ackStatus ?? null,
+      ticket: bridgeAck?.ticket || mapped.ticket || existing.ticket || null,
+      brokerMessage: bridgeAck?.brokerMessage ?? mapped.brokerMessage ?? existing.brokerMessage ?? null,
+      executedPrice: bridgeAck?.executedPrice ?? mapped.executedPrice ?? existing.executedPrice ?? null,
+      executedVolumeLots: bridgeAck?.executedVolumeLots ?? mapped.executedVolumeLots ?? existing.executedVolumeLots ?? null,
+      leasedAt: existing.leasedAt ?? existing.lastDispatchedAt ?? (mapped as any).leasedAt ?? null,
       leasedUntil: existing.leasedUntil ?? null,
       lastDispatchedAt: existing.lastDispatchedAt ?? null,
-      lastAckAt: existing.lastAckAt ?? null,
-    });
+      lastAckAt: existing.lastAckAt ?? bridgeAck?.receivedAt ?? null,
+    };
+    merged.lifecycleState = resolveExecutionLifecycle(merged, bridgeAck);
+    byId.set(commandId, merged);
   }
 
   return Array.from(byId.values()).sort((a, b) => Date.parse(String(b.createdAt ?? '')) - Date.parse(String(a.createdAt ?? '')));
@@ -7198,16 +7241,18 @@ function enrichExecutionCommand(command: any, terminals: any[], acknowledgements
         : 0;
 
   const duplicateRisk = command.commandId && acknowledgements.filter((item) => item.commandId === command.commandId).length > 1;
+  const evidence = executionAckEvidence(command, ack);
   const expiresAt = command.expiresAt ? Date.parse(String(command.expiresAt)) : NaN;
-  const expired = command.status === 'expired' || (Number.isFinite(expiresAt) && expiresAt < now && !['acknowledged', 'cancelled', 'canceled'].includes(String(command.status ?? '').toLowerCase()));
-  const rawLifecycle = command.lifecycleState ?? command.lifecycle_state ?? null;
-  const ackStatus = ack?.status ?? command.ackStatus ?? command.ack_status ?? null;
-  const baseLifecycle = isCanonicalLifecycleState(rawLifecycle)
-    ? rawLifecycle
-    : ackStatus
-      ? mapAckStatusToLifecycle(ackStatus)
-      : mapBridgeStatusToLifecycle(command.status);
-  const lifecycleState: CanonicalExecutionLifecycleState = expired && ['QUEUED', 'ROUTING', 'SENT'].includes(baseLifecycle) ? 'TIMEOUT' : baseLifecycle;
+  const expired =
+    !evidence.hasPositiveAck
+    && (
+      command.status === 'expired'
+      || (Number.isFinite(expiresAt) && expiresAt < now && !['acknowledged', 'cancelled', 'canceled'].includes(String(command.status ?? '').toLowerCase()))
+    );
+  const lifecycleState: CanonicalExecutionLifecycleState =
+    expired && ['QUEUED', 'ROUTING', 'SENT'].includes(resolveExecutionLifecycle(command, ack))
+      ? 'TIMEOUT'
+      : resolveExecutionLifecycle(command, ack);
   const attempt = Number(command.attemptCount ?? command.attempt ?? 0);
 
   const integrityScore = clampScore(
@@ -7331,14 +7376,23 @@ function buildExecutionLogs(commands: any[], acknowledgements: any[]) {
 
 function buildExecutionIntegrity(commands: any[], acknowledgements: any[]) {
   const duplicate = commands.filter((command) => command.duplicateRisk).length;
-  const expired = commands.filter((command) => command.expired).length;
-  const rejected = acknowledgements.filter((ack) => ['FAILED', 'CANCELLED', 'TIMEOUT'].includes(String(ack.lifecycleState))).length;
-  const unmatched = commands.filter((command) => ['ACKNOWLEDGED', 'EXECUTED'].includes(command.lifecycleState) && !acknowledgements.some((ack) => ack.commandId === command.commandId)).length;
+  const expired = commands.filter((command) => command.expired && !['EXECUTED', 'ACKNOWLEDGED'].includes(String(command.lifecycleState))).length;
+  const rejected = acknowledgements.filter((ack) => {
+    if (['EXECUTED', 'ACKNOWLEDGED'].includes(String(ack.lifecycleState))) return false;
+    if (String(ack.status ?? '').toLowerCase() === 'filled' || String(ack.ticket ?? '').trim()) return false;
+    return ['FAILED', 'CANCELLED', 'TIMEOUT'].includes(String(ack.lifecycleState));
+  }).length;
+  const unmatched = commands.filter((command) => {
+    if (!['ACKNOWLEDGED', 'EXECUTED'].includes(command.lifecycleState)) return false;
+    if (String(command.ticket ?? '').trim()) return false;
+    return !acknowledgements.some((ack) => ack.commandId === command.commandId);
+  }).length;
+  const failureCount = expired + rejected;
   return [
     { label: 'Duplicate guard', value: duplicate, state: duplicate ? 'SENT' : 'ACKNOWLEDGED', detail: 'Prevents repeated command IDs and duplicate order intent signatures.' },
     { label: 'Order validation', value: commands.filter((command) => command.integrityScore >= 80).length, state: commands.some((command) => command.integrityScore < 70) ? 'SENT' : 'ACKNOWLEDGED', detail: 'Validates symbol, side, volume, SL/TP, expiry, and terminal state.' },
     { label: 'Order synchronization', value: unmatched, state: unmatched ? 'SENT' : 'ACKNOWLEDGED', detail: 'Ensures acked commands reconcile to broker ticket or terminal order state.' },
-    { label: 'Execution failures', value: expired + rejected, state: expired + rejected ? 'FAILED' : 'ACKNOWLEDGED', detail: 'Timeouts, rejected broker responses, and failed acknowledgements.' },
+    { label: 'Execution failures', value: failureCount, state: failureCount ? 'FAILED' : 'ACKNOWLEDGED', detail: 'Timeouts, rejected broker responses, and failed acknowledgements.' },
   ];
 }
 

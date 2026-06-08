@@ -14,7 +14,11 @@
     "docker:up": "npm run build && docker compose up --build -d",
     "docker:down": "docker compose down",
     "docker:logs": "docker compose logs -f app",
-    "docker:migrate": "node scripts/apply-all-migrations.mjs"
+    "docker:migrate": "node scripts/apply-all-migrations.mjs",
+    "cot:sync": "npx tsx --tsconfig tsconfig.json scripts/cot-sync-host.ts last-2-years",
+    "cot:sync:latest": "npx tsx --tsconfig tsconfig.json scripts/cot-sync-host.ts latest",
+    "calendar:discover": "npx tsx --tsconfig tsconfig.json scripts/economic-calendar-discover-host.ts discover",
+    "calendar:refresh": "npx tsx --tsconfig tsconfig.json scripts/economic-calendar-discover-host.ts refresh"
   },
   "dependencies": {
     "@base-ui/react": "^1.5.0",

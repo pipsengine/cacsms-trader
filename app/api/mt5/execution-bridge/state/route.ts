@@ -1,6 +1,6 @@
 export const runtime = 'nodejs';
 
-import { listExecutionCommands, listExecutionEvents, markTimeouts } from '@/lib/execution-bridge-store';
+import { listExecutionCommands, listExecutionEvents, markTimeouts, reconcileBridgeExecutionState } from '@/lib/execution-bridge-store';
 import { assertExecutionBridgeToolAccess } from '@/lib/mt5-dev-tool-access';
 
 function bridgeUrl(): string {
@@ -10,6 +10,7 @@ function bridgeUrl(): string {
 export async function GET(request: Request): Promise<Response> {
   try {
     assertExecutionBridgeToolAccess(request);
+    await reconcileBridgeExecutionState().catch(() => null);
     await markTimeouts();
 
     const [commands, events, bridgeHealth, bridgeOps] = await Promise.all([

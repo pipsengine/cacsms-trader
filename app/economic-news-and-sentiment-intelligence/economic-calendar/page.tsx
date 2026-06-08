@@ -255,7 +255,7 @@ function EconomicCalendarIntelligencePage() {
       if (source !== 'All' && event.sourceName !== source) return false;
       if (bias !== 'All' && event.bias !== bias) return false;
       if (restrictionOnly && !event.tradeRestrictionRequired) return false;
-      if (!matchesDateRange(event.utcEventTime ?? event.localEventTime, dateRange)) return false;
+      if (!matchesDateRange(resolveEventDateTime(event), dateRange)) return false;
       return true;
     });
   }, [bias, country, currency, dashboard.events, dateRange, impact, query, restrictionOnly, source, status]);
@@ -427,7 +427,15 @@ function EconomicCalendarIntelligencePage() {
               </div>
               <CardContent className="p-0">
                 <TabsContent value="table" className="m-0">
-                  <EventTable events={filteredEvents} loading={loading} selectedId={selectedEvent?.id ?? ''} onSelect={setSelectedEventId} onCaptureActual={captureActual} />
+                  <EventTable
+                    events={filteredEvents}
+                    totalEvents={dashboard.events.length}
+                    filtersActive={dateRange !== 'All' || currency !== 'All' || country !== 'All' || impact !== 'All' || status !== 'All' || source !== 'All' || bias !== 'All' || restrictionOnly || Boolean(query.trim())}
+                    loading={loading}
+                    selectedId={selectedEvent?.id ?? ''}
+                    onSelect={setSelectedEventId}
+                    onCaptureActual={captureActual}
+                  />
                 </TabsContent>
                 <TabsContent value="timeline" className="m-0 p-4">
                   <TimelineView events={filteredEvents} onSelect={setSelectedEventId} />
@@ -468,7 +476,15 @@ function EconomicCalendarIntelligencePage() {
   );
 }
 
-function EventTable(props: { events: EconomicEvent[]; loading: boolean; selectedId: string; onSelect: (id: string) => void; onCaptureActual: (id: string) => Promise<void> }) {
+function EventTable(props: {
+  events: EconomicEvent[];
+  totalEvents: number;
+  filtersActive: boolean;
+  loading: boolean;
+  selectedId: string;
+  onSelect: (id: string) => void;
+  onCaptureActual: (id: string) => Promise<void>;
+}) {
   return (
     <div className="w-full overflow-x-auto">
       <Table>
@@ -483,7 +499,11 @@ function EventTable(props: { events: EconomicEvent[]; loading: boolean; selected
         {props.loading || props.events.length === 0 ? (
           <TableRow className="hover:bg-transparent">
             <TableCell colSpan={18} className="h-36 text-center text-sm text-slate-600">
-              {props.loading ? 'Collecting and validating economic calendar data...' : 'No economic events have been collected yet. Start by running Discover Upcoming Events to allow Cacsms Trader to build its internal calendar from enabled free sources.'}
+              {props.loading
+                ? 'Collecting and validating economic calendar data...'
+                : props.totalEvents > 0 && props.filtersActive
+                  ? `No events match the current filters (${props.totalEvents} collected). Try "All" for the date range or run Refresh Calendar for the latest week.`
+                  : 'No economic events have been collected yet. Start by running Discover Upcoming Events to allow Cacsms Trader to build its internal calendar from enabled free sources.'}
             </TableCell>
           </TableRow>
         ) : props.events.map((event) => (
@@ -946,6 +966,19 @@ function formatDateTime(value: string | null): string {
   return date.toLocaleString('en-US', { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+function resolveEventDateTime(event: EconomicEvent): string | null {
+  return event.utcEventTime ?? event.localEventTime ?? (event.eventDate ? `${String(event.eventDate).slice(0, 10)}T12:00:00` : null);
+}
+
+function calendarWeekBounds(reference: Date, weekOffset: number): { start: number; end: number } {
+  const day = reference.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  const start = new Date(reference.getFullYear(), reference.getMonth(), reference.getDate() + mondayOffset + weekOffset * 7);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  return { start: start.getTime(), end: end.getTime() };
+}
+
 function matchesDateRange(value: string | null, range: string): boolean {
   if (range === 'All') return true;
   if (!value) return false;
@@ -957,8 +990,14 @@ function matchesDateRange(value: string | null, range: string): boolean {
   const time = date.getTime();
   if (range === 'Today') return time >= startToday && time < startToday + dayMs;
   if (range === 'Tomorrow') return time >= startToday + dayMs && time < startToday + dayMs * 2;
-  if (range === 'This Week') return time >= startToday && time < startToday + dayMs * 7;
-  if (range === 'Next Week') return time >= startToday + dayMs * 7 && time < startToday + dayMs * 14;
+  if (range === 'This Week') {
+    const { start, end } = calendarWeekBounds(now, 0);
+    return time >= start && time < end;
+  }
+  if (range === 'Next Week') {
+    const { start, end } = calendarWeekBounds(now, 1);
+    return time >= start && time < end;
+  }
   return true;
 }
 

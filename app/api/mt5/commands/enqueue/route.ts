@@ -2,6 +2,11 @@ export const runtime = 'nodejs';
 
 import { stableDedupeKey, upsertExecutionCommand } from '@/lib/execution-bridge-store';
 import { appendEaCommEvent } from '@/lib/ea-communication-store';
+import {
+  assertExecutionRiskGate,
+  ExecutionRiskBlockedError,
+  isExecutionRiskGatedCommandType,
+} from '@/lib/execution-risk-gate';
 
 function bridgeUrl(): string {
   return process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787';
@@ -32,15 +37,34 @@ export async function POST(request: Request): Promise<Response> {
               expiresAt: String(payload.expiresAt ?? ''),
             });
 
+      const commandType = String(payload.type ?? '');
+      const sandboxMode = Boolean(payload.sandboxMode ?? payload.sandbox ?? true);
+      const environment = String(payload.environment ?? 'DEMO');
+      const innerPayload = (payload.payload ?? {}) as Record<string, unknown>;
+
+      if (isExecutionRiskGatedCommandType(commandType)) {
+        const volume = Number(innerPayload.volume ?? innerPayload.volumeLots ?? NaN);
+        await assertExecutionRiskGate({
+          terminalId: String(payload.terminalId ?? ''),
+          commandId: String(payload.commandId ?? '').trim() || undefined,
+          intentId: String(innerPayload.intentId ?? '').trim() || undefined,
+          requestedLots: Number.isFinite(volume) ? volume : 0,
+          stopLoss: Number(innerPayload.sl ?? innerPayload.stopLoss ?? 0),
+          takeProfit: Number(innerPayload.tp ?? innerPayload.takeProfit ?? 0),
+          sandboxMode,
+          environment,
+        });
+      }
+
       await upsertExecutionCommand({
         commandId: String(payload.commandId ?? ''),
         terminalId: String(payload.terminalId ?? ''),
-        type: String(payload.type ?? ''),
-        payload: (payload.payload ?? {}) as Record<string, unknown>,
+        type: commandType,
+        payload: innerPayload,
         createdAt: String(payload.createdAt ?? new Date().toISOString()),
         expiresAt: String(payload.expiresAt ?? new Date(Date.now() + 60_000).toISOString()),
-        environment: String(payload.environment ?? 'DEMO') as any,
-        sandboxMode: Boolean(payload.sandboxMode ?? payload.sandbox ?? true),
+        environment: environment as any,
+        sandboxMode,
         dedupeKey,
         maxAttempts: Number(payload.maxAttempts ?? 3),
       });
@@ -54,7 +78,35 @@ export async function POST(request: Request): Promise<Response> {
         message: 'Execution command enqueued.',
         payload: { commandId: String(payload.commandId ?? ''), type: String(payload.type ?? ''), dedupeKey, environment: String(payload.environment ?? 'DEMO') },
       }).catch(() => null);
-    } catch {
+    } catch (error) {
+      if (error instanceof ExecutionRiskBlockedError) {
+        await appendEaCommEvent({
+          terminalId: String((parsed as any)?.terminalId ?? '') || null,
+          direction: 'OUTBOUND',
+          channel: 'ERROR',
+          eventType: 'RISK_BLOCKED',
+          severity: 'WARNING',
+          message: error.message,
+          payload: {
+            code: error.decision.code,
+            remainingDailyLossAmount: error.decision.remainingDailyLossAmount,
+          },
+        }).catch(() => null);
+        return Response.json(
+          {
+            ok: false,
+            error: error.message,
+            risk: {
+              allowed: false,
+              code: error.decision.code,
+              message: error.decision.message,
+              remainingDailyLossAmount: error.decision.remainingDailyLossAmount,
+              accountNumber: error.accountNumber,
+            },
+          },
+          { status: 403, headers: { 'Cache-Control': 'no-store' } },
+        );
+      }
       // ignore persistence errors; enqueue still forwards to bridge
     }
   } else {

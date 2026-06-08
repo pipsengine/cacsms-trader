@@ -388,11 +388,18 @@ export default function CotInstitutionalPositioningPage() {
 
   const onAction = async (path: string, label: string) => {
     setLoading((s) => ({ ...s, action: true }));
+    showToast('cyan', `${label} started. CFTC downloads can take 1–3 minutes…`);
     try {
       const response = await fetch(path, { method: 'POST' });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload?.error ?? `${label} failed with HTTP ${response.status}`);
-      showToast(payload?.ok ? 'emerald' : 'amber', payload?.message ?? `${label} requested.`);
+      if (!response.ok) {
+        const detail = String(payload?.error ?? '');
+        if (detail.toLowerCase().includes('fetch failed')) {
+          throw new Error(`${label} could not reach CFTC from the app container. Run "npm run cot:sync" on the host (Postgres :5433), then refresh.`);
+        }
+        throw new Error(detail || `${label} failed with HTTP ${response.status}`);
+      }
+      showToast(payload?.ok ? 'emerald' : 'amber', payload?.message ?? `${label} completed.`);
       await refreshSummary();
       await refreshPositions();
       await refreshLogs();
@@ -476,6 +483,13 @@ export default function CotInstitutionalPositioningPage() {
             {toast ? (
               <div className={cn('rounded-lg border p-3 text-sm', toneClass(toast.tone))}>
                 {toast.message}
+              </div>
+            ) : null}
+
+            {(summary?.summary.totalRecordsSynced ?? 0) === 0 ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                No COT data in Postgres yet. Click <strong>Sync Last 2 Years</strong>, or from the project root run{' '}
+                <code className="rounded bg-white px-1 py-0.5 font-mono text-xs">npm run cot:sync</code> (host network + Postgres on port 5433).
               </div>
             ) : null}
 

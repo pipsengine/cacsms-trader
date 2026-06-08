@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { assertEconomicCalendarAccess } from '@/lib/economic-calendar-access';
 import { queryPostgres } from '@/lib/postgres';
 import { ensureEconomicCalendarWorkerStarted } from '@/services/economic-data-service/src/economic-calendar-intelligence';
 
@@ -26,24 +27,6 @@ type InflationEventRow = {
   source_url: string | null;
   updated_at: string;
 };
-
-function assertLocalOnly(request: Request) {
-  const env = String(process.env.CACSMS_ENV ?? 'development').toLowerCase();
-  if (env !== 'development' && String(process.env.CACSMS_ENABLE_ECONOMIC_CALENDAR_TOOL ?? '').toLowerCase() !== 'true') {
-    throw new Error('Economic Calendar requires local machine access.');
-  }
-
-  const url = new URL(request.url);
-  const host = url.hostname;
-  if (host === 'localhost' || host === '127.0.0.1') return;
-
-  const forwardedFor = request.headers.get('x-forwarded-for') ?? '';
-  const forwardedHost = request.headers.get('x-forwarded-host') ?? '';
-  const forwardedProto = request.headers.get('x-forwarded-proto') ?? '';
-  if (forwardedFor || forwardedHost || forwardedProto) {
-    throw new Error('Economic Calendar requires local machine access.');
-  }
-}
 
 function isoDate(value: Date): string {
   return value.toISOString().slice(0, 10);
@@ -97,7 +80,7 @@ function isUpcoming(row: InflationEventRow): boolean {
 
 export async function GET(request: Request): Promise<Response> {
   try {
-    assertLocalOnly(request);
+    assertEconomicCalendarAccess(request);
     ensureEconomicCalendarWorkerStarted();
 
     const url = new URL(request.url);

@@ -1,9 +1,11 @@
+import { reconcileBridgeExecutionState } from '@/lib/execution-bridge-store';
 import { fetchBridgeTerminalOperations, getAutoExecutionTestStatus, tickAutoExecutionTestRunner } from '@/lib/auto-execution-test-runner';
 
 export const runtime = 'nodejs';
 
 export async function GET(): Promise<Response> {
   try {
+    await reconcileBridgeExecutionState().catch(() => null);
     const bridge = await fetchBridgeTerminalOperations();
     await tickAutoExecutionTestRunner(bridge).catch(() => null);
     const status = await getAutoExecutionTestStatus(bridge);

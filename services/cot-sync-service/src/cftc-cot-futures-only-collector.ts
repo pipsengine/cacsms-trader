@@ -622,24 +622,8 @@ export class CotHistoricalSyncService {
                 THEN EXCLUDED.exchange
                 ELSE cot_institutional_positions.exchange
               END,
-              long_positions = CASE
-                WHEN cot_institutional_positions.market_name IS NULL
-                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
-                  OR cot_institutional_positions.market_name LIKE '%/%'
-                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
-                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
-                THEN EXCLUDED.long_positions
-                ELSE cot_institutional_positions.long_positions
-              END,
-              short_positions = CASE
-                WHEN cot_institutional_positions.market_name IS NULL
-                  OR cot_institutional_positions.market_name ILIKE '%XRATE%'
-                  OR cot_institutional_positions.market_name LIKE '%/%'
-                  OR cot_institutional_positions.raw_contract_market_name ILIKE '%XRATE%'
-                  OR cot_institutional_positions.raw_contract_market_name LIKE '%/%'
-                THEN EXCLUDED.short_positions
-                ELSE cot_institutional_positions.short_positions
-              END,
+              long_positions = EXCLUDED.long_positions,
+              short_positions = EXCLUDED.short_positions,
               source_url = CASE
                 WHEN cot_institutional_positions.market_name IS NULL
                   OR cot_institutional_positions.market_name ILIKE '%XRATE%'
@@ -830,16 +814,42 @@ export class CotWeeklySchedulerService {
     }
   }
 
+  private async latestReportAgeDays(): Promise<number | null> {
+    try {
+      const result = await queryPostgres(
+        `
+          SELECT MAX(report_date::date)::text AS latest_date
+          FROM cot_institutional_positions
+          WHERE report_type = 'FUTURES_ONLY'
+        `,
+      );
+      const latest = String((result.rows[0] as { latest_date?: string })?.latest_date ?? '').trim();
+      if (!latest) return null;
+      const ageMs = Date.now() - Date.parse(`${latest}T00:00:00Z`);
+      if (!Number.isFinite(ageMs)) return null;
+      return Math.floor(ageMs / (24 * 60 * 60 * 1000));
+    } catch {
+      return null;
+    }
+  }
+
   async tick(): Promise<void> {
     const now = lagosNowUtcShifted();
-    if (!shouldRunSaturdayMidnightLagos(now)) return;
+    const reportAgeDays = await this.latestReportAgeDays();
+    const stale = reportAgeDays == null || reportAgeDays >= 8;
+    const scheduledWindow = shouldRunSaturdayMidnightLagos(now);
+    if (!scheduledWindow && !stale) return;
+
     const jobType = 'cot_weekly_scheduler';
     const dateKey = lagosDateKey(now);
     if (await this.alreadyRanToday(jobType, dateKey)) return;
 
-    await this.logs.append({ jobType, status: 'info', message: `Weekly scheduler firing for ${dateKey} (Africa/Lagos).`, details: { dateKey, firedAt: nowIso() } });
+    const reason = scheduledWindow ? `weekly window ${dateKey}` : `stale data (${reportAgeDays ?? 'none'} days old)`;
+    await this.logs.append({ jobType, status: 'info', message: `Scheduler firing (${reason}).`, details: { dateKey, firedAt: nowIso(), reportAgeDays } });
     try {
-      const result = await this.collector.syncLatest();
+      const result = reportAgeDays == null
+        ? await this.collector.syncLast2Years()
+        : await this.collector.syncLatest();
       await this.logs.append({ jobType, status: 'success', message: result.message, details: result });
     } catch (error) {
       await this.logs.append({ jobType, status: 'error', message: error instanceof Error ? error.message : 'Scheduled sync failed.' });

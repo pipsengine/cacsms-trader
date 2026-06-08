@@ -2,6 +2,11 @@ export const runtime = 'nodejs';
 
 import crypto from 'node:crypto';
 import { upsertExecutionCommand } from '@/lib/execution-bridge-store';
+import {
+  assertExecutionRiskGate,
+  ExecutionRiskBlockedError,
+  isExecutionRiskGatedCommandType,
+} from '@/lib/execution-risk-gate';
 import { assertExecutionBridgeToolAccess } from '@/lib/mt5-dev-tool-access';
 import { queryPostgres } from '@/lib/postgres';
 
@@ -31,6 +36,23 @@ export async function POST(request: Request): Promise<Response> {
 
     const payload = (row.payload ?? {}) as Record<string, unknown>;
     const enrichedPayload = { ...payload, retryOfCommandId: commandId };
+    const commandType = String(row.type ?? '');
+    const sandboxMode = Boolean(row.sandbox_mode);
+    const environment = String(row.environment ?? 'DEMO');
+
+    if (isExecutionRiskGatedCommandType(commandType)) {
+      const volume = Number(payload.volume ?? payload.volumeLots ?? NaN);
+      await assertExecutionRiskGate({
+        terminalId: String(row.terminal_id),
+        commandId: newCommandId,
+        intentId: String(payload.intentId ?? '').trim() || undefined,
+        requestedLots: Number.isFinite(volume) ? volume : 0,
+        stopLoss: Number(payload.sl ?? payload.stopLoss ?? 0),
+        takeProfit: Number(payload.tp ?? payload.takeProfit ?? 0),
+        sandboxMode,
+        environment,
+      });
+    }
 
     const { command } = await upsertExecutionCommand({
       commandId: newCommandId,
@@ -71,6 +93,22 @@ export async function POST(request: Request): Promise<Response> {
     const bridgePayload = await forward.json().catch(() => ({}));
     return Response.json({ ok: true, command, bridge: bridgePayload }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
+    if (error instanceof ExecutionRiskBlockedError) {
+      return Response.json(
+        {
+          ok: false,
+          error: error.message,
+          risk: {
+            allowed: false,
+            code: error.decision.code,
+            message: error.decision.message,
+            remainingDailyLossAmount: error.decision.remainingDailyLossAmount,
+            accountNumber: error.accountNumber,
+          },
+        },
+        { status: 403, headers: { 'Cache-Control': 'no-store' } },
+      );
+    }
     return Response.json(
       { ok: false, error: error instanceof Error ? error.message : 'Unable to retry command.' },
       { status: 400, headers: { 'Cache-Control': 'no-store' } },

@@ -1,6 +1,11 @@
 export const runtime = 'nodejs';
 
 import { appendExecutionEvent, stableDedupeKey, upsertExecutionCommand } from '@/lib/execution-bridge-store';
+import {
+  assertExecutionRiskGate,
+  ExecutionRiskBlockedError,
+  isExecutionRiskGatedCommandType,
+} from '@/lib/execution-risk-gate';
 import { assertExecutionBridgeToolAccess } from '@/lib/mt5-dev-tool-access';
 import { queryPostgres } from '@/lib/postgres';
 
@@ -73,6 +78,19 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     assertExecutionSafety(normalizedBody);
+
+    if (isExecutionRiskGatedCommandType(commandType)) {
+      await assertExecutionRiskGate({
+        terminalId: String(normalizedBody.terminalId ?? ''),
+        commandId: String(normalizedBody.commandId ?? '').trim() || undefined,
+        intentId: String(normalizedBody?.payload?.intentId ?? '').trim() || undefined,
+        requestedLots: resolvedVolume,
+        stopLoss: resolvedSl,
+        takeProfit: resolvedTp,
+        sandboxMode,
+        environment,
+      });
+    }
 
     const dedupeKey =
       typeof normalizedBody?.dedupeKey === 'string' && normalizedBody.dedupeKey.trim()
@@ -204,6 +222,22 @@ export async function POST(request: Request): Promise<Response> {
     const bridgePayload = await forward.json().catch(() => ({}));
     return Response.json({ ok: true, command, inserted, bridge: bridgePayload }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
+    if (error instanceof ExecutionRiskBlockedError) {
+      return Response.json(
+        {
+          ok: false,
+          error: error.message,
+          risk: {
+            allowed: false,
+            code: error.decision.code,
+            message: error.decision.message,
+            remainingDailyLossAmount: error.decision.remainingDailyLossAmount,
+            accountNumber: error.accountNumber,
+          },
+        },
+        { status: 403, headers: { 'Cache-Control': 'no-store' } },
+      );
+    }
     return Response.json(
       { ok: false, error: error instanceof Error ? error.message : 'Unable to enqueue command.' },
       { status: 400, headers: { 'Cache-Control': 'no-store' } },
