@@ -5,7 +5,9 @@ import {
   type PipelineStageStatus,
 } from './autonomous-pipeline';
 import { ensureAutonomySchema } from './autonomy-store';
-import { getLatestPairSelection } from './pair-selector';
+import { advancePipelineAnalysis } from './autonomous-pipeline-analysis';
+import { syncMt5CaptureAcks } from './mt5-capture-ingest';
+import { getLatestPairSelection, runAutonomousPairSelection } from './pair-selector';
 import { getLatestPipelineSession, listPipelineEvents } from './top-down-orchestrator';
 import { queryPostgres } from './postgres';
 
@@ -51,13 +53,33 @@ export interface AutonomousPipelineStatus {
 export async function getAutonomousPipelineStatus(symbol = 'XAUUSD'): Promise<AutonomousPipelineStatus> {
   await ensureAutonomySchema();
   const requestedSymbol = symbol.toUpperCase();
-  const latestSelection = await getLatestPairSelection();
+  let latestSelection = await getLatestPairSelection();
   const normalizedSymbol = requestedSymbol === 'AUTO'
     ? (latestSelection?.selectedSymbol ?? 'XAUUSD')
     : requestedSymbol;
 
-  const [bridge, session, captureCounts, mtf, vision, decisions, risk, execution, autonomyConfig, jobs] = await Promise.all([
-    fetchBridgeSummary(),
+  const bridge = await fetchBridgeSummary();
+  if (!latestSelection && bridge.connected > 0) {
+    try {
+      latestSelection = await runAutonomousPairSelection();
+    } catch {
+      // pair scan will retry on next status refresh or scheduler tick
+    }
+  }
+
+  try {
+    await syncMt5CaptureAcks({ symbol: normalizedSymbol, limit: 12 });
+  } catch {
+    // capture ingest retries on the next status refresh
+  }
+
+  try {
+    await advancePipelineAnalysis(normalizedSymbol);
+  } catch {
+    // downstream analysis retries on the next status refresh
+  }
+
+  const [session, captureCounts, mtf, vision, decisions, risk, execution, autonomyConfig, jobs] = await Promise.all([
     getLatestPipelineSession(normalizedSymbol),
     getCaptureCoverage(normalizedSymbol),
     getMtfStatus(normalizedSymbol),
@@ -91,10 +113,16 @@ export async function getAutonomousPipelineStatus(symbol = 'XAUUSD'): Promise<Au
       }
       if (latestSelection) {
         const top = latestSelection.candidates.find((candidate) => candidate.symbol === latestSelection.selectedSymbol);
+        const tradablePick = latestSelection.candidates.some((candidate) => candidate.tradable);
+        const isActiveSymbol = latestSelection.selectedSymbol === normalizedSymbol;
+        const detail =
+          latestSelection.source === 'config_fallback' && !tradablePick
+            ? `Pair scan complete — ${latestSelection.selectedSymbol} active as fallback (watchlist ranked; no pair passed liquidity filters this cycle).`
+            : `Latest autonomous pick: ${latestSelection.selectedSymbol} (${top?.compositeScore ?? 0} score, ${latestSelection.session} session).`;
         return {
-          status: latestSelection.selectedSymbol === normalizedSymbol ? 'completed' : 'in_progress',
-          detail: `Latest autonomous pick: ${latestSelection.selectedSymbol} (${top?.compositeScore ?? 0} score, ${latestSelection.session} session).`,
-          progress: latestSelection.selectedSymbol === normalizedSymbol ? 100 : 70,
+          status: isActiveSymbol ? 'completed' : 'in_progress',
+          detail,
+          progress: isActiveSymbol ? 100 : 70,
           metrics: { selection: latestSelection },
         };
       }
@@ -114,16 +142,19 @@ export async function getAutonomousPipelineStatus(symbol = 'XAUUSD'): Promise<Au
     },
     'top-down-capture': () => {
       const captured = AUTONOMY_TIMEFRAME_SEQUENCE.filter((tf) => captureCounts.timeframes[tf] > 0).length;
-      const queued = AUTONOMY_TIMEFRAME_SEQUENCE.filter((tf) => timeframeCapture[tf]).length;
+      const sessionStored = AUTONOMY_TIMEFRAME_SEQUENCE.filter((tf) => timeframeCapture[tf] === 'stored').length;
+      const commanded = AUTONOMY_TIMEFRAME_SEQUENCE.filter(
+        (tf) => timeframeCapture[tf] && timeframeCapture[tf] !== 'stored',
+      ).length;
       if (captured === AUTONOMY_TIMEFRAME_SEQUENCE.length) {
         return { status: 'completed', detail: 'All top-down timeframes captured.', progress: 100, metrics: captureCounts };
       }
-      if (queued > 0 || session?.current_stage === 'top-down-capture') {
+      if (commanded > 0 || sessionStored > 0 || session?.current_stage === 'top-down-capture') {
         return {
           status: 'in_progress',
-          detail: `Capture in progress (${captured}/${AUTONOMY_TIMEFRAME_SEQUENCE.length} stored, ${queued} commanded).`,
-          progress: Math.round(((captured + queued * 0.5) / AUTONOMY_TIMEFRAME_SEQUENCE.length) * 100),
-          metrics: { ...captureCounts, timeframeCapture },
+          detail: `Capture in progress (${captured}/${AUTONOMY_TIMEFRAME_SEQUENCE.length} stored, ${commanded} awaiting ingest).`,
+          progress: Math.round(((captured + sessionStored * 0.25 + commanded * 0.15) / AUTONOMY_TIMEFRAME_SEQUENCE.length) * 100),
+          metrics: { ...captureCounts, timeframeCapture, sessionStored, commanded },
         };
       }
       if (captured > 0) {
@@ -289,6 +320,16 @@ async function getMtfStatus(symbol: string) {
   }
   if (snapshots > 0) {
     return { status: 'in_progress' as const, detail: `${snapshots}/${AUTONOMY_TIMEFRAME_SEQUENCE.length} timeframe snapshots analyzed.`, progress: Math.round((snapshots / AUTONOMY_TIMEFRAME_SEQUENCE.length) * 100), metrics: { snapshots } };
+  }
+  const captureCoverage = await queryPostgres(
+    `SELECT COUNT(DISTINCT upper(timeframe))::int AS count
+     FROM chart_captures
+     WHERE upper(symbol) = $1`,
+    [symbol],
+  );
+  const capturedTimeframes = Number(captureCoverage.rows[0]?.count ?? 0);
+  if (capturedTimeframes >= AUTONOMY_TIMEFRAME_SEQUENCE.length) {
+    return { status: 'in_progress' as const, detail: 'Top-down captures ready — MTF fusion running on next pipeline tick.', progress: 20, metrics: { snapshots, capturedTimeframes } };
   }
   return { status: 'not_started' as const, detail: 'Waiting for top-down captures before MTF fusion.', progress: 0, metrics: { snapshots } };
 }

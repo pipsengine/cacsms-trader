@@ -178,16 +178,16 @@ export async function persistPairSelection(result: PairSelectionResult) {
   await queryPostgres(
     `INSERT INTO autonomous_pair_selections (
       id, selected_symbol, selected_symbols_json, candidates_json, session, source, composite_score, reasons_json
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    ) VALUES ($1,$2,$3::jsonb,$4::jsonb,$5,$6,$7,$8::jsonb)`,
     [
       result.id,
       result.selectedSymbol,
-      result.selectedSymbols,
-      JSON.parse(JSON.stringify(result.candidates)),
+      JSON.stringify(result.selectedSymbols),
+      JSON.stringify(result.candidates),
       result.session,
       result.source,
       top?.compositeScore ?? null,
-      top?.reasons ?? [],
+      JSON.stringify(top?.reasons ?? []),
     ],
   );
 }
@@ -200,7 +200,10 @@ async function fetchBestConnectedTerminal(): Promise<BridgeTerminal | null> {
     if (!response.ok) return null;
     const payload = await response.json();
     const terminals = Array.isArray(payload.terminals) ? payload.terminals as BridgeTerminal[] : [];
-    return terminals.find((terminal) => terminal.status === 'connected') ?? terminals[0] ?? null;
+    const connected = terminals.filter(
+      (terminal) => terminal.status === 'connected' || (terminal as { connectionStatus?: string }).connectionStatus === 'connected',
+    );
+    return connected[0] ?? terminals[0] ?? null;
   } catch {
     return null;
   }

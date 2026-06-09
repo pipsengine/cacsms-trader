@@ -1,6 +1,7 @@
 import { evaluatePropFirmRisk } from '@/packages/risk-core';
 import type { PropFirmRiskRules, RiskDecision, RiskState } from '@/packages/shared-types';
 import { appendExecutionEvent } from '@/lib/execution-bridge-store';
+import { isExecutionKillSwitchActive } from '@/lib/execution-kill-switch';
 import { queryPostgres } from '@/lib/postgres';
 
 export class ExecutionRiskBlockedError extends Error {
@@ -160,7 +161,7 @@ async function loadRiskState(accountNumber: string): Promise<RiskState> {
     openTrades: Number(account?.open_trade_count ?? 0),
     consecutiveLosses,
     monthlyProfitPercent: 0,
-    killSwitchActive: envBool('CACSMS_KILL_SWITCH', false),
+    killSwitchActive: (await isExecutionKillSwitchActive()) || envBool('CACSMS_KILL_SWITCH', false),
     highImpactNewsBlocked: envBool('CACSMS_NEWS_BLACKOUT', false),
   };
 }

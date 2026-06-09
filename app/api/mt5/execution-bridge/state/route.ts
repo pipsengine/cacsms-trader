@@ -1,6 +1,10 @@
 export const runtime = 'nodejs';
 
-import { listExecutionCommands, listExecutionEvents, markTimeouts, reconcileBridgeExecutionState } from '@/lib/execution-bridge-store';
+import { listExecutionCommands, listExecutionEvents } from '@/lib/execution-bridge-store';
+import { runExecutionMaintenance } from '@/lib/execution-retry-policy';
+import { getExecutionPolicyStatus } from '@/lib/execution-policy';
+import { getExecutionKillSwitchStatus } from '@/lib/execution-kill-switch';
+import { listOpenPositions } from '@/lib/execution-open-positions';
 import { assertExecutionBridgeToolAccess } from '@/lib/mt5-dev-tool-access';
 
 function bridgeUrl(): string {
@@ -10,14 +14,21 @@ function bridgeUrl(): string {
 export async function GET(request: Request): Promise<Response> {
   try {
     assertExecutionBridgeToolAccess(request);
-    await reconcileBridgeExecutionState().catch(() => null);
-    await markTimeouts();
+    const maintenance = await runExecutionMaintenance().catch(() => ({
+      timeouts: 0,
+      retried: 0,
+      reconciled: 0,
+      tradeMonitor: { evaluated: 0, actions: 0, dispatched: 0 },
+    }));
 
-    const [commands, events, bridgeHealth, bridgeOps] = await Promise.all([
+    const [commands, events, bridgeHealth, bridgeOps, policy, killSwitch, openPositions] = await Promise.all([
       listExecutionCommands({ limit: 200 }),
       listExecutionEvents({ limit: 200 }),
       fetch(`${bridgeUrl()}/health`, { cache: 'no-store' }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) })),
       fetch(`${bridgeUrl()}/terminal-operations`, { cache: 'no-store' }).then(async (r) => ({ ok: r.ok, status: r.status, body: await r.json().catch(() => ({})) })),
+      getExecutionPolicyStatus(),
+      getExecutionKillSwitchStatus(),
+      listOpenPositions({ limit: 50 }),
     ]);
 
     return Response.json(
@@ -29,6 +40,10 @@ export async function GET(request: Request): Promise<Response> {
           terminalOperations: bridgeOps.body,
           online: bridgeHealth.ok && bridgeOps.ok,
         },
+        policy,
+        killSwitch,
+        maintenance,
+        openPositions,
         commands,
         events,
       },

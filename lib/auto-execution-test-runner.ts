@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { appendEaCommEvent } from '@/lib/ea-communication-store';
 import { queryPostgres } from '@/lib/postgres';
-import { appendExecutionEvent, reconcileBridgeExecutionState, upsertExecutionCommand } from '@/lib/execution-bridge-store';
-import { assertExecutionRiskGate } from '@/lib/execution-risk-gate';
+import { appendExecutionEvent, reconcileBridgeExecutionState } from '@/lib/execution-bridge-store';
+import { dispatchExecutionCommand } from '@/lib/execution-dispatch';
+import { isExecutionEnabled } from '@/lib/execution-policy';
 
 export const runtime = 'nodejs';
 
@@ -332,18 +333,7 @@ async function enqueueAutoTestOrder(input: {
     comment: 'Cacsms Trader automatic sandbox test',
   } as Record<string, unknown>;
 
-  await assertExecutionRiskGate({
-    terminalId: input.terminalId,
-    commandId,
-    intentId: `AUTO_TEST:${input.runId}`,
-    requestedLots: 0.01,
-    stopLoss: 0,
-    takeProfit: 0,
-    sandboxMode: true,
-    environment: 'DEMO',
-  });
-
-  const { command } = await upsertExecutionCommand({
+  const { command } = await dispatchExecutionCommand({
     commandId,
     terminalId: input.terminalId,
     type: 'place_order',
@@ -354,49 +344,9 @@ async function enqueueAutoTestOrder(input: {
     sandboxMode: true,
     dedupeKey,
     maxAttempts: 1,
+    intentId: `AUTO_TEST:${input.runId}`,
+    source: 'AUTO_TEST_RUNNER',
   });
-
-  const forward = await fetch(`${bridgeUrl()}/commands/enqueue`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...bridgeSecretHeader(),
-    },
-    body: JSON.stringify({
-      commandId: command.commandId,
-      terminalId: command.terminalId,
-      type: command.type,
-      payload: command.payload,
-      createdAt: command.createdAt,
-      expiresAt: command.expiresAt,
-    }),
-  });
-
-  if (!forward.ok) {
-    const message = await forward.text();
-    await queryPostgres(
-      `
-        UPDATE execution_commands
-        SET last_error = $2,
-            last_updated_at = now()
-        WHERE command_id = $1
-      `,
-      [command.commandId, message || `Bridge enqueue failed with HTTP ${forward.status}`],
-    ).catch(() => null);
-    throw new Error(message || `Bridge enqueue failed with HTTP ${forward.status}`);
-  }
-
-  await queryPostgres(
-    `
-      UPDATE execution_commands
-      SET lifecycle_state = 'ROUTING',
-          routed_at = COALESCE(routed_at, now()),
-          last_updated_at = now()
-      WHERE command_id = $1
-        AND lifecycle_state = 'QUEUED'
-    `,
-    [command.commandId],
-  ).catch(() => null);
 
   await appendExecutionEvent({
     commandId: command.commandId,
@@ -468,7 +418,7 @@ export async function tickAutoExecutionTestRunner(input: { bridgeOnline: boolean
   const maxSpreadPoints = envNumber('CACSMS_AUTO_TEST_MAX_SPREAD_POINTS', 30);
   const delaySeconds = envNumber('CACSMS_AUTO_TEST_DELAY_SECONDS', 30);
   const heartbeatFreshMs = envNumber('CACSMS_AUTO_TEST_HEARTBEAT_FRESH_MS', 5000);
-  const executionGateOk = envBool('CACSMS_ENABLE_EXECUTION', false);
+  const executionGateOk = isExecutionEnabled();
 
   const toggle = await getLastToggle();
   if (toggle.type !== 'AUTO_TEST_ENABLED' || !toggle.runId) return;
@@ -615,7 +565,7 @@ export async function getAutoExecutionTestStatus(bridge?: { bridgeOnline: boolea
   const maxSpreadPoints = envNumber('CACSMS_AUTO_TEST_MAX_SPREAD_POINTS', 30);
   const delaySeconds = envNumber('CACSMS_AUTO_TEST_DELAY_SECONDS', 30);
   const heartbeatFreshMs = envNumber('CACSMS_AUTO_TEST_HEARTBEAT_FRESH_MS', 5000);
-  const executionGateOk = envBool('CACSMS_ENABLE_EXECUTION', false);
+  const executionGateOk = isExecutionEnabled();
   const hasEvents = await hasEaCommEventsTable();
 
   const toggle = await getLastToggle();

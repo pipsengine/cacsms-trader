@@ -172,13 +172,62 @@ async function updateSessionStage(sessionId: string, stageId: string, status: st
   );
 }
 
+export async function completePipelineStage(
+  sessionId: string,
+  stageId: string,
+  progress: number,
+  event?: { eventType: string; message: string; payload?: Record<string, unknown> },
+): Promise<boolean> {
+  await ensurePipelineSchema();
+  const current = await queryPostgres('SELECT stage_status_json FROM autonomous_pipeline_sessions WHERE id = $1', [sessionId]);
+  const stageStatus = objectValue(current.rows[0]?.stage_status_json);
+  if (stageStatus[stageId] === 'completed') return false;
+  await updateSessionStage(sessionId, stageId, 'completed', progress);
+  if (event) {
+    await logPipelineEvent(sessionId, stageId, event.eventType, event.message, event.payload ?? {});
+  }
+  return true;
+}
+
 async function markTimeframeCaptured(sessionId: string, timeframe: string, state: string) {
+  await updateTimeframeCaptureState(sessionId, timeframe, state);
+}
+
+export async function updateTimeframeCaptureState(
+  sessionId: string,
+  timeframe: string,
+  state: string,
+  captureId?: string,
+) {
   const current = await queryPostgres('SELECT timeframe_capture_json FROM autonomous_pipeline_sessions WHERE id = $1', [sessionId]);
-  const captureMap = { ...objectValue(current.rows[0]?.timeframe_capture_json), [timeframe]: state };
+  const captureMap = {
+    ...objectValue(current.rows[0]?.timeframe_capture_json),
+    [timeframe]: state,
+    ...(captureId ? { [`${timeframe}CaptureId`]: captureId } : {}),
+  };
   await queryPostgres(
     'UPDATE autonomous_pipeline_sessions SET timeframe_capture_json = $2, updated_at = now() WHERE id = $1',
     [sessionId, captureMap],
   );
+}
+
+export async function finalizeTopDownCaptureStage(sessionId: string) {
+  await ensurePipelineSchema();
+  const current = await queryPostgres('SELECT timeframe_capture_json, stage_status_json FROM autonomous_pipeline_sessions WHERE id = $1', [sessionId]);
+  const row = current.rows[0];
+  if (!row) return;
+
+  const captureMap = objectValue(row.timeframe_capture_json);
+  const allStored = AUTONOMY_TIMEFRAME_SEQUENCE.every((timeframe) => captureMap[timeframe] === 'stored');
+  if (!allStored) return;
+
+  const stageStatus = objectValue(row.stage_status_json);
+  if (stageStatus['top-down-capture'] === 'completed') return;
+
+  await updateSessionStage(sessionId, 'top-down-capture', 'completed', 100);
+  await logPipelineEvent(sessionId, 'top-down-capture', 'capture.completed', 'All top-down timeframe captures stored.', {
+    timeframes: AUTONOMY_TIMEFRAME_SEQUENCE,
+  });
 }
 
 async function logPipelineEvent(

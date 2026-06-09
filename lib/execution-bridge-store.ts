@@ -382,6 +382,61 @@ export async function recordAck(input: AckEventInput): Promise<void> {
       receivedAt,
     },
   }).catch(() => null);
+
+  await syncOpenPositionFromAck({
+    commandId: input.commandId,
+    terminalId: input.terminalId,
+    mappedState,
+    status,
+    ticket: text(input.ticket),
+    executedPrice: numberOrNull(input.executedPrice),
+    executedVolumeLots: numberOrNull(input.executedVolumeLots),
+  }).catch(() => null);
+}
+
+async function syncOpenPositionFromAck(input: {
+  commandId: string;
+  terminalId: string;
+  mappedState: ExecutionLifecycleState;
+  status: string;
+  ticket: string | null;
+  executedPrice: number | null;
+  executedVolumeLots: number | null;
+}): Promise<void> {
+  const { trackOpenPositionFromFill, markPositionClosed } = await import('@/lib/execution-open-positions');
+  const command = await queryPostgres(`SELECT type, payload, symbol, side FROM execution_commands WHERE command_id = $1 LIMIT 1`, [
+    input.commandId,
+  ]).catch(() => ({ rows: [] as Array<{ type?: string; payload?: Record<string, unknown>; symbol?: string; side?: string }> }));
+  const row = command.rows[0];
+  if (!row) return;
+
+  const commandType = String(row.type ?? '').toLowerCase().replaceAll('-', '_');
+  const payload = (row.payload ?? {}) as Record<string, unknown>;
+  const ticket = input.ticket ?? String(payload.ticket ?? '').trim();
+
+  if (commandType === 'place_order' && input.mappedState === 'EXECUTED' && ticket) {
+    await trackOpenPositionFromFill({
+      terminalId: input.terminalId,
+      commandId: input.commandId,
+      ticket,
+      symbol: row.symbol ? String(row.symbol) : String(payload.symbol ?? ''),
+      side: row.side ? String(row.side) : String(payload.side ?? ''),
+      volumeLots: input.executedVolumeLots,
+      entryPrice: input.executedPrice,
+      stopLoss: Number(payload.sl ?? payload.stopLoss ?? 0) || null,
+      takeProfit: Number(payload.tp ?? payload.takeProfit ?? 0) || null,
+    });
+    return;
+  }
+
+  if ((commandType === 'close_order' || commandType === 'emergency_close_all') && ticket && (input.status === 'accepted' || input.mappedState === 'EXECUTED')) {
+    await markPositionClosed({ terminalId: input.terminalId, ticket, partial: false });
+    return;
+  }
+
+  if (commandType === 'partial_close' && ticket && (input.status === 'accepted' || input.mappedState === 'EXECUTED')) {
+    await markPositionClosed({ terminalId: input.terminalId, ticket, partial: true });
+  }
 }
 
 export async function markTimeouts(now = new Date()): Promise<number> {

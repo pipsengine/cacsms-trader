@@ -1,5 +1,7 @@
 import { randomUUID } from 'crypto';
 
+import { resolveMt5BridgeSharedSecret } from './mt5-bridge-secret';
+
 const CHART_COMMAND_TYPES = new Set(['open_chart', 'set_timeframe', 'capture_chart', 'close_chart']);
 
 export type Mt5ChartCommandType = 'open_chart' | 'set_timeframe' | 'capture_chart' | 'close_chart';
@@ -16,8 +18,8 @@ function bridgeUrl(): string {
   return process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787';
 }
 
-function bridgeSecret(): string {
-  return process.env.MT5_BRIDGE_SHARED_SECRET ?? '';
+async function bridgeSecret(): Promise<string> {
+  return resolveMt5BridgeSharedSecret();
 }
 
 export function timeframeToMt5Period(timeframe: string): string {
@@ -47,11 +49,12 @@ export async function enqueueMt5ChartCommand(input: {
   }
 
   const commandId = input.commandId ?? randomUUID();
+  const secret = await bridgeSecret();
   const response = await fetch(`${bridgeUrl()}/commands/enqueue`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Cacsms-Secret': bridgeSecret(),
+      'X-Cacsms-Secret': secret,
     },
     body: JSON.stringify({
       commandId,

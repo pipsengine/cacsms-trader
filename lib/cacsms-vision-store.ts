@@ -141,12 +141,12 @@ export async function startCacsmsVisionScan(input: { symbols?: string[]; timefra
   const symbols = sanitizeSymbols(input.symbols);
   const timeframes = sanitizeTimeframes(input.timeframes);
   const scanId = randomUUID();
-  await queryPostgres('INSERT INTO cacsms_vision_scans (id, trigger_source, status, symbols_json, timeframes_json) VALUES ($1,$2,$3,$4,$5)', [
+  await queryPostgres('INSERT INTO cacsms_vision_scans (id, trigger_source, status, symbols_json, timeframes_json) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb)', [
     scanId,
     input.triggerSource ?? 'api',
     'running',
-    symbols,
-    timeframes,
+    JSON.stringify(symbols),
+    JSON.stringify(timeframes),
   ]);
   await publishVisualIntelligenceEvent('cacsms.vision.scan.started', null, null, { scanId, symbols, timeframes });
   const outputs: Array<Record<string, unknown>> = [];
@@ -156,7 +156,7 @@ export async function startCacsmsVisionScan(input: { symbols?: string[]; timefra
         outputs.push(await runVisionTimeframe(scanId, symbol, timeframe));
       }
     }
-    await queryPostgres('UPDATE cacsms_vision_scans SET status = $2, completed_at = now(), summary_json = $3 WHERE id = $1', [scanId, 'completed', { outputs: outputs.length }]);
+    await queryPostgres('UPDATE cacsms_vision_scans SET status = $2, completed_at = now(), summary_json = $3::jsonb WHERE id = $1', [scanId, 'completed', JSON.stringify({ outputs: outputs.length })]);
     await publishVisualIntelligenceEvent('cacsms.vision.scan.completed', null, null, { scanId, outputs: outputs.length });
     return { scanId, status: 'completed', outputs };
   } catch (error) {
@@ -344,7 +344,7 @@ async function runVisionTimeframe(scanId: string, symbol: string, timeframe: Aut
       analysis_status, confidence_score, market_meaning, institutional_interpretation,
       retail_trap_warning, liquidity_map_json, order_blocks_json, fair_value_gaps_json,
       market_structure_json, anomaly_json, segmentation_json, decision_json, audit_trace_id
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,$15::jsonb,$16::jsonb,$17::jsonb,$18::jsonb,$19::jsonb,$20)
   `, [
     analysisId,
     scanId,
@@ -358,13 +358,13 @@ async function runVisionTimeframe(scanId: string, symbol: string, timeframe: Aut
     interpretation.marketMeaning,
     interpretation.institutionalInterpretation,
     interpretation.retailTrapWarning,
-    liquidityMap,
-    { items: orderBlocks },
-    { items: fairValueGaps },
-    marketStructure,
-    toPayload(anomaly),
-    toPayload(segmentation),
-    toPayload(interpretation),
+    JSON.stringify(liquidityMap),
+    JSON.stringify({ items: orderBlocks }),
+    JSON.stringify({ items: fairValueGaps }),
+    JSON.stringify(marketStructure),
+    JSON.stringify(toPayload(anomaly)),
+    JSON.stringify(toPayload(segmentation)),
+    JSON.stringify(toPayload(interpretation)),
     traceId,
   ]);
   await writeAudit(traceId, 'cacsms.vision.analysis.completed', 'vision_analysis', analysisId, { symbol, timeframe, captureStatus: capture ? 'captured' : 'missing_capture' });
@@ -430,19 +430,19 @@ async function persistFairValueGap(gap: ReturnType<typeof detectFairValueGapsFro
     INSERT INTO fair_value_gaps (
       id, chart_capture_id, symbol, timeframe, direction, price_low, price_high,
       start_candle_index, end_candle_index, fill_status, confidence_score, metadata_json
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-  `, [gap.id, gap.chartCaptureId, gap.symbol, gap.timeframe, gap.direction, gap.priceLow, gap.priceHigh, gap.startCandleIndex, gap.endCandleIndex, gap.fillStatus, gap.confidenceScore, gap.metadata]);
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)
+  `, [gap.id, gap.chartCaptureId, gap.symbol, gap.timeframe, gap.direction, gap.priceLow, gap.priceHigh, gap.startCandleIndex, gap.endCandleIndex, gap.fillStatus, gap.confidenceScore, JSON.stringify(gap.metadata)]);
 }
 
 async function writeAudit(traceId: string, action: string, entityType: string, entityId: string, payload: Record<string, unknown>) {
-  await queryPostgres('INSERT INTO audit_logs (id, trace_id, actor, action, entity_type, entity_id, payload_json) VALUES ($1,$2,$3,$4,$5,$6,$7)', [
+  await queryPostgres('INSERT INTO audit_logs (id, trace_id, actor, action, entity_type, entity_id, payload_json) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb)', [
     randomUUID(),
     traceId,
     'cacsms-vision',
     action,
     entityType,
     entityId,
-    payload,
+    JSON.stringify(payload),
   ]);
 }
 

@@ -233,7 +233,7 @@ const defaultConfig: AutonomyConfig = {
   captureSources: ['mt5_bridge', 'chart_capture_service'],
   dataSources: ['visual_intelligence', 'economic_calendar', 'cot', 'interest_rates', 'sentiment'],
   signalGenerationRules: { requireTimeframeAlignment: true, blockHighImpactNews: true, blockCriticalAnomalies: true },
-  tradeExecutionMode: 'full_auto',
+  tradeExecutionMode: 'assisted_trade',
 };
 
 let schemaReady: Promise<void> | null = null;
@@ -423,7 +423,7 @@ async function runAutonomyTick(triggerSource: string) {
   if ((await isEmergencyStopped())) return;
   const config = await getAutonomyConfig();
   const cycleId = randomUUID();
-  await queryPostgres('INSERT INTO autonomous_scan_cycles (id, cycle_type, status, symbols_json, timeframes_json) VALUES ($1,$2,$3,$4,$5)', [cycleId, triggerSource, 'running', config.activeSymbols, config.activeTimeframes]);
+  await queryPostgres('INSERT INTO autonomous_scan_cycles (id, cycle_type, status, symbols_json, timeframes_json) VALUES ($1,$2,$3,$4::jsonb,$5::jsonb)', [cycleId, triggerSource, 'running', JSON.stringify(config.activeSymbols), JSON.stringify(config.activeTimeframes)]);
   await publishAutonomyEvent('autonomy.scan.started', { cycleId, triggerSource });
   const due = await queryPostgres(`
     SELECT * FROM autonomous_schedules
@@ -446,7 +446,7 @@ async function runAutonomyTick(triggerSource: string) {
   }
   for (const jobId of created) await executeAutonomyJob(jobId);
   await recoverFailedJobs(config.retryLimit);
-  await queryPostgres('UPDATE autonomous_scan_cycles SET status = $2, completed_at = now(), summary_json = $3 WHERE id = $1', [cycleId, 'completed', { jobsCreated: created.length }]);
+  await queryPostgres('UPDATE autonomous_scan_cycles SET status = $2, completed_at = now(), summary_json = $3::jsonb WHERE id = $1', [cycleId, 'completed', JSON.stringify({ jobsCreated: created.length })]);
   await publishAutonomyEvent('autonomy.scan.completed', { cycleId, jobsCreated: created.length });
   await updateHealthSummary();
 }
@@ -549,7 +549,22 @@ async function generateAutonomousSignal(symbol: string, timeframe: string) {
   if (['BUY', 'SELL'].includes(decision.decision) && decision.confidenceScore >= (await getAutonomyConfig()).alertThreshold) {
     await createAlert(decisionId, symbol, timeframe, 'high', 'trade_setup', decision.reasonForDecision);
   }
-  return { ...decision, decisionLogId: decisionId };
+  const config = await getAutonomyConfig();
+  const { maybeAutoDispatchAutonomyDecision } = await import('@/lib/autonomy-execution-adapter');
+  const dispatch = await maybeAutoDispatchAutonomyDecision({
+    decisionLogId: decisionId,
+    decision,
+    config,
+  }).catch(() => null);
+  if (dispatch) {
+    await publishAutonomyEvent('autonomy.execution.dispatch', {
+      decisionLogId: decisionId,
+      status: dispatch.status,
+      commandId: dispatch.commandId ?? null,
+      blockers: dispatch.blockers,
+    });
+  }
+  return { ...decision, decisionLogId: decisionId, executionDispatch: dispatch };
 }
 
 async function generateAlerts() {
@@ -736,9 +751,9 @@ async function seedSchedule(workerName: string, symbol: string | null, timeframe
   const key = [workerName, symbol ?? 'system', timeframe ?? 'all'].join(':');
   await queryPostgres(`
     INSERT INTO autonomous_schedules (id, worker_name, schedule_key, symbol, timeframe, cadence_seconds, next_run_at, metadata_json)
-    VALUES ($1,$2,$3,$4,$5,$6,now(),$7)
+    VALUES ($1,$2,$3,$4,$5,$6,now(),$7::jsonb)
     ON CONFLICT (schedule_key) DO NOTHING
-  `, [randomUUID(), workerName, key, symbol, timeframe, cadenceSeconds, { autonomousFirst: true }]);
+  `, [randomUUID(), workerName, key, symbol, timeframe, cadenceSeconds, JSON.stringify({ autonomousFirst: true })]);
 }
 
 async function readAutonomyConfigRow(): Promise<AutonomyConfig> {
@@ -746,14 +761,14 @@ async function readAutonomyConfigRow(): Promise<AutonomyConfig> {
   return { ...defaultConfig, ...objectValue(result.rows[0]?.value_json) } as AutonomyConfig;
 }
 
-async function getAutonomyConfig(): Promise<AutonomyConfig> {
+export async function getAutonomyConfig(): Promise<AutonomyConfig> {
   await ensureAutonomySchema();
   return readAutonomyConfigRow();
 }
 
 async function saveAutonomyConfig(patch: Partial<AutonomyConfig>) {
   const config = { ...(await getAutonomyConfig()), ...patch };
-  await queryPostgres('INSERT INTO autonomous_config (key, value_json, updated_at) VALUES ($1,$2,now()) ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = now()', ['default', toPayload(config)]);
+  await queryPostgres('INSERT INTO autonomous_config (key, value_json, updated_at) VALUES ($1,$2::jsonb,now()) ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = now()', ['default', JSON.stringify(toPayload(config))]);
 }
 
 async function updateJob(id: string, status: AutonomyJobStatus, progress: number, output: Record<string, unknown> | null, confidence: number | null, error?: string) {
@@ -804,7 +819,7 @@ async function publishAutonomyEvent(eventType: string, payload: Record<string, u
 }
 
 async function audit(auditTraceId: string, jobId: string | null, eventType: string, actor: string, payload: Record<string, unknown>) {
-  await queryPostgres('INSERT INTO autonomous_audit_trails (id, audit_trace_id, job_id, event_type, actor, payload_json) VALUES ($1,$2,$3,$4,$5,$6)', [randomUUID(), auditTraceId, jobId, eventType, actor, payload]);
+  await queryPostgres('INSERT INTO autonomous_audit_trails (id, audit_trace_id, job_id, event_type, actor, payload_json) VALUES ($1,$2,$3,$4,$5,$6::jsonb)', [randomUUID(), auditTraceId, jobId, eventType, actor, JSON.stringify(payload)]);
 }
 
 async function latestCaptureId(symbol: string, timeframe: string) {

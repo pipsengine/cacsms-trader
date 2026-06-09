@@ -3,7 +3,7 @@
 //| Demo heartbeat bridge first, execution later.                     |
 //+------------------------------------------------------------------+
 #property strict
-#property version "001.001"
+#property version "001.002"
 
 #include <Trade\Trade.mqh>
 
@@ -164,7 +164,7 @@ void SendHeartbeat()
    string gbpusdAvailableJson = gbpusdAvailable ? "true" : "false";
    string usdjpyAvailableJson = usdjpyAvailable ? "true" : "false";
    string heartbeat = StringFormat(
-      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"accountType\":\"%s\",\"enableExecution\":%s,\"accountTradeAllowed\":%s,\"terminalTradeAllowed\":%s,\"eurusdAvailable\":%s,\"xauusdAvailable\":%s,\"gbpusdAvailable\":%s,\"usdjpyAvailable\":%s,\"eurusdSpreadPoints\":%d,\"xauusdSpreadPoints\":%d,\"gbpusdSpreadPoints\":%d,\"usdjpySpreadPoints\":%d,\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.001\"}",
+      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"accountType\":\"%s\",\"enableExecution\":%s,\"accountTradeAllowed\":%s,\"terminalTradeAllowed\":%s,\"eurusdAvailable\":%s,\"xauusdAvailable\":%s,\"gbpusdAvailable\":%s,\"usdjpyAvailable\":%s,\"eurusdSpreadPoints\":%d,\"xauusdSpreadPoints\":%d,\"gbpusdSpreadPoints\":%d,\"usdjpySpreadPoints\":%d,\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.002\"}",
       EscapeJson(TerminalId),
       EscapeJson(computerId),
       EscapeJson(computerName),
@@ -386,6 +386,36 @@ void ExecuteCommand(string commandType, string payloadJson, string &ackStatus, s
    if (normalized == "close_chart")
    {
       ExecuteCloseChart(payloadJson, ackStatus, brokerMessage);
+      return;
+   }
+   if (normalized == "modify_order")
+   {
+      ExecuteModifyOrder(payloadJson, ackStatus, ticket, brokerMessage);
+      return;
+   }
+   if (normalized == "close_order")
+   {
+      ExecuteCloseOrder(payloadJson, ackStatus, ticket, brokerMessage);
+      return;
+   }
+   if (normalized == "partial_close")
+   {
+      ExecutePartialClose(payloadJson, ackStatus, ticket, brokerMessage);
+      return;
+   }
+   if (normalized == "move_to_breakeven")
+   {
+      ExecuteMoveToBreakeven(payloadJson, ackStatus, ticket, brokerMessage);
+      return;
+   }
+   if (normalized == "set_trailing_stop")
+   {
+      ExecuteSetTrailingStop(payloadJson, ackStatus, ticket, brokerMessage);
+      return;
+   }
+   if (normalized == "emergency_close_all")
+   {
+      ExecuteEmergencyCloseAll(ackStatus, brokerMessage);
       return;
    }
    ackStatus = "failed";
@@ -657,7 +687,15 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
    executedPrice = trade.ResultPrice();
    slippagePointsOut = pointRef > 0.0 ? (int)MathRound(MathAbs(executedPrice - requestPrice) / pointRef) : 0;
    executedVolumeLots = normalizedLots;
-   ticket = (string)(deal > 0 ? deal : order);
+   ulong positionTicket = ResolveLatestPositionTicket(symbol);
+   if (positionTicket > 0)
+   {
+      ticket = (string)positionTicket;
+   }
+   else
+   {
+      ticket = (string)(deal > 0 ? deal : order);
+   }
    if (deal > 0)
    {
       ackStatus = "filled";
@@ -674,6 +712,7 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
 void ExecuteCloseOrder(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage)
 {
    string ticketValue;
+   string symbol;
    double volumeLots = 0.0;
    if (!ExtractJsonString(payloadJson, "ticket", ticketValue))
    {
@@ -681,14 +720,15 @@ void ExecuteCloseOrder(string payloadJson, string &ackStatus, string &ticket, st
       brokerMessage = "missing_ticket";
       return;
    }
+   ExtractJsonString(payloadJson, "symbol", symbol);
    ExtractJsonNumber(payloadJson, "volumeLots", volumeLots);
 
-   ulong positionTicket = (ulong)StringToInteger(ticketValue);
+   ulong positionTicket = ResolvePositionTicket(ticketValue, symbol);
    trade.SetDeviationInPoints(SlippagePoints);
    trade.SetExpertMagicNumber((ulong)MagicNumber);
 
    bool ok = false;
-   if (PositionSelectByTicket(positionTicket))
+   if (positionTicket > 0 && PositionSelectByTicket(positionTicket))
    {
       string symbol = PositionGetString(POSITION_SYMBOL);
       if (volumeLots > 0.0)
@@ -717,6 +757,7 @@ void ExecuteCloseOrder(string payloadJson, string &ackStatus, string &ticket, st
 void ExecuteModifyOrder(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage)
 {
    string ticketValue;
+   string symbol;
    double stopLoss = 0.0;
    double takeProfit = 0.0;
 
@@ -726,15 +767,22 @@ void ExecuteModifyOrder(string payloadJson, string &ackStatus, string &ticket, s
       brokerMessage = "missing_ticket";
       return;
    }
-   if (!ExtractJsonNumber(payloadJson, "stopLoss", stopLoss)) stopLoss = 0.0;
-   if (!ExtractJsonNumber(payloadJson, "takeProfit", takeProfit)) takeProfit = 0.0;
+   ExtractJsonString(payloadJson, "symbol", symbol);
+   if (!ExtractJsonNumber(payloadJson, "stopLoss", stopLoss))
+   {
+      if (!ExtractJsonNumber(payloadJson, "sl", stopLoss)) stopLoss = 0.0;
+   }
+   if (!ExtractJsonNumber(payloadJson, "takeProfit", takeProfit))
+   {
+      if (!ExtractJsonNumber(payloadJson, "tp", takeProfit)) takeProfit = 0.0;
+   }
 
-   ulong positionTicket = (ulong)StringToInteger(ticketValue);
+   ulong positionTicket = ResolvePositionTicket(ticketValue, symbol);
    trade.SetDeviationInPoints(SlippagePoints);
    trade.SetExpertMagicNumber((ulong)MagicNumber);
 
    bool ok = false;
-   if (PositionSelectByTicket(positionTicket))
+   if (positionTicket > 0 && PositionSelectByTicket(positionTicket))
    {
       string symbol = PositionGetString(POSITION_SYMBOL);
       int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
@@ -744,6 +792,163 @@ void ExecuteModifyOrder(string payloadJson, string &ackStatus, string &ticket, s
    }
 
    if (!ok)
+   {
+      ackStatus = "failed";
+      brokerMessage = trade.ResultRetcodeDescription();
+      ticket = ticketValue;
+      return;
+   }
+
+   ackStatus = "accepted";
+   brokerMessage = "ok";
+   ticket = ticketValue;
+}
+
+void ExecutePartialClose(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage)
+{
+   string ticketValue;
+   double volumeLots = 0.0;
+   string symbol;
+   if (!ExtractJsonString(payloadJson, "ticket", ticketValue))
+   {
+      ackStatus = "failed";
+      brokerMessage = "missing_ticket";
+      return;
+   }
+   ExtractJsonString(payloadJson, "symbol", symbol);
+   if (!ExtractJsonNumber(payloadJson, "volumeLots", volumeLots))
+   {
+      if (!ExtractJsonNumber(payloadJson, "volume", volumeLots))
+      {
+         ackStatus = "failed";
+         brokerMessage = "missing_volume";
+         return;
+      }
+   }
+
+   ulong positionTicket = ResolvePositionTicket(ticketValue, symbol);
+   trade.SetDeviationInPoints(SlippagePoints);
+   trade.SetExpertMagicNumber((ulong)MagicNumber);
+
+   if (positionTicket <= 0 || !PositionSelectByTicket(positionTicket))
+   {
+      ackStatus = "failed";
+      brokerMessage = "position_not_found";
+      ticket = ticketValue;
+      return;
+   }
+
+   string positionSymbol = PositionGetString(POSITION_SYMBOL);
+   double volMin = 0.0, volMax = 0.0, volStep = 0.0;
+   SymbolInfoDouble(positionSymbol, SYMBOL_VOLUME_MIN, volMin);
+   SymbolInfoDouble(positionSymbol, SYMBOL_VOLUME_MAX, volMax);
+   SymbolInfoDouble(positionSymbol, SYMBOL_VOLUME_STEP, volStep);
+   double normalizedLots = NormalizeVolume(volumeLots, volMin, volMax, volStep);
+   if (!trade.PositionClosePartial(positionSymbol, normalizedLots))
+   {
+      ackStatus = "failed";
+      brokerMessage = trade.ResultRetcodeDescription();
+      ticket = ticketValue;
+      return;
+   }
+
+   ackStatus = "accepted";
+   brokerMessage = "ok";
+   ticket = ticketValue;
+}
+
+void ExecuteMoveToBreakeven(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage)
+{
+   string ticketValue;
+   string symbol;
+   if (!ExtractJsonString(payloadJson, "ticket", ticketValue))
+   {
+      ackStatus = "failed";
+      brokerMessage = "missing_ticket";
+      return;
+   }
+   ExtractJsonString(payloadJson, "symbol", symbol);
+
+   ulong positionTicket = ResolvePositionTicket(ticketValue, symbol);
+   trade.SetDeviationInPoints(SlippagePoints);
+   trade.SetExpertMagicNumber((ulong)MagicNumber);
+
+   if (positionTicket <= 0 || !PositionSelectByTicket(positionTicket))
+   {
+      ackStatus = "failed";
+      brokerMessage = "position_not_found";
+      ticket = ticketValue;
+      return;
+   }
+
+   string positionSymbol = PositionGetString(POSITION_SYMBOL);
+   int digits = (int)SymbolInfoInteger(positionSymbol, SYMBOL_DIGITS);
+   double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+   double currentTp = PositionGetDouble(POSITION_TP);
+   double bufferPoints = 0.0;
+   ExtractJsonNumber(payloadJson, "bufferPoints", bufferPoints);
+   double point = SymbolInfoDouble(positionSymbol, SYMBOL_POINT);
+   double buffer = bufferPoints > 0.0 ? bufferPoints * point : point;
+   long positionType = PositionGetInteger(POSITION_TYPE);
+   double breakEvenSl = positionType == POSITION_TYPE_BUY ? entry + buffer : entry - buffer;
+   breakEvenSl = NormalizeDouble(breakEvenSl, digits);
+
+   if (!trade.PositionModify(positionTicket, breakEvenSl, currentTp))
+   {
+      ackStatus = "failed";
+      brokerMessage = trade.ResultRetcodeDescription();
+      ticket = ticketValue;
+      return;
+   }
+
+   ackStatus = "accepted";
+   brokerMessage = "ok";
+   ticket = ticketValue;
+}
+
+void ExecuteSetTrailingStop(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage)
+{
+   string ticketValue;
+   string symbol;
+   double trailingPoints = 150.0;
+   if (!ExtractJsonString(payloadJson, "ticket", ticketValue))
+   {
+      ackStatus = "failed";
+      brokerMessage = "missing_ticket";
+      return;
+   }
+   ExtractJsonString(payloadJson, "symbol", symbol);
+   if (!ExtractJsonNumber(payloadJson, "trailingPoints", trailingPoints))
+   {
+      ExtractJsonNumber(payloadJson, "trailingDistance", trailingPoints);
+   }
+
+   ulong positionTicket = ResolvePositionTicket(ticketValue, symbol);
+   trade.SetDeviationInPoints(SlippagePoints);
+   trade.SetExpertMagicNumber((ulong)MagicNumber);
+
+   if (positionTicket <= 0 || !PositionSelectByTicket(positionTicket))
+   {
+      ackStatus = "failed";
+      brokerMessage = "position_not_found";
+      ticket = ticketValue;
+      return;
+   }
+
+   string positionSymbol = PositionGetString(POSITION_SYMBOL);
+   int digits = (int)SymbolInfoInteger(positionSymbol, SYMBOL_DIGITS);
+   double point = SymbolInfoDouble(positionSymbol, SYMBOL_POINT);
+   double distance = MathMax(point, trailingPoints * point);
+   long positionType = PositionGetInteger(POSITION_TYPE);
+   double currentTp = PositionGetDouble(POSITION_TP);
+   double bid = 0.0;
+   double ask = 0.0;
+   SymbolInfoDouble(positionSymbol, SYMBOL_BID, bid);
+   SymbolInfoDouble(positionSymbol, SYMBOL_ASK, ask);
+   double trailingSl = positionType == POSITION_TYPE_BUY ? bid - distance : ask + distance;
+   trailingSl = NormalizeDouble(trailingSl, digits);
+
+   if (!trade.PositionModify(positionTicket, trailingSl, currentTp))
    {
       ackStatus = "failed";
       brokerMessage = trade.ResultRetcodeDescription();
@@ -859,6 +1064,33 @@ string UrlEncode(string value)
       }
    }
    return encoded;
+}
+
+ulong ResolvePositionTicket(string ticketValue, string symbol)
+{
+   ulong ticket = (ulong)StringToInteger(ticketValue);
+   if (ticket > 0 && PositionSelectByTicket(ticket))
+   {
+      return ticket;
+   }
+
+   string normalizedSymbol = symbol;
+   StringTrimLeft(normalizedSymbol);
+   StringTrimRight(normalizedSymbol);
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong posTicket = PositionGetTicket(i);
+      if (!PositionSelectByTicket(posTicket)) continue;
+      if (normalizedSymbol != "" && PositionGetString(POSITION_SYMBOL) != normalizedSymbol) continue;
+      if ((ulong)PositionGetInteger(POSITION_MAGIC) != (ulong)MagicNumber) continue;
+      return posTicket;
+   }
+   return 0;
+}
+
+ulong ResolveLatestPositionTicket(string symbol)
+{
+   return ResolvePositionTicket("", symbol);
 }
 
 double NormalizeVolume(double lots, double minLot, double maxLot, double step)
