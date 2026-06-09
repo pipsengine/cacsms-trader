@@ -60,7 +60,10 @@ export class MarketIntelligenceEngine {
     const liquidityScore = this.scanLiquidity(tick);
     const condition = liquidityScore < 30 ? "illiquid" : volatilityScore > 75 ? "volatile" : this.classifyTrendOrRange(candles);
     const setupScore = Math.round((volatilityScore * 0.35) + (liquidityScore * 0.4) + (session === "closed" ? 0 : 20));
-    const tradable = setupScore >= 55 && condition !== "illiquid" && session !== "closed";
+    const hasCandleContext = candles.length >= 10;
+    const tradable = hasCandleContext
+      ? setupScore >= 55 && condition !== "illiquid" && session !== "closed"
+      : liquidityScore >= 45 && condition !== "illiquid" && session !== "closed";
 
     return {
       symbol,

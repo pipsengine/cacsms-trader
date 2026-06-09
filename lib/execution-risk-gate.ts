@@ -2,6 +2,13 @@ import { evaluatePropFirmRisk } from '@/packages/risk-core';
 import type { PropFirmRiskRules, RiskDecision, RiskState } from '@/packages/shared-types';
 import { appendExecutionEvent } from '@/lib/execution-bridge-store';
 import { isExecutionKillSwitchActive } from '@/lib/execution-kill-switch';
+import {
+  countTradesOpenedTodayForSymbol,
+  isSymbolBasedTradeLimitEnabled,
+  loadPropFirmRiskRulesFromEnv,
+  resolveExecutionRiskLimits,
+  resolveLiveOpenPositionCount,
+} from '@/lib/execution-risk-limits';
 import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
 import { queryPostgres } from '@/lib/postgres';
 
@@ -26,6 +33,7 @@ export type ExecutionRiskGateInput = {
   terminalId: string;
   commandId?: string;
   intentId?: string;
+  symbol?: string;
   requestedLots: number;
   rewardRiskRatio?: number;
   stopLoss?: number;
@@ -47,26 +55,7 @@ function envBool(name: string, fallback = false): boolean {
   return raw === 'true' || raw === '1' || raw === 'yes' || raw === 'y';
 }
 
-export function loadPropFirmRiskRulesFromEnv(): PropFirmRiskRules {
-  const minRewardRiskRatio = envNumber('RISK_MIN_REWARD_RISK_RATIO', 2);
-  return {
-    dailyDrawdownPercent: envNumber('RISK_DAILY_DRAWDOWN_PERCENT', 4),
-    maxDrawdownPercent: envNumber('RISK_MAX_DRAWDOWN_PERCENT', 8),
-    riskPerTradePercent: envNumber('RISK_PER_TRADE_PERCENT', 0.5),
-    dailyTradeLimitEnabled: envBool('RISK_DAILY_TRADE_LIMIT_ENABLED', false),
-    maxTradesPerDay: envNumber('RISK_MAX_TRADES_PER_DAY', 5),
-    maxOpenTrades: envNumber('RISK_MAX_OPEN_TRADES', 3),
-    maxLotSize: envNumber('RISK_MAX_LOT_SIZE', 1),
-    maxCurrencyExposurePercent: envNumber('RISK_MAX_CURRENCY_EXPOSURE_PERCENT', 100),
-    maxCorrelatedExposurePercent: envNumber('RISK_MAX_CORRELATED_EXPOSURE_PERCENT', 100),
-    minRewardRiskRatio,
-    stopAfterConsecutiveLosses: envNumber('RISK_STOP_AFTER_CONSECUTIVE_LOSSES', 2),
-    stopTradingAfterDailyTargetHit: envBool('RISK_STOP_AFTER_DAILY_TARGET_HIT', false),
-    monthlyProfitTargetPercent: envNumber('RISK_MONTHLY_PROFIT_TARGET_PERCENT', 100),
-    newsBlackoutMinutesBefore: envNumber('RISK_NEWS_BLACKOUT_MINUTES_BEFORE', 0),
-    newsBlackoutMinutesAfter: envNumber('RISK_NEWS_BLACKOUT_MINUTES_AFTER', 0),
-  };
-}
+export { loadPropFirmRiskRulesFromEnv } from '@/lib/execution-risk-limits';
 
 export async function loadPropFirmRiskRules(): Promise<PropFirmRiskRules> {
   const base = loadPropFirmRiskRulesFromEnv();
@@ -75,6 +64,7 @@ export async function loadPropFirmRiskRules(): Promise<PropFirmRiskRules> {
     ...base,
     dailyTradeLimitEnabled: settings.dailyTradeLimitEnabled,
     maxTradesPerDay: settings.maxTradesPerDay,
+    maxOpenTrades: settings.maxOpenPositions,
   };
 }
 
@@ -161,7 +151,7 @@ async function loadRiskState(accountNumber: string): Promise<RiskState> {
     [accountNumber],
   );
   const tradesOpenedToday = Number((tradesTodayResult.rows[0] as { count?: number })?.count ?? 0);
-
+  const liveOpenTrades = await resolveLiveOpenPositionCount();
   const consecutiveLosses = await countConsecutiveLosses(accountNumber);
 
   return {
@@ -170,7 +160,7 @@ async function loadRiskState(accountNumber: string): Promise<RiskState> {
     peakEquityAllTime: peakEquityAllTime > 0 ? peakEquityAllTime : equity,
     currentBalance: balance,
     tradesOpenedToday,
-    openTrades: Number(account?.open_trade_count ?? 0),
+    openTrades: Math.max(Number(account?.open_trade_count ?? 0), liveOpenTrades),
     consecutiveLosses,
     monthlyProfitPercent: 0,
     killSwitchActive: (await isExecutionKillSwitchActive()) || envBool('CACSMS_KILL_SWITCH', false),
@@ -243,12 +233,22 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
   const rules = await loadPropFirmRiskRules();
   const accountNumber = await resolveAccountNumber(input.terminalId);
   const state = await loadRiskState(accountNumber);
+  const limits = await resolveExecutionRiskLimits(rules, state);
   const rewardRiskRatio = resolveRewardRiskRatio(input, rules);
+  const symbol = String(input.symbol ?? '').trim().toUpperCase();
+  const tradesOpenedTodayForSymbol = symbol
+    ? await countTradesOpenedTodayForSymbol(symbol, accountNumber)
+    : 0;
   const decision = evaluatePropFirmRisk({
     rules,
     state,
     requestedLots: input.requestedLots,
     rewardRiskRatio,
+    symbol: symbol || undefined,
+    tradesOpenedTodayForSymbol,
+    tradesPerSymbolPerDay: isSymbolBasedTradeLimitEnabled() ? limits.tradesPerSymbolPerDay : undefined,
+    maxOpenTradesOverride: limits.maxOpenPositions,
+    maxTradesPerDayOverride: limits.maxTradesPerDay,
   });
 
   await persistRiskDecision({

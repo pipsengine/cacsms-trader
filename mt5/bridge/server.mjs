@@ -379,6 +379,29 @@ function legacySymbolTelemetryFields(symbolTelemetry) {
   };
 }
 
+function normalizeOpenPositionSnapshots(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const ticket = String(item.ticket ?? "").trim();
+      const symbol = String(item.symbol ?? "").toUpperCase().trim();
+      if (!ticket || !symbol) return null;
+      return {
+        ticket,
+        symbol,
+        side: String(item.side ?? "buy").toLowerCase() === "sell" ? "sell" : "buy",
+        volumeLots: Number.isFinite(Number(item.volumeLots)) ? Number(item.volumeLots) : Number(item.volume ?? 0.01),
+        entryPrice: Number.isFinite(Number(item.entryPrice)) ? Number(item.entryPrice) : 0,
+        currentPrice: Number.isFinite(Number(item.currentPrice)) ? Number(item.currentPrice) : 0,
+        stopLoss: Number.isFinite(Number(item.stopLoss)) ? Number(item.stopLoss) : 0,
+        takeProfit: Number.isFinite(Number(item.takeProfit)) ? Number(item.takeProfit) : 0,
+        profitLoss: Number.isFinite(Number(item.profitLoss)) ? Number(item.profitLoss) : 0,
+      };
+    })
+    .filter(Boolean);
+}
+
 function normalizeHeartbeat(payload, existing) {
   const now = new Date().toISOString();
   const terminalId = requiredString(payload.terminalId, "terminalId");
@@ -421,13 +444,15 @@ function normalizeHeartbeat(payload, existing) {
     gbpusdSpreadPoints,
     usdjpySpreadPoints,
   } = legacyTelemetry;
+  const resolvedOpenPositions = Number(payload.openPositions ?? payload.openOrders ?? 0);
   const historyItem = {
     sequence,
     receivedAt: now,
     latencyMs,
     balance: finiteNumber(payload.balance, "balance"),
     equity: finiteNumber(payload.equity, "equity"),
-    openOrders: Number(payload.openOrders ?? 0),
+    openOrders: Number(payload.openOrders ?? resolvedOpenPositions),
+    openPositions: resolvedOpenPositions,
     connectionStatus,
     mt5ServerTime,
     terminalTime,
@@ -461,6 +486,8 @@ function normalizeHeartbeat(payload, existing) {
     margin: finiteNumber(payload.margin, "margin"),
     freeMargin: finiteNumber(payload.freeMargin, "freeMargin"),
     openOrders: historyItem.openOrders,
+    openPositions: historyItem.openPositions,
+    openPositionSnapshots: normalizeOpenPositionSnapshots(payload.openPositionSnapshots),
     connectionStatus,
     lastTickTime,
     mt5ServerTime,

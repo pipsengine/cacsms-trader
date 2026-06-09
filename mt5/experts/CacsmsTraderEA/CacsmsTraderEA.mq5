@@ -3,7 +3,7 @@
 //| Demo heartbeat bridge first, execution later.                     |
 //+------------------------------------------------------------------+
 #property strict
-#property version "001.004"
+#property version "001.006"
 
 #include <Trade\Trade.mqh>
 
@@ -382,6 +382,46 @@ bool LookupTelemetryAvailable(string symbol)
    return false;
 }
 
+string BuildOpenPositionsJson()
+{
+   string json = "[";
+   int total = PositionsTotal();
+   bool first = true;
+   for (int i = 0; i < total; i++)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (ticket <= 0) continue;
+      if (!PositionSelectByTicket(ticket)) continue;
+
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      long positionType = PositionGetInteger(POSITION_TYPE);
+      string side = positionType == POSITION_TYPE_BUY ? "buy" : "sell";
+      double volumeLots = PositionGetDouble(POSITION_VOLUME);
+      double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+      double stopLoss = PositionGetDouble(POSITION_SL);
+      double takeProfit = PositionGetDouble(POSITION_TP);
+      double profitLoss = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+
+      if (!first) json += ",";
+      first = false;
+      json += StringFormat(
+         "{\"ticket\":\"%I64u\",\"symbol\":\"%s\",\"side\":\"%s\",\"volumeLots\":%.4f,\"entryPrice\":%.10f,\"currentPrice\":%.10f,\"stopLoss\":%.10f,\"takeProfit\":%.10f,\"profitLoss\":%.2f}",
+         ticket,
+         EscapeJson(symbol),
+         side,
+         volumeLots,
+         entryPrice,
+         currentPrice,
+         stopLoss,
+         takeProfit,
+         profitLoss
+      );
+   }
+   json += "]";
+   return json;
+}
+
 void SendHeartbeat()
 {
    lastHeartbeat = TimeLocal();
@@ -452,12 +492,14 @@ void SendHeartbeat()
    );
    heartbeat += ",\"symbolTelemetry\":" + telemetryJson;
    heartbeat += ",\"telemetrySummary\":" + summaryJson;
+   heartbeat += ",\"openPositionSnapshots\":" + BuildOpenPositionsJson();
    heartbeat += StringFormat(
-      ",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.004\"}",
+      ",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openPositions\":%d,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.006\"}",
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_MARGIN),
       AccountInfoDouble(ACCOUNT_MARGIN_FREE),
+      PositionsTotal(),
       OrdersTotal(),
       EscapeJson(connectionStatus),
       TimeToString(lastHeartbeat, TIME_DATE | TIME_SECONDS),

@@ -3,8 +3,16 @@ import { randomUUID } from 'crypto';
 import { MarketIntelligenceEngine } from '@/services/market-intelligence-engine';
 import type { TickSnapshot, TradingSession } from '@/packages/shared-types';
 import { SYSTEM_FOCUS_SYMBOLS, SYSTEM_FOCUS_SYMBOL_COUNT } from './focus-symbols';
+import { countTradesOpenedTodayForSymbol } from './execution-risk-limits';
+import { getExecutionRiskSettings } from './execution-risk-settings';
 import { extractSymbolTelemetry, symbolTelemetryMap } from './mt5-symbol-telemetry';
+import { getOpenPositionSymbols } from './open-position-symbols';
+import { logPairSelectionEvent } from './pair-selection-audit';
+import { clampScore, parsePairCurrencies } from './pair-selector-utils';
+import { findCorrelatedOpenSymbol } from './symbol-correlation';
 import { queryPostgres } from './postgres';
+
+export const PAIR_SELECTION_REFRESH_MS = Number(process.env.PAIR_SELECTION_REFRESH_MS ?? 5 * 60 * 1000);
 
 export const DEFAULT_WATCHLIST = [...SYSTEM_FOCUS_SYMBOLS];
 
@@ -30,6 +38,9 @@ export interface PairSelectionCandidate {
   macroScore: number;
   compositeScore: number;
   tradable: boolean;
+  eligibleForNewEntry: boolean;
+  blocked: boolean;
+  blockReason: string | null;
   session: TradingSession;
   reasons: string[];
   rank: number;
@@ -39,6 +50,11 @@ export interface PairSelectionResult {
   id: string;
   selectedSymbol: string;
   selectedSymbols: string[];
+  eligibleSymbols: string[];
+  qualifiedSymbols: string[];
+  openPositionSymbols: string[];
+  dailyLimitReached: boolean;
+  scanSummary: string;
   candidates: PairSelectionCandidate[];
   session: TradingSession;
   selectedAt: string;
@@ -86,17 +102,63 @@ export async function ensurePairSelectionSchema() {
   return schemaReady;
 }
 
+export function shouldRefreshPairSelection(latest: PairSelectionResult | null): boolean {
+  if (!latest) return true;
+  return Date.now() - new Date(latest.selectedAt).getTime() >= PAIR_SELECTION_REFRESH_MS;
+}
+
+export async function maybeRefreshPairSelection(
+  latest: PairSelectionResult | null,
+): Promise<PairSelectionResult | null> {
+  if (!shouldRefreshPairSelection(latest)) return latest;
+  return runAutonomousPairSelection();
+}
+
 export async function runAutonomousPairSelection(
   config: Partial<PairSelectionConfig> = {},
 ): Promise<PairSelectionResult> {
   await ensurePairSelectionSchema();
   const resolved = { ...DEFAULT_PAIR_SELECTION_CONFIG, ...config };
   const watchlist = resolved.watchlistSymbols.map((symbol) => symbol.toUpperCase());
-  const terminal = await fetchBestConnectedTerminal();
+  const [terminal, openPositionSymbols, riskSettings] = await Promise.all([
+    fetchBestConnectedTerminal(),
+    getOpenPositionSymbols(),
+    getExecutionRiskSettings(),
+  ]);
+  const dailyLimitReached = Boolean(
+    riskSettings.dailyTradeLimitEnabled && (riskSettings.remainingTradesToday ?? 0) <= 0,
+  );
+  const openPositionLimitReached = riskSettings.remainingOpenPositions <= 0;
+  const maxNewEntries = dailyLimitReached || openPositionLimitReached
+    ? 0
+    : riskSettings.dailyTradeLimitEnabled
+      ? Math.min(
+        resolved.maxSelectedSymbols,
+        riskSettings.remainingTradesToday ?? resolved.maxSelectedSymbols,
+        riskSettings.remainingOpenPositions,
+      )
+      : Math.min(resolved.maxSelectedSymbols, riskSettings.remainingOpenPositions);
+
   const ticks = buildTickSnapshots(watchlist, terminal, resolved.maxSpreadPoints);
   const macroScores = await loadPairMacroScores(watchlist);
   const now = new Date();
   const session = engine.detectSession(now);
+  const selectionId = randomUUID();
+
+  await logPairSelectionEvent({
+    eventType: 'scan_started',
+    message: `Pair scan started — ${watchlist.length} symbols on watchlist`,
+    reasons: [
+      openPositionSymbols.length > 0 ? `Open exposure: ${openPositionSymbols.join(', ')}` : 'No open positions',
+      dailyLimitReached
+        ? `Daily trade limit reached (${riskSettings.tradesOpenedToday}/${riskSettings.maxTradesPerDay} across ${riskSettings.activeSymbolCount} symbols)`
+        : openPositionLimitReached
+          ? `Open position capacity reached (${riskSettings.openPositions}/${riskSettings.maxOpenPositions} drawdown-based slots)`
+          : `Up to ${maxNewEntries} new symbol(s) · ${riskSettings.remainingOpenPositions} open slots · ${riskSettings.tradesPerSymbolPerDay} trade(s)/symbol/day`,
+    ],
+    metadata: { watchlist, openPositionSymbols, dailyLimitReached },
+    selectionId,
+  });
 
   const eligibleSymbols = engine.selectPairs({ symbols: watchlist, ticks, candlesBySymbol: {}, now });
   const marketScans = engine.scan({ symbols: eligibleSymbols.length > 0 ? eligibleSymbols : watchlist, ticks, candlesBySymbol: {}, now });
@@ -107,7 +169,6 @@ export async function runAutonomousPairSelection(
       const tick = ticks.find((item) => item.symbol === scan.symbol);
       const telemetryRow = telemetry.get(scan.symbol);
       const spreadOk = tick ? tick.spreadPoints <= resolved.maxSpreadPoints : false;
-      const available = Boolean(telemetryRow?.available);
       const tradableTelemetry = Boolean(
         telemetryRow?.available
         && telemetryRow.tradable
@@ -124,7 +185,8 @@ export async function runAutonomousPairSelection(
         + (session === 'closed' ? 0 : 10)
         + macroPenalty,
       );
-      const tradable = scan.tradable && tradableTelemetry;
+      const liquidityQualified = scan.liquidityScore >= 45 && tradableTelemetry && scan.session !== 'closed';
+      const tradable = (scan.tradable || liquidityQualified) && tradableTelemetry && scan.condition !== 'illiquid';
       const reasons = [
         ...scan.reasons,
         telemetryRow
@@ -132,7 +194,11 @@ export async function runAutonomousPairSelection(
           : 'No live terminal telemetry',
         telemetryRow?.stale ? 'Stale tick feed' : 'Tick feed fresh',
         `Macro alignment ${macroScore}`,
-        tradable ? 'Eligible for autonomous pipeline' : 'Filtered by spread, liquidity, session, or macro risk',
+        tradable
+          ? scan.tradable
+            ? 'Passes spread, liquidity, and session filters'
+            : 'Qualified via live telemetry (awaiting candle context for full setup score)'
+          : 'Filtered by spread, liquidity, session, or macro risk',
       ];
       return {
         symbol: scan.symbol,
@@ -142,6 +208,9 @@ export async function runAutonomousPairSelection(
         macroScore,
         compositeScore,
         tradable,
+        eligibleForNewEntry: tradable,
+        blocked: false,
+        blockReason: null,
         session: scan.session,
         reasons,
         rank: 0,
@@ -150,25 +219,164 @@ export async function runAutonomousPairSelection(
     .sort((a, b) => b.compositeScore - a.compositeScore)
     .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
 
-  const fullUniverse = resolved.maxSelectedSymbols >= watchlist.length;
-  const rankedTradable = candidates.filter((candidate) => candidate.tradable).slice(0, Math.max(1, resolved.maxSelectedSymbols));
+  for (const candidate of candidates) {
+    if (!candidate.tradable) {
+      await logPairSelectionEvent({
+        eventType: 'symbol_filtered',
+        symbol: candidate.symbol,
+        selected: false,
+        message: `${candidate.symbol} filtered — score ${candidate.compositeScore}`,
+        reasons: candidate.reasons.slice(-3),
+        metadata: { compositeScore: candidate.compositeScore, rank: candidate.rank },
+        selectionId,
+      });
+      continue;
+    }
+
+    const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, openPositionSymbols);
+    if (correlatedWith) {
+      candidate.blocked = true;
+      candidate.blockReason = `Correlated with open ${correlatedWith}`;
+      candidate.eligibleForNewEntry = false;
+      candidate.reasons.push(`Blocked: shares currency exposure with open ${correlatedWith}`);
+      await logPairSelectionEvent({
+        eventType: 'symbol_blocked_correlation',
+        symbol: candidate.symbol,
+        selected: false,
+        message: `${candidate.symbol} blocked — correlated with open ${correlatedWith}`,
+        reasons: candidate.reasons.slice(-3),
+        metadata: { correlatedWith, compositeScore: candidate.compositeScore },
+        selectionId,
+      });
+      continue;
+    }
+
+    if (openPositionSymbols.includes(candidate.symbol)) {
+      candidate.eligibleForNewEntry = false;
+      candidate.reasons.push('Open position already active — monitoring only, not a new entry target');
+      await logPairSelectionEvent({
+        eventType: 'symbol_rejected',
+        symbol: candidate.symbol,
+        selected: false,
+        message: `${candidate.symbol} skipped for new entry — position already open`,
+        reasons: candidate.reasons.slice(-3),
+        metadata: { compositeScore: candidate.compositeScore },
+        selectionId,
+      });
+      continue;
+    }
+
+    const symbolTradesToday = await countTradesOpenedTodayForSymbol(candidate.symbol);
+    if (
+      riskSettings.dailyTradeLimitEnabled
+      && riskSettings.symbolBasedTradeLimit
+      && symbolTradesToday >= riskSettings.tradesPerSymbolPerDay
+    ) {
+      candidate.blocked = true;
+      candidate.blockReason = `Symbol daily trade limit reached (${symbolTradesToday}/${riskSettings.tradesPerSymbolPerDay})`;
+      candidate.eligibleForNewEntry = false;
+      candidate.reasons.push(`Blocked: ${candidate.symbol} already traded ${symbolTradesToday} time(s) today`);
+      await logPairSelectionEvent({
+        eventType: 'symbol_blocked_limit',
+        symbol: candidate.symbol,
+        selected: false,
+        message: `${candidate.symbol} blocked — per-symbol daily limit reached`,
+        reasons: candidate.reasons.slice(-3),
+        metadata: { symbolTradesToday, tradesPerSymbolPerDay: riskSettings.tradesPerSymbolPerDay },
+        selectionId,
+      });
+      continue;
+    }
+
+    if (dailyLimitReached) {
+      candidate.blocked = true;
+      candidate.blockReason = 'Daily trade limit reached';
+      candidate.eligibleForNewEntry = false;
+      candidate.reasons.push(`Blocked: daily trade limit reached (${riskSettings.tradesOpenedToday}/${riskSettings.maxTradesPerDay})`);
+      await logPairSelectionEvent({
+        eventType: 'symbol_blocked_limit',
+        symbol: candidate.symbol,
+        selected: false,
+        message: `${candidate.symbol} blocked — daily trade limit reached`,
+        reasons: candidate.reasons.slice(-3),
+        metadata: { tradesOpenedToday: riskSettings.tradesOpenedToday, maxTradesPerDay: riskSettings.maxTradesPerDay },
+        selectionId,
+      });
+      continue;
+    }
+  }
+
+  const qualifiedSymbolsList = candidates
+    .filter((candidate) => candidate.tradable && !candidate.blocked)
+    .map((candidate) => candidate.symbol);
+  const eligibleForEntry = candidates.filter((candidate) => candidate.eligibleForNewEntry);
+  const newOrderTargets = eligibleForEntry.slice(0, Math.max(0, maxNewEntries));
   const fallback = watchlist[0] ?? 'XAUUSD';
-  const selectedSymbols = fullUniverse
-    ? watchlist
-    : rankedTradable.length > 0
-      ? rankedTradable.map((item) => item.symbol)
-      : [fallback];
-  const selectedSymbol = candidates.find((item) => item.tradable)?.symbol ?? selectedSymbols[0] ?? fallback;
+  const eligibleSymbolsList = newOrderTargets.map((item) => item.symbol);
+  const selectedSymbols = [...new Set([...qualifiedSymbolsList, ...openPositionSymbols])];
+  const selectedSymbol = newOrderTargets[0]?.symbol
+    ?? qualifiedSymbolsList[0]
+    ?? openPositionSymbols[0]
+    ?? candidates.find((item) => item.tradable)?.symbol
+    ?? fallback;
+
+  for (const candidate of candidates.filter((item) => qualifiedSymbolsList.includes(item.symbol))) {
+    await logPairSelectionEvent({
+      eventType: 'symbol_selected',
+      symbol: candidate.symbol,
+      selected: true,
+      message: `${candidate.symbol} selected — score ${candidate.compositeScore} (${candidate.session} session)`,
+      reasons: candidate.reasons.slice(-4),
+      metadata: { compositeScore: candidate.compositeScore, rank: candidate.rank },
+      selectionId,
+    });
+  }
+
+  const scanSummary = qualifiedSymbolsList.length > 0
+    ? `${qualifiedSymbolsList.length} qualified symbol(s): ${qualifiedSymbolsList.join(', ')}`
+      + (newOrderTargets.length > 0
+        ? ` · ${newOrderTargets.length} ready for new entry`
+        : openPositionLimitReached
+          ? ' · open position capacity full — pipeline scan only'
+          : dailyLimitReached
+            ? ' · daily trade limit reached'
+            : '')
+    : openPositionSymbols.length > 0
+      ? `No new qualified symbols — monitoring ${openPositionSymbols.join(', ')}.`
+      : 'No tradable symbols passed filters this cycle.';
 
   const result: PairSelectionResult = {
-    id: randomUUID(),
+    id: selectionId,
     selectedSymbol,
-    selectedSymbols,
+    selectedSymbols: selectedSymbols.length > 0 ? selectedSymbols : [fallback],
+    eligibleSymbols: eligibleSymbolsList,
+    qualifiedSymbols: qualifiedSymbolsList,
+    openPositionSymbols,
+    dailyLimitReached,
+    scanSummary,
     candidates,
     session,
     selectedAt: now.toISOString(),
-    source: fullUniverse || rankedTradable.length > 0 ? 'autonomous_scan' : 'config_fallback',
+    source: qualifiedSymbolsList.length > 0 ? 'autonomous_scan' : openPositionSymbols.length > 0 ? 'autonomous_scan' : 'config_fallback',
   };
+
+  await logPairSelectionEvent({
+    eventType: 'scan_completed',
+    symbol: selectedSymbol,
+    selected: qualifiedSymbolsList.length > 0,
+    message: scanSummary,
+    reasons: [
+      `Primary pick: ${selectedSymbol}`,
+      `Pipeline symbols: ${result.selectedSymbols.join(', ')}`,
+    ],
+    metadata: {
+      eligibleSymbols: eligibleSymbolsList,
+      qualifiedSymbols: qualifiedSymbolsList,
+      openPositionSymbols,
+      dailyLimitReached,
+    },
+    selectionId,
+  });
 
   await persistPairSelection(result);
   return result;
@@ -181,11 +389,29 @@ export async function getLatestPairSelection(): Promise<PairSelectionResult | nu
   );
   const row = result.rows[0];
   if (!row) return null;
-  const candidates = Array.isArray(row.candidates_json) ? row.candidates_json as PairSelectionCandidate[] : [];
+  const candidates = (Array.isArray(row.candidates_json) ? row.candidates_json as PairSelectionCandidate[] : []).map(
+    (candidate) => ({
+      ...candidate,
+      eligibleForNewEntry: candidate.eligibleForNewEntry ?? candidate.tradable,
+      blocked: candidate.blocked ?? false,
+      blockReason: candidate.blockReason ?? null,
+    }),
+  );
+  const selectedSymbols = Array.isArray(row.selected_symbols_json) ? row.selected_symbols_json.map(String) : [String(row.selected_symbol)];
+  const metadata = parseSelectionMetadata(row.reasons_json);
   return {
     id: String(row.id),
     selectedSymbol: String(row.selected_symbol),
-    selectedSymbols: Array.isArray(row.selected_symbols_json) ? row.selected_symbols_json.map(String) : [String(row.selected_symbol)],
+    selectedSymbols,
+    eligibleSymbols: metadata.eligibleSymbols.length > 0
+      ? metadata.eligibleSymbols
+      : candidates.filter((candidate) => candidate.eligibleForNewEntry).map((candidate) => candidate.symbol),
+    qualifiedSymbols: metadata.qualifiedSymbols.length > 0
+      ? metadata.qualifiedSymbols
+      : candidates.filter((candidate) => candidate.tradable && !candidate.blocked).map((candidate) => candidate.symbol),
+    openPositionSymbols: metadata.openPositionSymbols,
+    dailyLimitReached: metadata.dailyLimitReached,
+    scanSummary: metadata.scanSummary ?? `Latest scan: ${selectedSymbols.join(', ')}`,
     candidates,
     session: String(row.session ?? 'closed') as TradingSession,
     selectedAt: String(row.created_at),
@@ -208,9 +434,36 @@ export async function persistPairSelection(result: PairSelectionResult) {
       result.session,
       result.source,
       top?.compositeScore ?? null,
-      JSON.stringify(top?.reasons ?? []),
+      JSON.stringify({
+        topReasons: top?.reasons ?? [],
+        scanSummary: result.scanSummary,
+        eligibleSymbols: result.eligibleSymbols,
+        qualifiedSymbols: result.qualifiedSymbols,
+        openPositionSymbols: result.openPositionSymbols,
+        dailyLimitReached: result.dailyLimitReached,
+      }),
     ],
   );
+}
+
+function parseSelectionMetadata(raw: unknown) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {
+      scanSummary: null as string | null,
+      eligibleSymbols: [] as string[],
+      qualifiedSymbols: [] as string[],
+      openPositionSymbols: [] as string[],
+      dailyLimitReached: false,
+    };
+  }
+  const meta = raw as Record<string, unknown>;
+  return {
+    scanSummary: meta.scanSummary ? String(meta.scanSummary) : null,
+    eligibleSymbols: Array.isArray(meta.eligibleSymbols) ? meta.eligibleSymbols.map(String) : [],
+    qualifiedSymbols: Array.isArray(meta.qualifiedSymbols) ? meta.qualifiedSymbols.map(String) : [],
+    openPositionSymbols: Array.isArray(meta.openPositionSymbols) ? meta.openPositionSymbols.map(String) : [],
+    dailyLimitReached: Boolean(meta.dailyLimitReached),
+  };
 }
 
 async function fetchBestConnectedTerminal(): Promise<BridgeTerminal | null> {
@@ -292,15 +545,6 @@ async function loadPairMacroScores(symbols: string[]): Promise<Record<string, nu
   return scores;
 }
 
-function parsePairCurrencies(symbol: string): [string, string] {
-  const normalized = symbol.toUpperCase();
-  if (normalized.startsWith('XAU')) return ['XAU', normalized.slice(3)];
-  if (normalized.startsWith('BTC')) return ['BTC', normalized.slice(3)];
-  if (['US30', 'NASDAQ100', 'SP500', 'NAS100', 'SPX500'].includes(normalized)) return [normalized, 'USD'];
-  if (normalized.length >= 6) return [normalized.slice(0, 3), normalized.slice(3)];
-  return [normalized.slice(0, 3), normalized.slice(3)];
-}
-
 function currencyMacroScore(
   currency: string,
   biasByCurrency: Map<string, number>,
@@ -324,6 +568,3 @@ function biasToScore(bias: string | null, rateChange: unknown, surprise: unknown
   return clampScore(score);
 }
 
-function clampScore(value: number): number {
-  return Math.max(0, Math.min(100, Math.round(value)));
-}

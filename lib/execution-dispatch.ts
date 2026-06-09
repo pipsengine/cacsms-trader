@@ -108,6 +108,7 @@ export async function dispatchExecutionCommand(input: DispatchExecutionCommandIn
       terminalId: input.terminalId,
       commandId,
       intentId: input.intentId ?? (String(payload.intentId ?? '').trim() || undefined),
+      symbol: String(payload.symbol ?? '').trim().toUpperCase() || undefined,
       requestedLots: Number.isFinite(volume) ? volume : 0,
       stopLoss: Number(payload.sl ?? payload.stopLoss ?? 0),
       takeProfit: Number(payload.tp ?? payload.takeProfit ?? 0),

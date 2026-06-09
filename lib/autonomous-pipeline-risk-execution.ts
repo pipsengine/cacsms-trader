@@ -146,6 +146,7 @@ export async function advancePipelineRiskGate(
     terminalId,
     intentId: decision.decisionLogId,
     commandId: `pipeline-risk-${decision.decisionLogId.slice(0, 8)}`,
+    symbol: decision.symbol,
     requestedLots: sized.lots,
     sandboxMode: account.sandboxMode,
     environment: account.environment,
@@ -225,7 +226,7 @@ export async function advancePipelineExecution(
     };
   }
 
-  if (!(await shouldDispatchPipelineExecution(decision.decisionLogId, accountClass))) {
+  if (!(await shouldDispatchPipelineExecution(decision.decisionLogId, accountClass, decision.symbol))) {
     return {
       status: 'not_actionable',
       detail: 'Execution dispatch cooldown active or decision already dispatched.',
@@ -354,12 +355,13 @@ export async function getPipelineExecutionStatus(symbol: string) {
       const status = String(row.status);
       const blockers = Array.isArray(row.blockers_json) ? row.blockers_json : [];
       if (status === 'dispatched' || status === 'queued') {
+        const executed = bridge.acked > 0 || bridge.executedToday > 0;
         return {
-          status: bridge.acked > 0 ? 'completed' as const : 'in_progress' as const,
-          detail: bridge.acked > 0
-            ? `${bridge.acked} command(s) acknowledged by terminal.`
+          status: executed ? 'completed' as const : 'in_progress' as const,
+          detail: executed
+            ? `${Math.max(bridge.acked, bridge.executedToday)} command(s) acknowledged by terminal.`
             : `Command ${String(row.command_id ?? '')} queued for terminal.`,
-          progress: bridge.acked > 0 ? 100 : 55,
+          progress: executed ? 100 : 55,
           metrics: { ...bridge, commandId: row.command_id ? String(row.command_id) : null, blockers },
         };
       }
@@ -381,8 +383,14 @@ export async function getPipelineExecutionStatus(symbol: string) {
     }
   }
 
-  if (bridge.acked > 0) {
-    return { status: 'completed' as const, detail: `${bridge.acked} command(s) acknowledged by terminal.`, progress: 100, metrics: bridge };
+  if (bridge.acked > 0 || bridge.executedToday > 0) {
+    const count = Math.max(bridge.acked, bridge.executedToday);
+    return {
+      status: 'completed' as const,
+      detail: `${count} command(s) acknowledged by terminal${bridge.executedToday > 0 ? ` · ${bridge.executedToday} today` : ''}.`,
+      progress: 100,
+      metrics: bridge,
+    };
   }
   if (bridge.queued > 0) {
     return { status: 'in_progress' as const, detail: `${bridge.queued} command(s) queued for terminal.`, progress: 55, metrics: bridge };
@@ -390,49 +398,79 @@ export async function getPipelineExecutionStatus(symbol: string) {
   return { status: 'not_started' as const, detail: 'No execution commands in queue.', progress: 0, metrics: bridge };
 }
 
-async function getBridgeExecutionMetrics() {
+async function getPersistedExecutionMetrics() {
   try {
-    const [response, openPositionMetrics] = await Promise.all([
-      fetch(`${process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787'}/commands`, { cache: 'no-store' }),
-      getOpenPositionMetrics(),
-    ]);
-    if (!response.ok) throw new Error('bridge commands unavailable');
-    const payload = await response.json();
-    const commands = Array.isArray(payload.commands) ? payload.commands : [];
+    const result = await queryPostgres(
+      `
+        SELECT
+          COUNT(*) FILTER (
+            WHERE lifecycle_state IN ('EXECUTED', 'ACKNOWLEDGED')
+          )::int AS acked,
+          COUNT(*) FILTER (
+            WHERE lifecycle_state IN ('QUEUED', 'ROUTING', 'SENT')
+          )::int AS queued,
+          COUNT(*) FILTER (
+            WHERE lifecycle_state = 'EXECUTED'
+              AND created_at >= date_trunc('day', now())
+          )::int AS executed_today
+        FROM execution_commands
+        WHERE upper(replace(type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
+      `,
+    );
+    const row = result.rows[0] as { acked?: number; queued?: number; executed_today?: number } | undefined;
     return {
-      acked: commands.filter((item: { status?: string }) => item.status === 'acknowledged').length,
-      queued: commands.filter((item: { status?: string }) => item.status === 'queued' || item.status === 'leased').length,
-      openOrders: openPositionMetrics.openOrders,
-      trackedOpen: openPositionMetrics.trackedOpen,
-      terminalOpen: openPositionMetrics.terminalOpen,
-      openPositions: openPositionMetrics.positions.map((position) => ({
-        ticket: position.ticket,
-        symbol: position.symbol,
-        side: position.side,
-        volumeLots: position.volumeLots,
-        profitLoss: position.profitLoss,
-      })),
+      acked: Number(row?.acked ?? 0),
+      queued: Number(row?.queued ?? 0),
+      executedToday: Number(row?.executed_today ?? 0),
     };
   } catch {
-    const openPositionMetrics = await getOpenPositionMetrics().catch(() => ({
-      trackedOpen: 0,
-      terminalOpen: 0,
-      openOrders: 0,
-      positions: [],
-    }));
-    return {
-      acked: 0,
-      queued: 0,
-      openOrders: openPositionMetrics.openOrders,
-      trackedOpen: openPositionMetrics.trackedOpen,
-      terminalOpen: openPositionMetrics.terminalOpen,
-      openPositions: openPositionMetrics.positions.map((position) => ({
-        ticket: position.ticket,
-        symbol: position.symbol,
-        side: position.side,
-        volumeLots: position.volumeLots,
-        profitLoss: position.profitLoss,
-      })),
-    };
+    return { acked: 0, queued: 0, executedToday: 0 };
   }
+}
+
+export async function getBridgeExecutionMetrics() {
+  const openPositionMetrics = await getOpenPositionMetrics().catch(() => ({
+    trackedOpen: 0,
+    terminalOpen: 0,
+    openOrders: 0,
+    positions: [] as Array<{
+      ticket: string;
+      symbol: string | null;
+      side: string | null;
+      volumeLots: number | null;
+      profitLoss: number;
+    }>,
+  }));
+
+  const persisted = await getPersistedExecutionMetrics();
+  let bridgeQueued = 0;
+  let bridgeAcked = 0;
+
+  try {
+    const response = await fetch(`${process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787'}/commands`, { cache: 'no-store' });
+    if (response.ok) {
+      const payload = await response.json();
+      const commands = Array.isArray(payload.commands) ? payload.commands : [];
+      bridgeAcked = commands.filter((item: { status?: string }) => item.status === 'acknowledged').length;
+      bridgeQueued = commands.filter((item: { status?: string }) => item.status === 'queued' || item.status === 'leased').length;
+    }
+  } catch {
+    // fall back to persisted metrics only
+  }
+
+  return {
+    acked: Math.max(persisted.acked, bridgeAcked),
+    queued: Math.max(persisted.queued, bridgeQueued),
+    executedToday: persisted.executedToday,
+    openOrders: openPositionMetrics.openOrders,
+    trackedOpen: openPositionMetrics.trackedOpen,
+    terminalOpen: openPositionMetrics.terminalOpen,
+    openPositions: openPositionMetrics.positions.map((position) => ({
+      ticket: position.ticket,
+      symbol: position.symbol,
+      side: position.side,
+      volumeLots: position.volumeLots,
+      profitLoss: position.profitLoss,
+    })),
+  };
 }

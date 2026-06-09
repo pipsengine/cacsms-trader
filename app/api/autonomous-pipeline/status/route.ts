@@ -4,7 +4,8 @@ export async function GET(request: Request): Promise<Response> {
   try {
     const url = new URL(request.url);
     const symbol = url.searchParams.get('symbol') ?? 'AUTO';
-    const status = await getAutonomousPipelineStatus(symbol);
+    const advance = url.searchParams.get('advance') === 'true';
+    const status = await getAutonomousPipelineStatus(symbol, { advance });
     return Response.json({ ok: true, status }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return Response.json(

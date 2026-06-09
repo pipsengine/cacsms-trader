@@ -1,11 +1,19 @@
 import crypto from 'node:crypto';
+
 import { dispatchExecutionCommand } from '@/lib/execution-dispatch';
 import { listOpenPositions, updatePositionEvaluation } from '@/lib/execution-open-positions';
 import { isExecutionEnabled } from '@/lib/execution-policy';
-import { TradeMonitoringEngine, type OpenTradeSnapshot } from '@/services/trade-monitor-service/src/trade-monitoring-engine';
+import { parsePositionManagementMetadata } from '@/lib/position-management-state';
+import { syncOpenPositionLiveMetrics } from '@/lib/position-profit-sync';
+import { getPositionManagementConfig } from '@/lib/trade-monitor-config';
+import {
+  TradeMonitoringEngine,
+  type EnrichedTradeSnapshot,
+  type TradeManagementAction,
+} from '@/services/trade-monitor-service/src/trade-monitoring-engine';
 
-const engine = new TradeMonitoringEngine();
 let lastTickAt = 0;
+let engine = new TradeMonitoringEngine(getPositionManagementConfig());
 
 function envBool(name: string, fallback = false): boolean {
   const raw = String(process.env[name] ?? '').trim().toLowerCase();
@@ -17,21 +25,43 @@ export function isTradeMonitorEnabled(): boolean {
   return envBool('CACSMS_ENABLE_TRADE_MONITOR', true) && isExecutionEnabled();
 }
 
-function toSnapshot(position: Awaited<ReturnType<typeof listOpenPositions>>[number]): OpenTradeSnapshot {
+function defaultRiskPoints(symbol: string): number {
+  const config = getPositionManagementConfig();
+  const normalized = symbol.toUpperCase();
+  if (normalized.startsWith('XAU') || normalized.startsWith('XAG')) return config.defaultRiskPointsGold;
+  if (['US30', 'NASDAQ100', 'NAS100', 'SP500', 'SPX500', 'US500'].includes(normalized)) {
+    return config.defaultRiskPointsIndex;
+  }
+  return config.defaultRiskPointsForex;
+}
+
+function buildEnrichedSnapshot(position: Awaited<ReturnType<typeof listOpenPositions>>[number]): EnrichedTradeSnapshot {
+  const config = getPositionManagementConfig();
   const entry = position.entryPrice ?? position.currentPrice ?? 0;
   const side = String(position.side ?? 'buy').toLowerCase() === 'sell' ? 'sell' : 'buy';
+  const symbol = String(position.symbol ?? 'EURUSD').toUpperCase();
+  const point = symbol.startsWith('XAU') ? 0.01 : symbol.startsWith('BTC') ? 1 : 0.00001;
+  const currentPrice = position.currentPrice ?? entry;
+  const favorablePoints = side === 'buy'
+    ? Math.max(0, (currentPrice - entry) / point)
+    : Math.max(0, (entry - currentPrice) / point);
+  const stop = position.stopLoss ?? 0;
+  const riskPoints = entry > 0 && stop > 0 && Math.abs(entry - stop) > point
+    ? Math.abs(entry - stop) / point
+    : defaultRiskPoints(symbol);
+
   return {
     ticket: position.ticket,
     intent: {
       intentId: position.openCommandId,
       terminalId: position.terminalId,
       accountNumber: 'unknown',
-      symbol: position.symbol ?? 'EURUSD',
+      symbol,
       side,
       orderKind: 'market',
       requestedVolumeLots: position.volumeLots ?? 0.01,
       entryPrice: entry,
-      stopLoss: position.stopLoss ?? entry,
+      stopLoss: stop || entry,
       takeProfit: position.takeProfit ?? entry,
       strategyId: 'trade-monitor',
       setupScore: 0,
@@ -39,10 +69,21 @@ function toSnapshot(position: Awaited<ReturnType<typeof listOpenPositions>>[numb
       rewardRiskRatio: 1,
       createdAt: position.openedAt,
     },
-    currentPrice: position.currentPrice ?? entry,
+    currentPrice,
     profitLoss: position.profitLoss,
     openedAt: position.openedAt,
     lastUpdatedAt: new Date().toISOString(),
+    symbol,
+    side,
+    volumeLots: position.volumeLots ?? 0.01,
+    point,
+    spreadPoints: config.spreadBufferPoints,
+    bufferPoints: config.spreadBufferPoints,
+    currentSl: stop,
+    favorablePoints,
+    riskPoints,
+    rMultiple: riskPoints > 0 ? favorablePoints / riskPoints : 0,
+    management: parsePositionManagementMetadata(position.metadata),
   };
 }
 
@@ -50,6 +91,7 @@ async function dispatchManagementCommand(input: {
   terminalId: string;
   type: string;
   ticket: string;
+  symbol: string;
   payload: Record<string, unknown>;
   reason: string;
 }): Promise<boolean> {
@@ -61,6 +103,7 @@ async function dispatchManagementCommand(input: {
       payload: {
         ...input.payload,
         ticket: input.ticket,
+        symbol: input.symbol,
         reason: input.reason,
         source: 'TRADE_MONITOR',
       },
@@ -75,62 +118,95 @@ async function dispatchManagementCommand(input: {
   }
 }
 
-export async function runTradeMonitorTick(now = Date.now()): Promise<{
+function metadataAfterAction(action: TradeManagementAction): Record<string, unknown> {
+  const now = new Date().toISOString();
+  if (action.action === 'move_to_break_even' || action.action === 'profit_reversal_guard') {
+    return { breakEvenApplied: true, lastActionAt: now };
+  }
+  if (action.action === 'profit_lock_stop') {
+    return {
+      profitLockApplied: true,
+      breakEvenApplied: true,
+      lastLockedSl: action.stopLoss ?? null,
+      lastActionAt: now,
+    };
+  }
+  return { lastActionAt: now };
+}
+
+function shouldSkipCooldown(position: Awaited<ReturnType<typeof listOpenPositions>>[number], urgent: boolean): boolean {
+  if (!position.lastEvaluatedAt) return false;
+  const config = getPositionManagementConfig();
+  const elapsedSec = (Date.now() - new Date(position.lastEvaluatedAt).getTime()) / 1000;
+  return elapsedSec < (urgent ? config.urgentCooldownSec : config.normalCooldownSec);
+}
+
+export async function runTradeMonitorTick(now = Date.now(), options?: { force?: boolean }): Promise<{
   evaluated: number;
   actions: number;
   dispatched: number;
+  synced: number;
 }> {
   if (!isTradeMonitorEnabled()) {
-    return { evaluated: 0, actions: 0, dispatched: 0 };
+    return { evaluated: 0, actions: 0, dispatched: 0, synced: 0 };
   }
-  if (now - lastTickAt < 10_000) {
-    return { evaluated: 0, actions: 0, dispatched: 0 };
+
+  const throttleMs = options?.force ? 0 : 5_000;
+  if (now - lastTickAt < throttleMs) {
+    return { evaluated: 0, actions: 0, dispatched: 0, synced: 0 };
   }
   lastTickAt = now;
 
+  engine = new TradeMonitoringEngine(getPositionManagementConfig());
+  const sync = await syncOpenPositionLiveMetrics();
   const positions = await listOpenPositions({ limit: 100 });
   let actions = 0;
   let dispatched = 0;
 
   for (const position of positions) {
-    const snapshot = toSnapshot(position);
-    const breakEven = engine.evaluateBreakEven(snapshot);
-    const partial = engine.evaluatePartialClose(snapshot, 2);
-    const trailing = engine.evaluateTrailingStop(snapshot);
-    const timeExit = engine.evaluateTimeBasedExit(snapshot, envNumber('CACSMS_TRADE_MONITOR_MAX_MINUTES', 240));
-
-    if (position.lastEvaluatedAt && Date.now() - new Date(position.lastEvaluatedAt).getTime() < 60_000) {
-      continue;
-    }
-
-    const candidates = [breakEven, partial, trailing, timeExit].filter((item) => item.action !== 'hold');
-    const chosen = candidates[0];
-    if (!chosen) {
+    const snapshot = buildEnrichedSnapshot(position);
+    const decision = engine.evaluatePosition(snapshot);
+    if (decision.action === 'hold') {
       await updatePositionEvaluation({
         id: position.id,
         currentPrice: snapshot.currentPrice,
         profitLoss: snapshot.profitLoss,
         lastAction: 'hold',
-        lastActionReason: 'No management threshold reached.',
+        lastActionReason: decision.reason,
       });
       continue;
     }
 
+    if (shouldSkipCooldown(position, decision.urgent)) continue;
+
     actions += 1;
     let commandType = '';
-    let payload: Record<string, unknown> = { ticket: position.ticket, reason: chosen.reason };
+    const payload: Record<string, unknown> = {
+      ticket: position.ticket,
+      symbol: snapshot.symbol,
+      reason: decision.reason,
+    };
 
-    switch (chosen.action) {
+    switch (decision.action) {
       case 'move_to_break_even':
+      case 'profit_reversal_guard':
         commandType = 'move_to_breakeven';
+        payload.bufferPoints = decision.bufferPoints ?? getPositionManagementConfig().spreadBufferPoints;
+        break;
+      case 'profit_lock_stop':
+        commandType = 'modify_order';
+        payload.stopLoss = decision.stopLoss;
         break;
       case 'partial_close':
         commandType = 'partial_close';
-        payload.volumeLots = Math.max(0.01, Number(((position.volumeLots ?? 0.01) / 2).toFixed(2)));
+        payload.volumeLots = Math.max(
+          0.01,
+          Number(((position.volumeLots ?? 0.01) * (decision.partialCloseFraction ?? 0.5)).toFixed(2)),
+        );
         break;
       case 'trail_stop':
         commandType = 'set_trailing_stop';
-        payload.trailingPoints = envNumber('CACSMS_TRADE_MONITOR_TRAILING_POINTS', 150);
+        payload.trailingPoints = decision.trailingPoints ?? getPositionManagementConfig().trailingPoints;
         break;
       case 'time_exit':
       case 'invalid_setup_exit':
@@ -144,8 +220,9 @@ export async function runTradeMonitorTick(now = Date.now()): Promise<{
       terminalId: position.terminalId,
       type: commandType,
       ticket: position.ticket,
+      symbol: snapshot.symbol,
       payload,
-      reason: chosen.reason,
+      reason: decision.reason,
     });
     if (ok) dispatched += 1;
 
@@ -153,17 +230,16 @@ export async function runTradeMonitorTick(now = Date.now()): Promise<{
       id: position.id,
       currentPrice: snapshot.currentPrice,
       profitLoss: snapshot.profitLoss,
-      lastAction: chosen.action,
-      lastActionReason: chosen.reason,
+      lastAction: decision.action,
+      lastActionReason: decision.reason,
+      metadata: metadataAfterAction(decision),
     });
   }
 
-  return { evaluated: positions.length, actions, dispatched };
-}
-
-function envNumber(name: string, fallback: number): number {
-  const raw = String(process.env[name] ?? '').trim();
-  if (!raw) return fallback;
-  const value = Number(raw);
-  return Number.isFinite(value) ? value : fallback;
+  return {
+    evaluated: positions.length,
+    actions,
+    dispatched,
+    synced: sync.updated,
+  };
 }

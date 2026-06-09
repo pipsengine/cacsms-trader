@@ -10,8 +10,19 @@ import { cn } from '@/lib/utils';
 type RiskSettings = {
   dailyTradeLimitEnabled: boolean;
   maxTradesPerDay: number;
+  tradesPerSymbolPerDay: number;
+  symbolBasedTradeLimit: boolean;
+  activeSymbolCount: number;
+  activeSymbols: string[];
+  maxOpenPositions: number;
+  openPositions: number;
+  remainingOpenPositions: number;
   tradesOpenedToday: number;
   remainingTradesToday: number | null;
+  openExposureDrawdownFraction: number;
+  dailyDrawdownBudgetUsd: number;
+  openExposureBudgetUsd: number;
+  riskPerPositionUsd: number;
 };
 
 export function ExecutionRiskSettingsPanel(props: {
@@ -21,7 +32,7 @@ export function ExecutionRiskSettingsPanel(props: {
   const apiPath = props.apiPath ?? '/api/autonomous-pipeline/risk-settings';
   const [settings, setSettings] = useState<RiskSettings | null>(null);
   const [draftEnabled, setDraftEnabled] = useState(false);
-  const [draftMax, setDraftMax] = useState(5);
+  const [draftPerSymbol, setDraftPerSymbol] = useState(1);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -39,7 +50,7 @@ export function ExecutionRiskSettingsPanel(props: {
       const next = payload.settings as RiskSettings;
       setSettings(next);
       setDraftEnabled(next.dailyTradeLimitEnabled);
-      setDraftMax(next.maxTradesPerDay);
+      setDraftPerSymbol(next.tradesPerSymbolPerDay);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load risk settings.');
     } finally {
@@ -53,9 +64,12 @@ export function ExecutionRiskSettingsPanel(props: {
     return () => window.clearInterval(interval);
   }, [loadSettings]);
 
-  const saveSettings = async (override?: { dailyTradeLimitEnabled?: boolean; maxTradesPerDay?: number }) => {
+  const saveSettings = async (override?: {
+    dailyTradeLimitEnabled?: boolean;
+    tradesPerSymbolPerDay?: number;
+  }) => {
     const nextEnabled = override?.dailyTradeLimitEnabled ?? draftEnabled;
-    const nextMax = override?.maxTradesPerDay ?? draftMax;
+    const nextPerSymbol = override?.tradesPerSymbolPerDay ?? draftPerSymbol;
     setSaving(true);
     setError(null);
     setMessage(null);
@@ -65,7 +79,7 @@ export function ExecutionRiskSettingsPanel(props: {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           dailyTradeLimitEnabled: nextEnabled,
-          maxTradesPerDay: nextMax,
+          tradesPerSymbolPerDay: nextPerSymbol,
         }),
       });
       const payload = await response.json();
@@ -75,10 +89,10 @@ export function ExecutionRiskSettingsPanel(props: {
       const next = payload.settings as RiskSettings;
       setSettings(next);
       setDraftEnabled(next.dailyTradeLimitEnabled);
-      setDraftMax(next.maxTradesPerDay);
+      setDraftPerSymbol(next.tradesPerSymbolPerDay);
       setMessage(
         next.dailyTradeLimitEnabled
-          ? `Daily trade limit enabled at ${next.maxTradesPerDay} trades per day.`
+          ? `Limits active — ${next.tradesPerSymbolPerDay} trade(s) per symbol × ${next.activeSymbolCount} symbols = ${next.maxTradesPerDay} daily trades.`
           : 'Daily trade limit disabled — autonomous execution is open for demo validation.',
       );
     } catch (saveError) {
@@ -89,7 +103,7 @@ export function ExecutionRiskSettingsPanel(props: {
   };
 
   const dirty = settings
-    ? draftEnabled !== settings.dailyTradeLimitEnabled || draftMax !== settings.maxTradesPerDay
+    ? draftEnabled !== settings.dailyTradeLimitEnabled || draftPerSymbol !== settings.tradesPerSymbolPerDay
     : false;
 
   return (
@@ -98,7 +112,7 @@ export function ExecutionRiskSettingsPanel(props: {
         <div className="flex items-center justify-between gap-3">
           <CardTitle className="flex items-center gap-2 text-sm font-semibold text-slate-900">
             <ShieldAlert className="h-4 w-4 text-amber-600" />
-            Daily trade limit
+            Risk limits — open positions vs daily trades
           </CardTitle>
           <Button variant="outline" size="sm" onClick={() => void loadSettings()} disabled={loading}>
             <RefreshCw className={cn('mr-2 h-4 w-4', loading && 'animate-spin')} />
@@ -106,33 +120,62 @@ export function ExecutionRiskSettingsPanel(props: {
           </Button>
         </div>
       </CardHeader>
-      <CardContent className="space-y-4 p-4">
+      <CardContent className="space-y-5 p-4">
         {error ? <p className="text-sm text-rose-700">{error}</p> : null}
         {message ? <p className="text-sm text-emerald-700">{message}</p> : null}
 
-        <div className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-            <p className="text-[11px] uppercase tracking-wide text-slate-500">Trades today</p>
-            <p className="mt-1 font-mono text-xl text-slate-950">{settings?.tradesOpenedToday ?? '—'}</p>
+        <div className="rounded-md border border-blue-200 bg-blue-50/70 p-3">
+          <p className="text-sm font-medium text-blue-900">Open position capacity (drawdown-based)</p>
+          <p className="mt-1 text-xs text-blue-800">
+            Uses {Math.round((settings?.openExposureDrawdownFraction ?? 0.5) * 100)}% of the daily drawdown budget
+            (${settings?.openExposureBudgetUsd?.toFixed(0) ?? '—'} of ${settings?.dailyDrawdownBudgetUsd?.toFixed(0) ?? '—'})
+            divided by risk per position (${settings?.riskPerPositionUsd?.toFixed(2) ?? '—'}).
+          </p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            <div className="rounded-md border border-blue-100 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">Open now</p>
+              <p className="mt-1 font-mono text-xl text-slate-950">{settings?.openPositions ?? '—'}</p>
+            </div>
+            <div className="rounded-md border border-blue-100 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">Max open</p>
+              <p className="mt-1 font-mono text-xl text-slate-950">{settings?.maxOpenPositions ?? '—'}</p>
+            </div>
+            <div className="rounded-md border border-blue-100 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">Slots left</p>
+              <p className="mt-1 font-mono text-xl text-slate-950">{settings?.remainingOpenPositions ?? '—'}</p>
+            </div>
           </div>
-          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-            <p className="text-[11px] uppercase tracking-wide text-slate-500">Remaining today</p>
-            <p className="mt-1 font-mono text-xl text-slate-950">
-              {settings?.remainingTradesToday == null ? 'Open' : settings.remainingTradesToday}
-            </p>
-          </div>
-          <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
-            <p className="text-[11px] uppercase tracking-wide text-slate-500">Gate status</p>
-            <p className={cn('mt-1 text-sm font-medium', draftEnabled ? 'text-amber-700' : 'text-emerald-700')}>
-              {draftEnabled ? 'Limit enforced' : 'Limit disabled'}
-            </p>
+        </div>
+
+        <div className="rounded-md border border-amber-200 bg-amber-50/60 p-3">
+          <p className="text-sm font-medium text-amber-900">Daily trades (symbol-based)</p>
+          <p className="mt-1 text-xs text-amber-800">
+            Total daily trades = trades per symbol × active symbols
+            ({settings?.activeSymbolCount ?? '—'}
+            {settings?.activeSymbols?.length ? `: ${settings.activeSymbols.slice(0, 4).join(', ')}${settings.activeSymbols.length > 4 ? '…' : ''}` : ''}).
+          </p>
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            <div className="rounded-md border border-amber-100 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">Trades today</p>
+              <p className="mt-1 font-mono text-xl text-slate-950">{settings?.tradesOpenedToday ?? '—'}</p>
+            </div>
+            <div className="rounded-md border border-amber-100 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">Max today</p>
+              <p className="mt-1 font-mono text-xl text-slate-950">{settings?.maxTradesPerDay ?? '—'}</p>
+            </div>
+            <div className="rounded-md border border-amber-100 bg-white px-3 py-2">
+              <p className="text-[11px] uppercase tracking-wide text-slate-500">Remaining</p>
+              <p className="mt-1 font-mono text-xl text-slate-950">
+                {settings?.remainingTradesToday == null ? 'Open' : settings.remainingTradesToday}
+              </p>
+            </div>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-slate-200 px-3 py-3">
           <div>
             <p className="text-sm font-medium text-slate-900">Enable daily trade limit</p>
-            <p className="text-xs text-slate-500">Disable this to keep demo autonomous trading open while validating execution.</p>
+            <p className="text-xs text-slate-500">Open position capacity stays drawdown-based even when this is disabled.</p>
           </div>
           <button
             type="button"
@@ -154,49 +197,39 @@ export function ExecutionRiskSettingsPanel(props: {
         </div>
 
         <div className={cn('space-y-2', !draftEnabled && 'opacity-50')}>
-          <p className="text-sm font-medium text-slate-900">Maximum trades per day</p>
+          <p className="text-sm font-medium text-slate-900">Trades per symbol per day</p>
           <div className="flex items-center gap-2">
             <Button
               type="button"
               variant="outline"
               size="icon"
-              disabled={!draftEnabled || draftMax <= 1}
-              onClick={() => setDraftMax((current) => Math.max(1, current - 1))}
+              disabled={!draftEnabled || draftPerSymbol <= 1}
+              onClick={() => setDraftPerSymbol((current) => Math.max(1, current - 1))}
             >
               <Minus className="h-4 w-4" />
             </Button>
             <input
               type="number"
               min={1}
-              max={999}
+              max={20}
               disabled={!draftEnabled}
-              value={draftMax}
-              onChange={(event) => setDraftMax(Math.min(999, Math.max(1, Number(event.target.value) || 1)))}
+              value={draftPerSymbol}
+              onChange={(event) => setDraftPerSymbol(Math.min(20, Math.max(1, Number(event.target.value) || 1)))}
               className="h-10 w-24 rounded-md border border-slate-200 bg-white px-3 text-center font-mono text-sm"
             />
             <Button
               type="button"
               variant="outline"
               size="icon"
-              disabled={!draftEnabled || draftMax >= 999}
-              onClick={() => setDraftMax((current) => Math.min(999, current + 1))}
+              disabled={!draftEnabled || draftPerSymbol >= 20}
+              onClick={() => setDraftPerSymbol((current) => Math.min(20, current + 1))}
             >
               <Plus className="h-4 w-4" />
             </Button>
-            <div className="flex flex-wrap gap-2">
-              {[5, 10, 20, 50].map((preset) => (
-                <Button
-                  key={preset}
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={!draftEnabled}
-                  onClick={() => setDraftMax(preset)}
-                >
-                  {preset}
-                </Button>
-              ))}
-            </div>
+            <p className="text-xs text-slate-500">
+              Computed daily cap: {draftPerSymbol} × {settings?.activeSymbolCount ?? '—'} ={' '}
+              {draftPerSymbol * (settings?.activeSymbolCount ?? 0)} trades
+            </p>
           </div>
         </div>
 
@@ -213,7 +246,7 @@ export function ExecutionRiskSettingsPanel(props: {
               void saveSettings({ dailyTradeLimitEnabled: false });
             }}
           >
-            Disable limit (open trading)
+            Disable daily trade limit
           </Button>
         </div>
       </CardContent>

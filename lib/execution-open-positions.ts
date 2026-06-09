@@ -1,3 +1,4 @@
+import type { PositionManagementMetadata } from '@/lib/position-management-state';
 import { queryPostgres } from '@/lib/postgres';
 
 export type ExecutionOpenPosition = {
@@ -19,6 +20,7 @@ export type ExecutionOpenPosition = {
   lastEvaluatedAt: string | null;
   lastAction: string | null;
   lastActionReason: string | null;
+  metadata: Record<string, unknown>;
 };
 
 function mapRow(row: Record<string, unknown>): ExecutionOpenPosition {
@@ -41,6 +43,7 @@ function mapRow(row: Record<string, unknown>): ExecutionOpenPosition {
     lastEvaluatedAt: row.last_evaluated_at ? new Date(String(row.last_evaluated_at)).toISOString() : null,
     lastAction: row.last_action ? String(row.last_action) : null,
     lastActionReason: row.last_action_reason ? String(row.last_action_reason) : null,
+    metadata: (row.metadata as Record<string, unknown>) ?? {},
   };
 }
 
@@ -232,12 +235,22 @@ async function getTerminalOpenOrderCount(): Promise<number> {
   try {
     const result = await queryPostgres(
       `
-        SELECT COALESCE(SUM(GREATEST(open_orders, 0)), 0)::int AS total
-        FROM mt5_terminals
-        WHERE connection_status IN ('connected', 'degraded')
+        SELECT
+          COALESCE(SUM(GREATEST(t.open_orders, 0)), 0)::int AS tracked_total,
+          COALESCE(SUM(
+            CASE
+              WHEN GREATEST(t.open_orders, 0) > 0 THEN GREATEST(t.open_orders, 0)
+              WHEN COALESCE(a.margin, 0) > 0 THEN GREATEST(1, ROUND(COALESCE(a.margin, 0) / 2.8))
+              ELSE 0
+            END
+          ), 0)::int AS resolved_total
+        FROM mt5_terminals t
+        JOIN trading_accounts a ON a.account_number = t.account_number
+        WHERE t.connection_status IN ('connected', 'degraded')
       `,
     );
-    return Number((result.rows[0] as { total?: number })?.total ?? 0);
+    const row = result.rows[0] as { tracked_total?: number; resolved_total?: number } | undefined;
+    return Math.max(Number(row?.tracked_total ?? 0), Number(row?.resolved_total ?? 0));
   } catch {
     return 0;
   }
@@ -288,6 +301,7 @@ export async function updatePositionEvaluation(input: {
   profitLoss?: number;
   lastAction: string;
   lastActionReason: string;
+  metadata?: Record<string, unknown>;
 }): Promise<void> {
   await queryPostgres(
     `
@@ -297,9 +311,44 @@ export async function updatePositionEvaluation(input: {
           last_evaluated_at = now(),
           last_action = $4,
           last_action_reason = $5,
+          metadata = CASE WHEN $6::jsonb IS NULL THEN metadata ELSE metadata || $6::jsonb END,
           updated_at = now()
       WHERE id = $1
     `,
-    [input.id, input.currentPrice ?? null, input.profitLoss ?? null, input.lastAction, input.lastActionReason],
+    [
+      input.id,
+      input.currentPrice ?? null,
+      input.profitLoss ?? null,
+      input.lastAction,
+      input.lastActionReason,
+      input.metadata ? JSON.stringify(input.metadata) : null,
+    ],
+  ).catch(() => null);
+}
+
+export async function updatePositionLiveMetrics(input: {
+  id: string;
+  currentPrice: number;
+  profitLoss: number;
+  stopLoss?: number | null;
+  metadata: PositionManagementMetadata | Record<string, unknown>;
+}): Promise<void> {
+  await queryPostgres(
+    `
+      UPDATE execution_open_positions
+      SET current_price = $2,
+          profit_loss = $3,
+          stop_loss = COALESCE($4, stop_loss),
+          metadata = metadata || $5::jsonb,
+          updated_at = now()
+      WHERE id = $1
+    `,
+    [
+      input.id,
+      input.currentPrice,
+      input.profitLoss,
+      input.stopLoss ?? null,
+      JSON.stringify(input.metadata),
+    ],
   ).catch(() => null);
 }

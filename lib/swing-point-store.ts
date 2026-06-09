@@ -138,6 +138,20 @@ export async function getSwingLiquidity(captureId: string): Promise<SwingDetecti
   return swings.filter((swing) => swing.liquidityRelevance >= 0.68 || swing.swept);
 }
 
+export async function getSwingCoverageMap(): Promise<Record<string, number>> {
+  await ensureSwingPointSchema();
+  const result = await queryPostgres(`
+    SELECT chart_capture_id, COUNT(*)::int AS swing_count
+    FROM swing_point_detections
+    GROUP BY chart_capture_id
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.chart_capture_id)] = Number(row.swing_count);
+  }
+  return coverage;
+}
+
 export async function createSwingFeedback(input: {
   swingDetectionId: string;
   userId?: string;

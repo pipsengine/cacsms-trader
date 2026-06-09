@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   Menu,
@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 
 import { AutonomousPipelineStageCard } from '@/components/autonomous-pipeline-stage-card';
+import { PairSelectionLivePanel } from '@/components/pair-selection-live-panel';
 import { ExecutionRiskSettingsPanel } from '@/components/execution-risk-settings-panel';
 import { TraderSidebar } from '@/components/trader-sidebar';
 import { Button } from '@/components/ui/button';
@@ -72,6 +73,7 @@ export default function AutonomousPipelinePage() {
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const advanceInFlight = useRef(false);
 
   const stageDefinitions = useMemo(
     () =>
@@ -94,7 +96,7 @@ export default function AutonomousPipelinePage() {
     const timeout = window.setTimeout(() => controller.abort(), 20_000);
     try {
       const [statusResponse, terminalsResponse] = await Promise.all([
-        fetch(`/api/autonomous-pipeline/status?symbol=${encodeURIComponent(symbol)}`, { cache: 'no-store', signal: controller.signal }),
+        fetch(`/api/autonomous-pipeline/status?symbol=${encodeURIComponent(symbol)}&advance=false`, { cache: 'no-store', signal: controller.signal }),
         fetch('/api/mt5/terminals', { cache: 'no-store', signal: controller.signal }),
       ]);
       const statusPayload = await statusResponse.json();
@@ -116,6 +118,30 @@ export default function AutonomousPipelinePage() {
     const interval = window.setInterval(loadStatus, 15_000);
     return () => window.clearInterval(interval);
   }, [loadStatus]);
+
+  useEffect(() => {
+    const runAdvance = async () => {
+      if (advanceInFlight.current) return;
+      advanceInFlight.current = true;
+      try {
+        await fetch('/api/autonomous-pipeline/advance', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ symbol }),
+          cache: 'no-store',
+        });
+        await loadStatus();
+      } catch {
+        // advance retries on the next tick
+      } finally {
+        advanceInFlight.current = false;
+      }
+    };
+
+    void runAdvance();
+    const interval = window.setInterval(runAdvance, 45_000);
+    return () => window.clearInterval(interval);
+  }, [symbol, loadStatus]);
 
   const startSession = async () => {
     const connected = terminals.find((terminal) => terminal.status === 'connected');
@@ -267,6 +293,8 @@ export default function AutonomousPipelinePage() {
               </CardContent>
             </Card>
           </div>
+
+          <PairSelectionLivePanel />
 
           <ExecutionRiskSettingsPanel />
 

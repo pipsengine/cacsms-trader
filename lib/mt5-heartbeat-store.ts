@@ -100,7 +100,7 @@ export async function recordTerminalHeartbeat(payload: HeartbeatPayload) {
   const equity = numeric(payload.equity, balance);
   const margin = numeric(payload.margin);
   const freeMargin = numeric(payload.freeMargin);
-  const openOrders = integer(payload.openOrders);
+  const openOrders = Math.max(integer(payload.openOrders), integer(payload.openPositions ?? payload.openOrders));
   const sequence = integer(payload.sequence);
   const latencyMs = Math.max(0, integer(payload.latencyMs ?? resolveLatencyMs(payload.sentAt, receivedAt)));
   const version = text(payload.version, 'unknown');

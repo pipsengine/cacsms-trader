@@ -9,7 +9,8 @@ import { advancePipelineAnalysis } from './autonomous-pipeline-analysis';
 import { getPipelineExecutionStatus, getPipelineRiskStatus } from './autonomous-pipeline-risk-execution';
 import { getMacroPipelineStatus } from './macro-intelligence-store';
 import { syncMt5CaptureAcks } from './mt5-capture-ingest';
-import { getLatestPairSelection, runAutonomousPairSelection } from './pair-selector';
+import { resolvePipelineSymbolUniverse } from './pipeline-symbol-universe';
+import { getLatestPairSelection, maybeRefreshPairSelection, runAutonomousPairSelection } from './pair-selector';
 import { getLatestPipelineSession, listPipelineEvents } from './top-down-orchestrator';
 import { queryPostgres } from './postgres';
 
@@ -29,12 +30,26 @@ export interface PipelineStageStatusView {
 export interface AutonomousPipelineStatus {
   mode: string;
   activeSymbol: string;
+  activeSymbols: string[];
   pairSelection: {
     selectedSymbol: string;
     selectedAt: string | null;
     source: string;
     session: string;
-    candidates: Array<{ symbol: string; compositeScore: number; tradable: boolean; rank: number }>;
+    eligibleSymbols: string[];
+    openPositionSymbols: string[];
+    scanSummary: string;
+    dailyLimitReached: boolean;
+    candidates: Array<{
+      symbol: string;
+      compositeScore: number;
+      tradable: boolean;
+      eligibleForNewEntry: boolean;
+      blocked: boolean;
+      blockReason: string | null;
+      rank: number;
+      reasons: string[];
+    }>;
   } | null;
   bridgeOnline: boolean;
   connectedTerminals: number;
@@ -52,34 +67,87 @@ export interface AutonomousPipelineStatus {
   generatedAt: string;
 }
 
-export async function getAutonomousPipelineStatus(symbol = 'AUTO'): Promise<AutonomousPipelineStatus> {
+export interface AutonomousPipelineStatusOptions {
+  /** Run capture sync + analysis/execution advance (heavy). Default true for programmatic callers. */
+  advance?: boolean;
+  /** Run pair selection when none exists. Default follows `advance`. */
+  runPairSelectionIfMissing?: boolean;
+}
+
+/** Heavy pipeline work: pair refresh, trade monitor, capture sync, and analysis per symbol. */
+export async function advanceAutonomousPipeline(symbol = 'AUTO'): Promise<{ symbols: string[] }> {
   await ensureAutonomySchema();
   await ensureFocusSymbolsConfigured();
   const requestedSymbol = symbol.toUpperCase();
   let latestSelection = await getLatestPairSelection();
-  const normalizedSymbol = requestedSymbol === 'AUTO'
-    ? (latestSelection?.selectedSymbol ?? 'XAUUSD')
-    : requestedSymbol;
-
+  const pipelineSymbols = resolvePipelineSymbolUniverse(requestedSymbol, latestSelection);
   const bridge = await fetchBridgeSummary();
-  if (!latestSelection && bridge.connected > 0) {
+
+  if (bridge.connected > 0) {
     try {
-      latestSelection = await runAutonomousPairSelection();
+      latestSelection = await maybeRefreshPairSelection(latestSelection);
     } catch {
-      // pair scan will retry on next status refresh or scheduler tick
+      // pair scan will retry on next advance tick
     }
   }
 
   try {
-    await syncMt5CaptureAcks({ symbol: normalizedSymbol, limit: 12 });
+    const { runTradeMonitorTick } = await import('./trade-monitor-runtime');
+    await runTradeMonitorTick(Date.now());
   } catch {
-    // capture ingest retries on the next status refresh
+    // trade monitor retries on next advance tick
   }
 
-  try {
-    await advancePipelineAnalysis(normalizedSymbol);
-  } catch {
-    // downstream analysis retries on the next status refresh
+  for (const pipelineSymbol of pipelineSymbols) {
+    try {
+      await syncMt5CaptureAcks({ symbol: pipelineSymbol, limit: 12 });
+    } catch {
+      // capture ingest retries on the next advance tick
+    }
+
+    try {
+      await advancePipelineAnalysis(pipelineSymbol);
+    } catch {
+      // downstream analysis retries on the next advance tick
+    }
+  }
+
+  return { symbols: pipelineSymbols };
+}
+
+export async function getAutonomousPipelineStatus(
+  symbol = 'AUTO',
+  options: AutonomousPipelineStatusOptions = {},
+): Promise<AutonomousPipelineStatus> {
+  const advance = options.advance ?? true;
+  const runPairSelectionIfMissing = options.runPairSelectionIfMissing ?? advance;
+
+  await ensureAutonomySchema();
+  await ensureFocusSymbolsConfigured();
+  const requestedSymbol = symbol.toUpperCase();
+  let latestSelection = await getLatestPairSelection();
+  const pipelineSymbols = resolvePipelineSymbolUniverse(requestedSymbol, latestSelection);
+  const normalizedSymbol = pipelineSymbols[0] ?? (latestSelection?.selectedSymbol ?? 'XAUUSD');
+
+  const bridge = await fetchBridgeSummary();
+  if (bridge.connected > 0) {
+    try {
+      if (advance) {
+        await advanceAutonomousPipeline(requestedSymbol);
+        latestSelection = await getLatestPairSelection();
+      } else if (!latestSelection && runPairSelectionIfMissing) {
+        latestSelection = await runAutonomousPairSelection();
+      }
+    } catch {
+      // pair scan will retry on next status refresh or scheduler tick
+    }
+  } else if (advance) {
+    try {
+      await advanceAutonomousPipeline(requestedSymbol);
+      latestSelection = await getLatestPairSelection();
+    } catch {
+      // advance retries on next tick
+    }
   }
 
   const [session, captureCounts, mtf, vision, macro, decisions, risk, execution, autonomyConfig, jobs] = await Promise.all([
@@ -119,10 +187,13 @@ export async function getAutonomousPipelineStatus(symbol = 'AUTO'): Promise<Auto
         const top = latestSelection.candidates.find((candidate) => candidate.symbol === latestSelection.selectedSymbol);
         const tradablePick = latestSelection.candidates.some((candidate) => candidate.tradable);
         const isActiveSymbol = latestSelection.selectedSymbol === normalizedSymbol;
-        const detail =
-          latestSelection.source === 'config_fallback' && !tradablePick
+        const tradableSymbols = latestSelection.candidates.filter((candidate) => candidate.tradable).map((candidate) => candidate.symbol);
+        const detail = latestSelection.scanSummary
+          || (latestSelection.source === 'config_fallback' && !tradablePick
             ? `Pair scan complete — ${latestSelection.selectedSymbol} active as fallback (watchlist ranked; no pair passed liquidity filters this cycle).`
-            : `Latest autonomous pick: ${latestSelection.selectedSymbol} (${top?.compositeScore ?? 0} score, ${latestSelection.session} session).`;
+            : tradableSymbols.length > 1
+              ? `${tradableSymbols.length} tradable symbols active: ${tradableSymbols.join(', ')}.`
+              : `Latest autonomous pick: ${latestSelection.selectedSymbol} (${top?.compositeScore ?? 0} score, ${latestSelection.session} session).`);
         return {
           status: isActiveSymbol ? 'completed' : 'in_progress',
           detail,
@@ -183,17 +254,24 @@ export async function getAutonomousPipelineStatus(symbol = 'AUTO'): Promise<Auto
       const openOrders = Number(execution.metrics.openOrders ?? 0);
       const trackedOpen = Number(execution.metrics.trackedOpen ?? 0);
       const terminalOpen = Number(execution.metrics.terminalOpen ?? 0);
-      const hasOpen = openOrders > 0;
-      const liveCount = terminalOpen > 0 ? terminalOpen : trackedOpen;
+      const liveCount = Math.max(openOrders, terminalOpen, trackedOpen);
+      const hasOpen = liveCount > 0;
+      const executedToday = Number(execution.metrics.executedToday ?? 0);
       const detail = hasOpen
         ? trackedOpen === liveCount
           ? `${liveCount} open position(s) under live monitor.`
           : `${liveCount} open on terminal · ${trackedOpen} tracked in monitor registry.`
-        : 'No open positions to monitor.';
+        : executedToday > 0 || execution.status === 'completed'
+          ? 'No open positions right now — last execution completed; awaiting next signal.'
+          : 'No open positions to monitor.';
       return {
-        status: hasOpen ? 'in_progress' : execution.status === 'completed' ? 'in_progress' : 'not_started',
+        status: hasOpen
+          ? 'in_progress'
+          : executedToday > 0 || execution.status === 'completed'
+            ? 'completed'
+            : 'not_started',
         detail,
-        progress: hasOpen ? Math.min(100, trackedOpen > 0 ? 70 : 35) : 0,
+        progress: hasOpen ? Math.min(100, trackedOpen > 0 ? 70 : 35) : executedToday > 0 ? 100 : 0,
         metrics: execution.metrics,
       };
     },
@@ -241,17 +319,26 @@ export async function getAutonomousPipelineStatus(symbol = 'AUTO'): Promise<Auto
   return {
     mode: stringValue(autonomyConfig.mode, 'full_auto'),
     activeSymbol: normalizedSymbol,
+    activeSymbols: pipelineSymbols,
     pairSelection: latestSelection
       ? {
           selectedSymbol: latestSelection.selectedSymbol,
           selectedAt: latestSelection.selectedAt,
           source: latestSelection.source,
           session: latestSelection.session,
+          eligibleSymbols: latestSelection.eligibleSymbols ?? [],
+          openPositionSymbols: latestSelection.openPositionSymbols ?? [],
+          scanSummary: latestSelection.scanSummary ?? '',
+          dailyLimitReached: latestSelection.dailyLimitReached ?? false,
           candidates: latestSelection.candidates.map((candidate) => ({
             symbol: candidate.symbol,
             compositeScore: candidate.compositeScore,
             tradable: candidate.tradable,
+            eligibleForNewEntry: candidate.eligibleForNewEntry ?? candidate.tradable,
+            blocked: candidate.blocked ?? false,
+            blockReason: candidate.blockReason ?? null,
             rank: candidate.rank,
+            reasons: candidate.reasons.slice(-3),
           })),
         }
       : null,

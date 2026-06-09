@@ -395,7 +395,7 @@ export async function maybeAutoDispatchAutonomyDecision(input: {
   if (!envBool('CACSMS_ENABLE_AUTONOMY_EXECUTION', false)) return null;
   const account = await resolveExecutionAccountContext();
   const { shouldDispatchPipelineExecution } = await import('@/lib/autonomy-pipeline-throttle');
-  if (!(await shouldDispatchPipelineExecution(input.decisionLogId, account?.accountClass ?? 'demo'))) {
+  if (!(await shouldDispatchPipelineExecution(input.decisionLogId, account?.accountClass ?? 'demo', input.decision.symbol))) {
     return null;
   }
   return dispatchAutonomyDecision({

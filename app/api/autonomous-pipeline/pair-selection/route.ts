@@ -4,7 +4,7 @@ import { runAutonomousPairSelection } from '@/lib/pair-selector';
 
 export async function GET(): Promise<Response> {
   try {
-    const status = await getAutonomousPipelineStatus('AUTO');
+    const status = await getAutonomousPipelineStatus('AUTO', { advance: false });
     return Response.json({ ok: true, selection: status.pairSelection, status }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {
     return Response.json(

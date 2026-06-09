@@ -22,6 +22,7 @@ export async function POST(request: Request): Promise<Response> {
     const body = (await request.json().catch(() => ({}))) as {
       dailyTradeLimitEnabled?: boolean;
       maxTradesPerDay?: number;
+      tradesPerSymbolPerDay?: number;
     };
 
     const settings = await updateExecutionRiskSettings({
@@ -29,6 +30,7 @@ export async function POST(request: Request): Promise<Response> {
         ? body.dailyTradeLimitEnabled
         : undefined,
       maxTradesPerDay: body.maxTradesPerDay == null ? undefined : Number(body.maxTradesPerDay),
+      tradesPerSymbolPerDay: body.tradesPerSymbolPerDay == null ? undefined : Number(body.tradesPerSymbolPerDay),
     });
 
     return Response.json({ ok: true, settings }, { headers: { 'Cache-Control': 'no-store' } });

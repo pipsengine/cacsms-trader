@@ -65,7 +65,11 @@ export async function shouldGeneratePipelineSignal(symbol: string, accountClass:
   return inputsNewer && (decisionChanged || cooldownElapsed);
 }
 
-export async function shouldDispatchPipelineExecution(decisionLogId: string, accountClass: TradingAccountClass): Promise<boolean> {
+export async function shouldDispatchPipelineExecution(
+  decisionLogId: string,
+  accountClass: TradingAccountClass,
+  symbol?: string,
+): Promise<boolean> {
   const profile = getAutonomyThresholdProfile(accountClass);
   const existing = await queryPostgres(
     `SELECT status, created_at
@@ -77,13 +81,24 @@ export async function shouldDispatchPipelineExecution(decisionLogId: string, acc
   );
   if (existing.rows[0]) return false;
 
-  const recent = await queryPostgres(
-    `SELECT created_at
-     FROM autonomy_execution_dispatches
-     WHERE status IN ('dispatched', 'queued')
-     ORDER BY created_at DESC
-     LIMIT 1`,
-  );
+  const normalizedSymbol = symbol?.toUpperCase() ?? null;
+  const recent = normalizedSymbol
+    ? await queryPostgres(
+        `SELECT created_at
+         FROM autonomy_execution_dispatches
+         WHERE status IN ('dispatched', 'queued')
+           AND upper(symbol) = $1
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [normalizedSymbol],
+      )
+    : await queryPostgres(
+        `SELECT created_at
+         FROM autonomy_execution_dispatches
+         WHERE status IN ('dispatched', 'queued')
+         ORDER BY created_at DESC
+         LIMIT 1`,
+      );
   if (!recent.rows[0]) return true;
   const lastDispatchAt = new Date(String(recent.rows[0].created_at)).getTime();
   return Date.now() - lastDispatchAt > profile.dispatchCooldownMinutes * 60_000;

@@ -5,6 +5,11 @@ interface EvaluateRiskInput {
   state: RiskState;
   requestedLots: number;
   rewardRiskRatio: number;
+  symbol?: string;
+  tradesOpenedTodayForSymbol?: number;
+  tradesPerSymbolPerDay?: number;
+  maxOpenTradesOverride?: number;
+  maxTradesPerDayOverride?: number;
 }
 
 export function evaluatePropFirmRisk(input: EvaluateRiskInput): RiskDecision {
@@ -27,12 +32,32 @@ export function evaluatePropFirmRisk(input: EvaluateRiskInput): RiskDecision {
     return block("monthly_target_reached", "Monthly profit target reached. Trading is locked.", remainingDailyLossAmount);
   }
 
-  if (rules.dailyTradeLimitEnabled && state.tradesOpenedToday >= rules.maxTradesPerDay) {
+  const maxTradesPerDay = input.maxTradesPerDayOverride ?? rules.maxTradesPerDay;
+  const maxOpenTrades = input.maxOpenTradesOverride ?? rules.maxOpenTrades;
+
+  if (
+    rules.dailyTradeLimitEnabled
+    && input.symbol
+    && input.tradesPerSymbolPerDay
+    && (input.tradesOpenedTodayForSymbol ?? 0) >= input.tradesPerSymbolPerDay
+  ) {
+    return block(
+      "max_trades_per_day",
+      `Maximum daily trades reached for ${input.symbol} (${input.tradesPerSymbolPerDay} per symbol).`,
+      remainingDailyLossAmount,
+    );
+  }
+
+  if (rules.dailyTradeLimitEnabled && state.tradesOpenedToday >= maxTradesPerDay) {
     return block("max_trades_per_day", "Maximum trades per day reached.", remainingDailyLossAmount);
   }
 
-  if (state.openTrades >= rules.maxOpenTrades) {
-    return block("max_open_trades", "Maximum open trades reached.", remainingDailyLossAmount);
+  if (state.openTrades >= maxOpenTrades) {
+    return block(
+      "max_open_trades",
+      `Maximum open positions reached (${state.openTrades}/${maxOpenTrades} — drawdown-based capacity).`,
+      remainingDailyLossAmount,
+    );
   }
 
   if (state.consecutiveLosses >= rules.stopAfterConsecutiveLosses) {
