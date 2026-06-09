@@ -1,6 +1,7 @@
 export const runtime = 'nodejs';
 
 import { getAutonomyConfig } from '@/lib/autonomy-store';
+import { resolveExecutionAccountContext } from '@/lib/execution-account-context';
 import {
   evaluateAutonomyExecutionChecklist,
   listAutonomyExecutionDispatches,
@@ -14,10 +15,11 @@ export async function GET(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const decisionLogId = url.searchParams.get('decisionLogId');
     const config = await getAutonomyConfig();
-    const [policy, terminalId, dispatches] = await Promise.all([
+    const [policy, terminalId, dispatches, accountContext] = await Promise.all([
       getExecutionPolicyStatus(),
       resolveConnectedTerminalId(),
       listAutonomyExecutionDispatches(25),
+      resolveExecutionAccountContext(),
     ]);
 
     let checklist = null;
@@ -55,6 +57,8 @@ export async function GET(request: Request): Promise<Response> {
         policy,
         terminalId,
         autonomyExecutionEnabled: String(process.env.CACSMS_ENABLE_AUTONOMY_EXECUTION ?? '').toLowerCase() === 'true',
+        liveExecutionEnabled: String(process.env.CACSMS_ENABLE_LIVE_EXECUTION ?? '').toLowerCase() === 'true',
+        accountContext,
         dispatches,
         checklist,
       },

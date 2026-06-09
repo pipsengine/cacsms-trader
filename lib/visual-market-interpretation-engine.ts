@@ -1,3 +1,5 @@
+import type { TradingAccountClass } from './execution-account-context';
+import { getDecisionThresholds, shouldUseDemoFusionOverrides } from './autonomy-account-profiles';
 import type { VisionDecision } from './visual-intelligence-types';
 
 export type FinalMarketDecision = VisionDecision | 'MONITOR';
@@ -49,6 +51,7 @@ export function fuseVisualMarketInterpretation(input: {
   signals: FusionSignal[];
   timeframeStates: VisualMarketInterpretationResult['timeframeStates'];
   previousDecision?: FinalMarketDecision | null;
+  accountClass?: TradingAccountClass;
 }): VisualMarketInterpretationResult {
   const signals = normalizeSignals(input.signals);
   const timeframeStates = input.timeframeStates.length ? input.timeframeStates : [{
@@ -63,21 +66,44 @@ export function fuseVisualMarketInterpretation(input: {
   const bear = directionalScore(signals, 'bearish');
   const neutral = directionalScore(signals, 'neutral') + directionalScore(signals, 'mixed') * 0.5;
   const finalMarketBias = resolveBias(bull, bear, neutral);
-  const confidenceScore = Math.round(clamp((Math.max(bull, bear, neutral) / totalWeight(signals)) * 100, 0, 100));
-  const lowerConfirms = timeframeStates.some((state) => ['H1', 'M15'].includes(state.timeframe) && state.confirmsEntry && state.bias === finalMarketBias);
-  const htfClear = ['bullish', 'bearish'].includes(finalMarketBias) && dominant.controlScore >= 45;
+  const htfSignal = signalByName(signals, 'Higher timeframe bias');
+  const mtfPullbackConfirm = Boolean(htfSignal?.confirmsEntry);
+  const accountClass = input.accountClass ?? 'demo';
+  const demoMode = shouldUseDemoFusionOverrides(accountClass);
+  const thresholds = getDecisionThresholds(accountClass);
+  const confidenceBoost = demoMode && mtfPullbackConfirm ? 14 : 0;
+  const confidenceScore = Math.round(clamp((Math.max(bull, bear, neutral) / totalWeight(signals)) * 100 + confidenceBoost, 0, 100));
+  const lowerConfirms = timeframeStates.some((state) => ['H1', 'M15'].includes(state.timeframe) && state.confirmsEntry && state.bias === finalMarketBias)
+    || mtfPullbackConfirm;
+  const htfClear = ['bullish', 'bearish'].includes(finalMarketBias) && dominant.controlScore >= (demoMode ? 32 : 45);
   const anomalyRisk = signalByName(signals, 'Visual anomalies')?.narrative.toLowerCase().includes('critical')
-    || (signalByName(signals, 'Visual anomalies')?.confidence ?? 0) < 0.45;
-  const liquidityClear = (signalByName(signals, 'Liquidity condition')?.confidence ?? 0) >= 0.45;
+    || (!demoMode && (signalByName(signals, 'Visual anomalies')?.confidence ?? 0) < 0.45);
+  const liquidityThreshold = demoMode ? 0.25 : 0.45;
+  const liquidityClear = (signalByName(signals, 'Liquidity condition')?.confidence ?? 0) >= liquidityThreshold
+    || (demoMode && mtfPullbackConfirm);
   const setupReadinessScore = Math.round(clamp(
     confidenceScore * 0.45
     + (lowerConfirms ? 22 : 4)
     + (liquidityClear ? 14 : 0)
-    + (anomalyRisk ? -20 : 8),
+    + (anomalyRisk ? -20 : 8)
+    + (demoMode && mtfPullbackConfirm ? 20 : 0),
     0,
     100,
   ));
-  const finalDecision = decide({ finalMarketBias, htfClear, lowerConfirms, anomalyRisk, liquidityClear, setupReadinessScore });
+  let finalDecision = decide({
+    finalMarketBias,
+    htfClear,
+    lowerConfirms,
+    anomalyRisk,
+    liquidityClear,
+    setupReadinessScore,
+    readinessThreshold: thresholds.visualReadiness,
+  });
+  if (demoMode && mtfPullbackConfirm && finalMarketBias === 'bullish' && ['AVOID', 'MONITOR', 'WAIT'].includes(finalDecision)) {
+    finalDecision = setupReadinessScore >= thresholds.visualReadiness ? 'BUY' : 'MONITOR';
+  } else if (demoMode && mtfPullbackConfirm && finalMarketBias === 'bearish' && ['AVOID', 'MONITOR', 'WAIT'].includes(finalDecision)) {
+    finalDecision = setupReadinessScore >= thresholds.visualReadiness ? 'SELL' : 'MONITOR';
+  }
   const marketPhase = inferMarketPhase(signals);
   const liquidityObjective = inferLiquidityObjective(signals);
   const institutionalInterpretation = inferInstitutional(signals, finalMarketBias, marketPhase);
@@ -167,11 +193,20 @@ function resolveBias(bull: number, bear: number, neutral: number): MarketBias {
   return bull > bear ? 'bullish' : 'bearish';
 }
 
-function decide(input: { finalMarketBias: MarketBias; htfClear: boolean; lowerConfirms: boolean; anomalyRisk: boolean; liquidityClear: boolean; setupReadinessScore: number }): FinalMarketDecision {
+function decide(input: {
+  finalMarketBias: MarketBias;
+  htfClear: boolean;
+  lowerConfirms: boolean;
+  anomalyRisk: boolean;
+  liquidityClear: boolean;
+  setupReadinessScore: number;
+  readinessThreshold: number;
+}): FinalMarketDecision {
   if (input.anomalyRisk || !input.liquidityClear) return 'AVOID';
   if (!input.htfClear) return 'MONITOR';
   if (!input.lowerConfirms) return 'WAIT';
-  if (input.setupReadinessScore < 62) return 'MONITOR';
+  const readinessThreshold = input.readinessThreshold;
+  if (input.setupReadinessScore < readinessThreshold) return 'MONITOR';
   return input.finalMarketBias === 'bullish' ? 'BUY' : input.finalMarketBias === 'bearish' ? 'SELL' : 'WAIT';
 }
 

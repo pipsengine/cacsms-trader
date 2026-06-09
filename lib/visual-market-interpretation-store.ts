@@ -13,6 +13,8 @@ import { getPatternAnalysis } from './pattern-recognition-store';
 import { queryPostgres } from './postgres';
 import { getStructureAnalysis } from './structure-analysis-store';
 import { getSupportResistanceAnalysis } from './support-resistance-store';
+import { resolveLatestCaptureId } from './capture-analysis-bootstrap';
+import { resolveExecutionAccountContext } from './execution-account-context';
 import { publishVisualIntelligenceEvent } from './visual-intelligence-store';
 
 type Row = Record<string, unknown>;
@@ -134,12 +136,14 @@ export async function analyzeVisualMarketInterpretation(input: { symbol: string;
     const collected = await collectOutputs(symbol, timeframe);
     await updateJob(jobId, 'running', 'scoring');
     await publishVisualIntelligenceEvent('market.interpretation.scoring', null, null, { jobId, signalCount: collected.signals.length });
+    const account = await resolveExecutionAccountContext();
     const fused = fuseVisualMarketInterpretation({
       symbol,
       timeframe,
       signals: collected.signals,
       timeframeStates: collected.timeframeStates,
       previousDecision: previous?.finalDecision ?? null,
+      accountClass: account?.accountClass ?? 'demo',
     });
     const stored = await persistInterpretation(jobId, symbol, timeframe, fused, previous, collected.raw);
     await updateJob(jobId, 'completed', 'decision.ready', { interpretationId: stored.id, finalDecision: stored.finalDecision });
@@ -193,7 +197,10 @@ async function collectOutputs(symbol: string, timeframe: string): Promise<{ sign
     safe(() => getLatestChartSegmentation(symbol, timeframe)),
     safe(() => getImageComparisonHistory(symbol, timeframe, 2)),
   ]);
-  const captureId = ai?.captureId ?? segmentation?.capture.id ?? anomaly?.job.captureId ?? null;
+  const captureId = ai?.captureId
+    ?? segmentation?.capture.id
+    ?? anomaly?.job.captureId
+    ?? await resolveLatestCaptureId(symbol, timeframe);
   const [structure, liquidity, orderBlocks, supportResistance, candles, patterns] = captureId ? await Promise.all([
     safe(() => getStructureAnalysis(captureId)),
     safe(() => getLiquidityAnalysis(captureId)),
@@ -207,13 +214,13 @@ async function collectOutputs(symbol: string, timeframe: string): Promise<{ sign
 
   return {
     signals: [
-      signal('Higher timeframe bias', marketInterpretationWeights.higherTimeframeBias, biasFromText(mtf?.decision.finalDecision ?? mtf?.decision.finalBias), score01(mtf?.decision.confidenceScore), Boolean(mtf?.decision.lowerTimeframeConfirmation?.toLowerCase().includes('confirm')), mtf?.decision.marketNarrative),
+      signal('Higher timeframe bias', marketInterpretationWeights.higherTimeframeBias, mtfDecisionBias(mtf?.decision.finalDecision, mtf?.decision.finalBias), score01(mtf?.decision.confidenceScore), mtfLowerConfirms(mtf?.decision.lowerTimeframeConfirmation), mtf?.decision.marketNarrative),
       signal('Market structure', marketInterpretationWeights.marketStructure, biasFromText(structure?.output.tradeDecision ?? structure?.output.institutionalBias), score01(structure?.output.confidenceScore), ['BUY', 'SELL'].includes(String(structure?.output.tradeDecision ?? '')), structure?.output.reasoningText),
       signal('Liquidity condition', marketInterpretationWeights.liquidityCondition, biasFromText(liquidity?.summary.recommendedAction ?? liquidity?.summary.institutionalBias), score01(liquidity?.summary.confidence), Boolean(liquidity?.liquidityZones?.length), liquidity?.summary.explanation),
       signal('Order block quality', marketInterpretationWeights.orderBlockQuality, biasFromText(orderBlocks?.summary.recommendedAction ?? orderBlocks?.summary.institutionalBias), score01(orderBlocks?.summary.confidence), Boolean(orderBlocks?.orderBlocks?.length), orderBlocks?.summary.explanation),
       signal('Support/resistance reaction', marketInterpretationWeights.supportResistanceReaction, biasFromText(supportResistance?.summary.recommendedAction), score01(supportResistance?.summary.confidence), Boolean(supportResistance?.zones?.length), supportResistance?.summary.explanation),
       signal('Candle behaviour', marketInterpretationWeights.candleBehaviour, biasFromText(candles?.summary.recommendedDecision ?? candles?.summary.dominantDirection), score01(candles?.summary.confidence), ['BUY', 'SELL'].includes(String(candles?.summary.recommendedDecision ?? '')), candles?.summary.explanation),
-      signal('Visual anomalies', marketInterpretationWeights.visualAnomalies, anomaly?.severity.overallSeverity === 'Critical' || anomaly?.severity.overallSeverity === 'High' ? 'mixed' : 'neutral', anomaly ? Math.max(0, 1 - anomaly.severity.manipulationProbability) : 0, !(anomaly?.severity.overallSeverity === 'Critical' || anomaly?.severity.overallSeverity === 'High'), anomaly?.severity.explanation),
+      signal('Visual anomalies', marketInterpretationWeights.visualAnomalies, anomaly?.severity.overallSeverity === 'Critical' || anomaly?.severity.overallSeverity === 'High' ? 'mixed' : 'neutral', anomaly ? Math.max(0, 1 - anomaly.severity.manipulationProbability) : 1, !(anomaly?.severity.overallSeverity === 'Critical' || anomaly?.severity.overallSeverity === 'High'), anomaly?.severity.explanation ?? 'No visual anomaly report is available; treating anomaly risk as clear.'),
       signal('Pattern context', marketInterpretationWeights.patternContext, biasFromText(patternAction), score01(read(patterns, ['summary', 'confidence'])), Boolean(read(patterns, ['summary', 'dominantPattern'])), patternNarrative),
       signal('Segmentation/market phase', marketInterpretationWeights.segmentationMarketPhase, biasFromText(segmentation?.segments[0]?.segmentType), score01(segmentation?.segments[0]?.confidenceScore), Boolean(segmentation?.segments.length), segmentation?.explanation),
     ],
@@ -326,6 +333,18 @@ async function updateJob(jobId: string, status: string, stage: string, metadata:
 
 function signal(name: string, weight: number, bias: MarketBias, confidence: number, confirmsEntry: boolean, narrative?: string | null): FusionSignal {
   return { name, weight, bias, confidence, confirmsEntry, narrative: narrative || `${name} is unavailable.` };
+}
+
+function mtfDecisionBias(finalDecision?: string | null, finalBias?: string | null): MarketBias {
+  const decision = String(finalDecision ?? '').toUpperCase();
+  if (decision.includes('BUY')) return 'bullish';
+  if (decision.includes('SELL')) return 'bearish';
+  return biasFromText(finalBias ?? finalDecision);
+}
+
+function mtfLowerConfirms(lowerTimeframeConfirmation?: string | null): boolean {
+  const text = String(lowerTimeframeConfirmation ?? '').toLowerCase();
+  return text.includes('confirm') || text.includes('reclaim') || text.includes('completion') || text.includes('aligns');
 }
 
 function biasFromText(value?: string | null): MarketBias {

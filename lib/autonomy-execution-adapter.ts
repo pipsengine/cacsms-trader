@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { getAutonomyThresholdProfile } from '@/lib/autonomy-account-profiles';
+import { resolveAutonomousVolumeLots } from '@/lib/autonomy-lot-sizing';
 import type { AutonomousDecisionOutput, AutonomyConfig, AutonomyMode } from '@/lib/autonomy-types';
 import { dispatchExecutionCommand, ExecutionPolicyBlockedError, ExecutionRiskBlockedError } from '@/lib/execution-dispatch';
+import { liveExecutionBlockReason, resolveExecutionAccountContext } from '@/lib/execution-account-context';
 import { getExecutionKillSwitchStatus } from '@/lib/execution-kill-switch';
 import { getExecutionPolicyStatus, isExecutionEnabled } from '@/lib/execution-policy';
 import { listTerminalSnapshots } from '@/lib/mt5-heartbeat-store';
@@ -12,6 +15,8 @@ export type AutonomyExecutionChecklist = {
   mode: AutonomyMode;
   terminalId: string | null;
   sandboxOnly: boolean;
+  accountClass: string;
+  environment: string;
 };
 
 export type AutonomyExecutionDispatchResult = {
@@ -102,8 +107,10 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     blockers.push(`Confidence ${input.decision.confidenceScore}% is below threshold ${input.config.confidenceThreshold}%.`);
   }
 
-  if (input.decision.setupReadinessScore < 55) {
-    blockers.push(`Setup readiness ${input.decision.setupReadinessScore}% is below minimum 55%.`);
+  const account = await resolveExecutionAccountContext();
+  const profile = getAutonomyThresholdProfile(account?.accountClass ?? 'demo');
+  if (input.decision.setupReadinessScore < profile.decisionReadinessThreshold) {
+    blockers.push(`Setup readiness ${input.decision.setupReadinessScore}% is below minimum ${profile.decisionReadinessThreshold}%.`);
   }
 
   if (input.decision.riskScore > input.config.riskThreshold) {
@@ -127,9 +134,13 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     blockers.push('Autonomy emergency stop is active.');
   }
 
-  const terminalId = await resolveConnectedTerminalId();
+  const terminalId = account?.terminalId ?? await resolveConnectedTerminalId();
   if (!terminalId) {
     blockers.push('No connected MT5 terminal is available.');
+  }
+  if (account) {
+    const liveBlock = liveExecutionBlockReason(account);
+    if (liveBlock) blockers.push(liveBlock);
   }
 
   const highImpact = await queryPostgres(
@@ -153,7 +164,9 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     blockers,
     mode,
     terminalId,
-    sandboxOnly: true,
+    sandboxOnly: account?.sandboxMode ?? true,
+    accountClass: account?.accountClass ?? 'demo',
+    environment: account?.environment ?? 'DEMO',
   };
 }
 
@@ -259,11 +272,25 @@ export async function dispatchAutonomyDecision(input: {
   }
 
   const side = input.decision.decision === 'SELL' ? 'SELL' : 'BUY';
-  const volumeLots = Number(input.volumeLots ?? envNumber('CACSMS_AUTONOMY_DEFAULT_LOTS', 0.01));
+  const account = await resolveExecutionAccountContext(checklist.terminalId);
+  if (!account) {
+    return {
+      ok: false,
+      status: 'blocked',
+      decisionLogId: input.decisionLogId,
+      blockers: ['Unable to resolve execution account context for the connected terminal.'],
+    };
+  }
+
+  const sized = input.volumeLots != null
+    ? { lots: Number(input.volumeLots), riskAmount: 0, stopPips: 0, method: 'fixed' as const }
+    : resolveAutonomousVolumeLots({ decision: input.decision, account });
+  const volumeLots = sized.lots;
   const stopLoss = Number(input.decision.stopLoss ?? 0);
   const takeProfit = Number(input.decision.takeProfitLevels?.[0] ?? 0);
   const commandId = `autonomy-${input.decisionLogId.slice(0, 8)}-${randomUUID()}`;
   const dedupeKey = `AUTONOMY:${input.decisionLogId}:${input.decision.symbol}:${side}:${volumeLots}`;
+  const executionMode = account.sandboxMode ? 'SANDBOX' : 'LIVE';
 
   try {
     const result = await dispatchExecutionCommand({
@@ -284,14 +311,20 @@ export async function dispatchAutonomyDecision(input: {
         stopLoss,
         takeProfit,
         comment: `Cacsms autonomy ${side} ${input.decision.symbol}`,
-        mode: 'SANDBOX',
-        environment: 'DEMO',
+        mode: executionMode,
+        environment: account.environment,
+        accountClass: account.accountClass,
+        accountNumber: account.accountNumber,
+        equity: account.equity,
+        sizingMethod: sized.method,
+        riskAmount: sized.riskAmount,
+        stopPips: sized.stopPips,
         timeframe: input.decision.timeframe,
         confidenceScore: input.decision.confidenceScore,
         setupReadinessScore: input.decision.setupReadinessScore,
       },
-      environment: 'DEMO',
-      sandboxMode: true,
+      environment: account.environment,
+      sandboxMode: account.sandboxMode,
       dedupeKey,
       intentId: input.decisionLogId,
       source: 'AUTONOMY_EXECUTION_ADAPTER',
@@ -309,6 +342,10 @@ export async function dispatchAutonomyDecision(input: {
         manual: Boolean(input.manual),
         lifecycleState: result.command.lifecycleState,
         deduped: result.deduped ?? false,
+        accountClass: account.accountClass,
+        environment: account.environment,
+        volumeLots,
+        sizingMethod: sized.method,
       },
     });
 
@@ -356,6 +393,11 @@ export async function maybeAutoDispatchAutonomyDecision(input: {
   if (!['BUY', 'SELL'].includes(input.decision.decision)) return null;
   if (!executionModeAllowsAutoDispatch(input.config.tradeExecutionMode)) return null;
   if (!envBool('CACSMS_ENABLE_AUTONOMY_EXECUTION', false)) return null;
+  const account = await resolveExecutionAccountContext();
+  const { shouldDispatchPipelineExecution } = await import('@/lib/autonomy-pipeline-throttle');
+  if (!(await shouldDispatchPipelineExecution(input.decisionLogId, account?.accountClass ?? 'demo'))) {
+    return null;
+  }
   return dispatchAutonomyDecision({
     decisionLogId: input.decisionLogId,
     decision: input.decision,

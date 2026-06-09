@@ -6,6 +6,8 @@ import {
 } from './autonomous-pipeline';
 import { ensureAutonomySchema } from './autonomy-store';
 import { advancePipelineAnalysis } from './autonomous-pipeline-analysis';
+import { getPipelineExecutionStatus, getPipelineRiskStatus } from './autonomous-pipeline-risk-execution';
+import { getMacroPipelineStatus } from './macro-intelligence-store';
 import { syncMt5CaptureAcks } from './mt5-capture-ingest';
 import { getLatestPairSelection, runAutonomousPairSelection } from './pair-selector';
 import { getLatestPipelineSession, listPipelineEvents } from './top-down-orchestrator';
@@ -79,14 +81,15 @@ export async function getAutonomousPipelineStatus(symbol = 'XAUUSD'): Promise<Au
     // downstream analysis retries on the next status refresh
   }
 
-  const [session, captureCounts, mtf, vision, decisions, risk, execution, autonomyConfig, jobs] = await Promise.all([
+  const [session, captureCounts, mtf, vision, macro, decisions, risk, execution, autonomyConfig, jobs] = await Promise.all([
     getLatestPipelineSession(normalizedSymbol),
     getCaptureCoverage(normalizedSymbol),
     getMtfStatus(normalizedSymbol),
     getVisionStatus(normalizedSymbol),
+    getMacroPipelineStatus(normalizedSymbol),
     getSignalStatus(normalizedSymbol),
-    getRiskStatus(),
-    getExecutionStatus(),
+    getPipelineRiskStatus(normalizedSymbol),
+    getPipelineExecutionStatus(normalizedSymbol),
     getAutonomyConfigRow(),
     getRunningJobs(),
   ]);
@@ -171,7 +174,7 @@ export async function getAutonomousPipelineStatus(symbol = 'XAUUSD'): Promise<Au
     },
     'mtf-fusion': () => mtf,
     'cacsms-vision': () => vision,
-    'macro-intelligence': () => getMacroStatus(),
+    'macro-intelligence': () => macro,
     'signal-generation': () => decisions,
     'risk-gate': () => risk,
     'execution': () => execution,
@@ -350,13 +353,10 @@ async function getVisionStatus(symbol: string) {
   return { status: 'not_started' as const, detail: 'No recent Cacsms Vision analysis.', progress: 0, metrics: {} };
 }
 
-function getMacroStatus() {
-  return { status: 'in_progress' as const, detail: 'Macro collectors active — calendar, COT, and rates pipelines available.', progress: 65, metrics: {} };
-}
-
 async function getSignalStatus(symbol: string) {
   const result = await queryPostgres(
-    `SELECT decision, created_at
+    `SELECT decision, confidence_score, setup_readiness_score, risk_score, final_bias,
+            reason_for_decision, reason_against_decision, recommended_next_action, created_at
      FROM autonomous_decision_logs
      WHERE upper(symbol) = $1
      ORDER BY created_at DESC
@@ -366,35 +366,25 @@ async function getSignalStatus(symbol: string) {
   if (!result.rows[0]) {
     return { status: 'not_started' as const, detail: 'No autonomous decisions generated yet.', progress: 0, metrics: {} };
   }
-  const decision = String(result.rows[0].decision);
+  const row = result.rows[0];
+  const decision = String(row.decision);
+  const confidence = Number(row.confidence_score ?? 0);
+  const readiness = Number(row.setup_readiness_score ?? 0);
+  const risk = Number(row.risk_score ?? 0);
+  const metrics = {
+    decision,
+    confidence,
+    readiness,
+    risk,
+    bias: String(row.final_bias ?? 'neutral'),
+    reasonAgainst: String(row.reason_against_decision ?? ''),
+    nextAction: String(row.recommended_next_action ?? ''),
+  };
+  const detail = `${decision} at ${Math.round(confidence)}% confidence, ${Math.round(readiness)}% setup readiness, ${Math.round(risk)}% risk. ${String(row.reason_against_decision ?? '')}`;
   if (decision === 'BUY' || decision === 'SELL') {
-    return { status: 'completed' as const, detail: `Latest autonomous signal: ${decision}.`, progress: 100, metrics: { decision } };
+    return { status: 'completed' as const, detail: `Latest autonomous signal: ${detail}`, progress: 100, metrics };
   }
-  return { status: 'in_progress' as const, detail: `Latest autonomous signal: ${decision}.`, progress: 60, metrics: { decision } };
-}
-
-async function getRiskStatus() {
-  const result = await queryPostgres("SELECT COUNT(*)::int AS count FROM risk_decisions WHERE created_at > now() - interval '7 days'");
-  const count = Number(result.rows[0]?.count ?? 0);
-  if (count > 0) return { status: 'completed' as const, detail: `${count} risk decision(s) in the last 7 days.`, progress: 100, metrics: { count } };
-  return { status: 'in_progress' as const, detail: 'Risk gate armed — awaiting execution intents.', progress: 30, metrics: { count } };
-}
-
-async function getExecutionStatus() {
-  try {
-    const response = await fetchWithTimeout(`${process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787'}/commands`);
-    if (!response.ok) throw new Error('bridge commands unavailable');
-    const payload = await response.json();
-    const commands = Array.isArray(payload.commands) ? payload.commands : [];
-    const acked = commands.filter((item: { status?: string }) => item.status === 'acknowledged').length;
-    const queued = commands.filter((item: { status?: string }) => item.status === 'queued' || item.status === 'leased').length;
-    const openOrders = Number(payload.openOrders ?? 0);
-    if (acked > 0) return { status: 'completed' as const, detail: `${acked} command(s) acknowledged by terminal.`, progress: 100, metrics: { acked, queued, openOrders } };
-    if (queued > 0) return { status: 'in_progress' as const, detail: `${queued} command(s) queued for terminal.`, progress: 55, metrics: { acked, queued, openOrders } };
-    return { status: 'not_started' as const, detail: 'No execution commands in queue.', progress: 0, metrics: { acked, queued, openOrders } };
-  } catch {
-    return { status: 'not_started' as const, detail: 'Execution bridge unavailable.', progress: 0, metrics: { acked: 0, queued: 0, openOrders: 0 } };
-  }
+  return { status: 'in_progress' as const, detail: `Latest autonomous signal: ${detail}`, progress: 60, metrics };
 }
 
 async function getAutonomyConfigRow() {

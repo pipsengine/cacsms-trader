@@ -1,6 +1,8 @@
 import { randomUUID } from 'crypto';
 
+import { applyAutonomyAccountProfile } from './autonomy-account-profiles';
 import { buildAutonomousDecision } from './autonomous-decision-engine';
+import { resolveExecutionAccountContext } from './execution-account-context';
 import { DEFAULT_PAIR_SELECTION_CONFIG, runAutonomousPairSelection } from './pair-selector';
 import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
 import { analyzeAiVisualInterpretation } from './ai-visual-interpretation-store';
@@ -519,11 +521,13 @@ async function runWorker(workerName: AutonomyWorkerName, symbol: string | null, 
   throw new Error(`Worker ${workerName} is not registered.`);
 }
 
-async function generateAutonomousSignal(symbol: string, timeframe: string) {
+export async function generateAutonomousSignal(symbol: string, timeframe: string) {
+  const account = await resolveExecutionAccountContext();
   const visual = await getLatestVisualMarketInterpretation(symbol, timeframe) ?? await analyzeVisualMarketInterpretation({ symbol, timeframe });
   const decision = buildAutonomousDecision({
     symbol,
     timeframe,
+    accountClass: account?.accountClass ?? 'demo',
     dominantTimeframe: visual.dominantTimeframe,
     visual,
     macro: await loadMacroContext(symbol),
@@ -763,7 +767,9 @@ async function readAutonomyConfigRow(): Promise<AutonomyConfig> {
 
 export async function getAutonomyConfig(): Promise<AutonomyConfig> {
   await ensureAutonomySchema();
-  return readAutonomyConfigRow();
+  const base = await readAutonomyConfigRow();
+  const account = await resolveExecutionAccountContext();
+  return applyAutonomyAccountProfile(base, account?.accountClass ?? 'demo');
 }
 
 async function saveAutonomyConfig(patch: Partial<AutonomyConfig>) {
@@ -833,17 +839,8 @@ async function latestCaptureId(symbol: string, timeframe: string) {
 }
 
 async function loadMacroContext(symbol: string) {
-  const risk = await queryPostgres(`
-    SELECT COUNT(*)::int AS high_impact_count
-    FROM economic_events
-    WHERE impact = 'High'
-      AND event_time >= now() - interval '30 minutes'
-      AND event_time <= now() + interval '30 minutes'
-  `).catch(() => ({ rows: [] as Row[] }));
-  return {
-    economicRiskScore: Number(risk.rows[0]?.high_impact_count ?? 0) > 0 ? 85 : 20,
-    warning: Number(risk.rows[0]?.high_impact_count ?? 0) > 0 ? `High-impact macro risk is active for ${symbol}.` : null,
-  };
+  const { getMacroContextForSymbol } = await import('./macro-intelligence-store');
+  return getMacroContextForSymbol(symbol);
 }
 
 async function loadExecutionContext(_symbol: string, _timeframe: string) {

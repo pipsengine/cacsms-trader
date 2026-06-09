@@ -191,11 +191,27 @@ function buildConflicts(symbol: string, snapshots: TimeframeAnalysisSnapshot[], 
   const conflicts: TimeframeConflictLog[] = [];
   const higher = snapshots.filter((item) => ['W', 'D', 'H4'].includes(item.timeframe));
   const lower = snapshots.filter((item) => ['H1', 'M15'].includes(item.timeframe));
+  const wBias = directional(snapshotFor(snapshots, 'W').bias);
+  const dBias = directional(snapshotFor(snapshots, 'D').bias);
+
   for (const high of higher) {
     for (const low of lower) {
       const highDir = directional(high.bias);
       const lowDir = directional(low.bias);
       if (highDir === 'neutral' || lowDir === 'neutral' || highDir === lowDir) continue;
+      if (['AVOID', 'WAIT'].includes(high.decisionState) || ['AVOID', 'WAIT'].includes(low.decisionState)) continue;
+      if (
+        wBias === 'bullish' && dBias === 'bullish' && highDir === 'bearish' && lowDir === 'bullish'
+        && ['H4', 'H1'].includes(high.timeframe)
+      ) {
+        continue;
+      }
+      if (
+        wBias === 'bearish' && dBias === 'bearish' && highDir === 'bullish' && lowDir === 'bearish'
+        && ['H4', 'H1'].includes(high.timeframe)
+      ) {
+        continue;
+      }
       const severity = clamp(weights[high.timeframe] + weights[low.timeframe] + high.aiConfidenceScore * 0.2 + low.aiConfidenceScore * 0.12, 0, 1);
       conflicts.push({
         symbol,
@@ -235,7 +251,19 @@ function buildDecision(symbol: string, snapshots: TimeframeAnalysisSnapshot[], a
   const lowerBearish = lower.every((item) => directional(item.bias) === 'bearish' || item.decisionState === 'SELL');
   const h4H1M15Bull = ['H4', 'H1', 'M15'].every((tf) => directional(snapshotFor(snapshots, tf as MtfTimeframe).bias) === 'bullish');
   const h4H1M15Bear = ['H4', 'H1', 'M15'].every((tf) => directional(snapshotFor(snapshots, tf as MtfTimeframe).bias) === 'bearish');
-  const wdConflict = directional(snapshotFor(snapshots, 'W').bias) !== 'neutral' && directional(snapshotFor(snapshots, 'D').bias) !== directional(snapshotFor(snapshots, 'W').bias);
+  const wSnapshot = snapshotFor(snapshots, 'W');
+  const dSnapshot = snapshotFor(snapshots, 'D');
+  const h4Snapshot = snapshotFor(snapshots, 'H4');
+  const h1Snapshot = snapshotFor(snapshots, 'H1');
+  const m15Snapshot = snapshotFor(snapshots, 'M15');
+  const wDir = directional(wSnapshot.bias);
+  const dDir = directional(dSnapshot.bias);
+  const h4Dir = directional(h4Snapshot.bias);
+  const h1Dir = directional(h1Snapshot.bias);
+  const m15Dir = directional(m15Snapshot.bias);
+  const wdConflict = wDir !== 'neutral' && dDir !== wDir;
+  const wdBullish = wDir === 'bullish' && dDir === 'bullish';
+  const wdBearish = wDir === 'bearish' && dDir === 'bearish';
   const controlling = controllingTimeframe(snapshots);
   const averageAlignment = average(alignments.map((item) => item.alignmentScore));
   const conflictSeverity = conflicts[0]?.severityScore ?? 0;
@@ -256,6 +284,12 @@ function buildDecision(symbol: string, snapshots: TimeframeAnalysisSnapshot[], a
   } else if (higherBearish && lower.some((item) => directional(item.bias) === 'bullish')) {
     finalDecision = 'WAIT';
     lowerConfirmation = 'Lower timeframe bullish correction is active inside higher timeframe bearish bias.';
+  } else if (wdBullish && h4Dir === 'bearish' && m15Dir === 'bullish' && (h1Dir === 'bearish' || h1Dir === 'neutral' || h1Snapshot.decisionState === 'WAIT')) {
+    finalDecision = 'BUY opportunity';
+    lowerConfirmation = 'W/D bullish control with H4 corrective bearish leg completing; M15 bullish reclaim confirms institutional pullback entry.';
+  } else if (wdBearish && h4Dir === 'bullish' && m15Dir === 'bearish' && (h1Dir === 'bullish' || h1Dir === 'neutral' || h1Snapshot.decisionState === 'WAIT')) {
+    finalDecision = 'SELL opportunity';
+    lowerConfirmation = 'W/D bearish control with H4 corrective bullish leg completing; M15 bearish reclaim confirms institutional pullback entry.';
   } else if ((h4H1M15Bull || h4H1M15Bear) && wdConflict) {
     finalDecision = h4H1M15Bull ? 'BUY' : 'SELL';
     scalpOnly = true;

@@ -9,7 +9,10 @@ export async function POST(request: Request): Promise<Response> {
     const captureSummary = await syncMt5CaptureAcks({ symbol, limit: Number(body.limit ?? 12) });
     const analysisSummary = await advancePipelineAnalysis(symbol);
     const status = await getAutonomousPipelineStatus(symbol);
-    return Response.json({ ok: true, captureSummary, analysisSummary, status }, { headers: { 'Cache-Control': 'no-store' } });
+    return Response.json(
+      { ok: true, captureSummary, analysisSummary, status },
+      { headers: { 'Cache-Control': 'no-store' } },
+    );
   } catch (error) {
     return Response.json(
       { ok: false, error: error instanceof Error ? error.message : 'Unable to sync MT5 capture acknowledgments.' },

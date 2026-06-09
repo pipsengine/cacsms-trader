@@ -1,3 +1,4 @@
+import { getDecisionThresholds } from './autonomy-account-profiles';
 import type { AutonomousDecisionInput, AutonomousDecisionOutput, AutonomyDecision } from './autonomy-types';
 
 export function buildAutonomousDecision(input: AutonomousDecisionInput): AutonomousDecisionOutput {
@@ -43,8 +44,11 @@ export function buildAutonomousDecision(input: AutonomousDecisionInput): Autonom
 function collectBlockers(input: { confidenceScore: number; setupReadinessScore: number; riskScore: number; input: AutonomousDecisionInput }) {
   const blockers: string[] = [];
   const text = `${input.input.visual?.riskWarning ?? ''} ${input.input.visual?.liquidityObjective ?? ''}`.toLowerCase();
-  if (input.confidenceScore < 55) blockers.push('Confidence is below autonomous signal threshold.');
-  if (input.setupReadinessScore < 55) blockers.push('Setup readiness is not mature.');
+  const thresholds = getDecisionThresholds(input.input.accountClass ?? 'demo');
+  const confidenceThreshold = thresholds.confidence;
+  const readinessThreshold = thresholds.readiness;
+  if (input.confidenceScore < confidenceThreshold) blockers.push('Confidence is below autonomous signal threshold.');
+  if (input.setupReadinessScore < readinessThreshold) blockers.push('Setup readiness is not mature.');
   if (input.riskScore >= 70) blockers.push('Risk score is too high for autonomous escalation.');
   if (text.includes('critical') || text.includes('unclear')) blockers.push('Visual anomaly or liquidity clarity blocks execution.');
   if (input.input.macro?.warning?.toLowerCase().includes('high-impact')) blockers.push('High-impact macro risk is active.');

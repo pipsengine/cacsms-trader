@@ -64,6 +64,7 @@ export interface AutonomyConfig {
 export interface AutonomousDecisionInput {
   symbol: string;
   timeframe: string;
+  accountClass?: 'demo' | 'prop_firm' | 'live' | 'large_equity';
   dominantTimeframe?: string | null;
   visual?: {
     finalMarketBias?: string | null;

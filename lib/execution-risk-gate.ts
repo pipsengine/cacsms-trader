@@ -173,6 +173,7 @@ async function countConsecutiveLosses(accountNumber: string): Promise<number> {
       FROM execution_commands c
       JOIN mt5_terminals t ON t.terminal_id = c.terminal_id
       WHERE t.account_number = $1
+        AND upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
         AND c.lifecycle_state IN ('EXECUTED', 'FAILED', 'TIMEOUT', 'CANCELLED')
       ORDER BY c.created_at DESC
       LIMIT 10
@@ -184,8 +185,9 @@ async function countConsecutiveLosses(accountNumber: string): Promise<number> {
   for (const row of result.rows as Array<{ lifecycle_state?: string; ack_status?: string }>) {
     const lifecycle = String(row.lifecycle_state ?? '').toUpperCase();
     const ack = String(row.ack_status ?? '').toLowerCase();
-    const isLoss = lifecycle === 'FAILED' || lifecycle === 'TIMEOUT' || lifecycle === 'CANCELLED' || ack === 'failed' || ack === 'rejected';
-    if (!isLoss) break;
+    const isFailedPlacement =
+      lifecycle === 'FAILED' || lifecycle === 'TIMEOUT' || lifecycle === 'CANCELLED' || ack === 'failed' || ack === 'rejected';
+    if (!isFailedPlacement) break;
     losses += 1;
   }
   return losses;
