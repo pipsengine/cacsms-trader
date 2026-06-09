@@ -109,6 +109,154 @@ export async function markPositionClosed(input: {
   ).catch(() => null);
 }
 
+export type OpenPositionMetrics = {
+  trackedOpen: number;
+  terminalOpen: number;
+  openOrders: number;
+  positions: ExecutionOpenPosition[];
+};
+
+async function countTrackedOpenPositions(): Promise<number> {
+  try {
+    const result = await queryPostgres(
+      `SELECT COUNT(*)::int AS count FROM execution_open_positions WHERE status IN ('open', 'partial')`,
+    );
+    return Number((result.rows[0] as { count?: number })?.count ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+export async function alignTrackedPositionsWithTerminal(terminalOpen: number): Promise<number> {
+  try {
+    if (terminalOpen <= 0) {
+      const result = await queryPostgres(
+        `
+          UPDATE execution_open_positions
+          SET status = 'closed',
+              closed_at = now(),
+              updated_at = now()
+          WHERE status IN ('open', 'partial')
+          RETURNING id
+        `,
+      );
+      return result.rows.length;
+    }
+
+    const result = await queryPostgres(
+      `
+        WITH ranked AS (
+          SELECT id,
+                 ROW_NUMBER() OVER (ORDER BY opened_at DESC, id DESC) AS row_number
+          FROM execution_open_positions
+          WHERE status IN ('open', 'partial')
+        )
+        UPDATE execution_open_positions p
+        SET status = 'closed',
+            closed_at = now(),
+            updated_at = now()
+        FROM ranked r
+        WHERE p.id = r.id
+          AND r.row_number > $1
+        RETURNING p.id
+      `,
+      [terminalOpen],
+    );
+    return result.rows.length;
+  } catch {
+    return 0;
+  }
+}
+
+export async function reconcileOpenPositionsFromExecutedCommands(terminalOpen: number): Promise<number> {
+  try {
+    const trackedOpen = await countTrackedOpenPositions();
+    const slotsRemaining = Math.max(0, terminalOpen - trackedOpen);
+    if (slotsRemaining <= 0) return 0;
+
+    const result = await queryPostgres(
+      `
+        SELECT
+          c.command_id,
+          c.terminal_id,
+          c.ticket,
+          c.symbol,
+          c.side,
+          c.executed_volume_lots,
+          c.executed_price,
+          c.payload
+        FROM execution_commands c
+        WHERE upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
+          AND c.lifecycle_state IN ('EXECUTED', 'ACKNOWLEDGED')
+          AND c.ticket IS NOT NULL
+          AND btrim(c.ticket) <> ''
+          AND c.created_at >= now() - interval '7 days'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM execution_open_positions p
+            WHERE p.terminal_id = c.terminal_id
+              AND p.ticket = c.ticket
+              AND p.status IN ('open', 'partial')
+          )
+        ORDER BY c.created_at DESC
+        LIMIT $1
+      `,
+      [slotsRemaining],
+    );
+
+    let inserted = 0;
+    for (const row of result.rows as Array<Record<string, unknown>>) {
+      const payload = row.payload && typeof row.payload === 'object' && !Array.isArray(row.payload)
+        ? row.payload as Record<string, unknown>
+        : {};
+      await trackOpenPositionFromFill({
+        terminalId: String(row.terminal_id),
+        commandId: String(row.command_id),
+        ticket: String(row.ticket),
+        symbol: row.symbol ? String(row.symbol) : String(payload.symbol ?? ''),
+        side: row.side ? String(row.side) : String(payload.side ?? ''),
+        volumeLots: row.executed_volume_lots == null ? null : Number(row.executed_volume_lots),
+        entryPrice: row.executed_price == null ? null : Number(row.executed_price),
+        stopLoss: Number(payload.sl ?? payload.stopLoss ?? 0) || null,
+        takeProfit: Number(payload.tp ?? payload.takeProfit ?? 0) || null,
+      });
+      inserted += 1;
+    }
+    return inserted;
+  } catch {
+    return 0;
+  }
+}
+
+async function getTerminalOpenOrderCount(): Promise<number> {
+  try {
+    const result = await queryPostgres(
+      `
+        SELECT COALESCE(SUM(GREATEST(open_orders, 0)), 0)::int AS total
+        FROM mt5_terminals
+        WHERE connection_status IN ('connected', 'degraded')
+      `,
+    );
+    return Number((result.rows[0] as { total?: number })?.total ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+export async function getOpenPositionMetrics(filter?: { terminalId?: string }): Promise<OpenPositionMetrics> {
+  const terminalOpen = await getTerminalOpenOrderCount();
+  await alignTrackedPositionsWithTerminal(terminalOpen);
+  await reconcileOpenPositionsFromExecutedCommands(terminalOpen);
+  const positions = await listOpenPositions({ terminalId: filter?.terminalId, limit: 100 });
+  const trackedOpen = positions.length;
+  return {
+    trackedOpen,
+    terminalOpen,
+    openOrders: terminalOpen > 0 ? terminalOpen : trackedOpen,
+    positions,
+  };
+}
+
 export async function listOpenPositions(filter?: { terminalId?: string; limit?: number }): Promise<ExecutionOpenPosition[]> {
   const params: Array<string | number> = [];
   const conditions = [`status IN ('open', 'partial')`];

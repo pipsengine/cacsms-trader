@@ -158,9 +158,39 @@ interface DeploymentRuntime {
   symlinkSupported: boolean;
 }
 
+const CANONICAL_EA_TARGET_FOLDER = 'CacsmsTraderEA';
+
 function joinExpertsPath(dataFolder: string, targetFolderName: string): string {
   const root = dataFolder.replace(/\\/g, '/').replace(/\/+$/, '');
   return `${root}/MQL5/Experts/${targetFolderName}`;
+}
+
+function normalizeEaDeploymentConfig(
+  saved: Partial<EADeploymentConfig> | null | undefined,
+  current: EADeploymentConfig,
+  runtime: DeploymentRuntime | undefined,
+): EADeploymentConfig {
+  const dockerMount = Boolean(runtime?.dockerMount);
+  const targetFolderName =
+    saved?.targetFolderName === 'CacsmsTrader' ? CANONICAL_EA_TARGET_FOLDER : (saved?.targetFolderName || CANONICAL_EA_TARGET_FOLDER);
+  const mt5DataFolder = preferContainerPath(saved?.mt5DataFolder, current.mt5DataFolder, dockerMount);
+  const mt5ExpertsFolder = mt5DataFolder
+    ? joinExpertsPath(mt5DataFolder, targetFolderName)
+    : preferContainerPath(saved?.mt5ExpertsFolder, current.mt5ExpertsFolder, dockerMount);
+  return {
+    ...current,
+    ...(saved ?? {}),
+    projectEaFolder: preferContainerPath(
+      saved?.projectEaFolder,
+      runtime?.projectEaFolder || current.projectEaFolder,
+      dockerMount,
+    ),
+    mt5DataFolder,
+    mt5ExpertsFolder,
+    targetFolderName,
+    eaSourceFolder: undefined,
+    deploymentMethod: saved?.deploymentMethod || runtime?.recommendedMethod || current.deploymentMethod,
+  };
 }
 
 function isWindowsDrivePath(value: string): boolean {
@@ -186,7 +216,7 @@ export function EADeploymentLinkPage() {
     projectEaFolder: '',
     mt5DataFolder: '',
     mt5ExpertsFolder: '',
-    targetFolderName: 'CacsmsTrader',
+    targetFolderName: CANONICAL_EA_TARGET_FOLDER,
     deploymentMethod: 'COPY',
     environment: 'DEMO',
   });
@@ -230,23 +260,13 @@ export function EADeploymentLinkPage() {
       if (payload.runtime) {
         setRuntime(payload.runtime);
       }
-      setConfig((current) => {
-        const saved = payload.config as Partial<EADeploymentConfig> | null | undefined;
-        const nextRuntime = payload.runtime as DeploymentRuntime | undefined;
-        const dockerMount = Boolean(nextRuntime?.dockerMount);
-        return {
-          ...current,
-          ...(saved ?? {}),
-          projectEaFolder: preferContainerPath(
-            saved?.projectEaFolder,
-            nextRuntime?.projectEaFolder || current.projectEaFolder,
-            dockerMount,
-          ),
-          mt5DataFolder: preferContainerPath(saved?.mt5DataFolder, current.mt5DataFolder, dockerMount),
-          mt5ExpertsFolder: preferContainerPath(saved?.mt5ExpertsFolder, current.mt5ExpertsFolder, dockerMount),
-          deploymentMethod: saved?.deploymentMethod || nextRuntime?.recommendedMethod || current.deploymentMethod,
-        };
-      });
+      setConfig((current) =>
+        normalizeEaDeploymentConfig(
+          payload.config as Partial<EADeploymentConfig> | null | undefined,
+          current,
+          payload.runtime as DeploymentRuntime | undefined,
+        ),
+      );
     } catch (error) {
       showToast('error', error instanceof Error ? error.message : 'Failed to load status.');
     } finally {
@@ -266,9 +286,23 @@ export function EADeploymentLinkPage() {
       if (!response.ok) {
         throw new Error(payload?.error ?? `Detect failed with HTTP ${response.status}`);
       }
-      setFolders(payload.folders ?? []);
+      const detected = payload.folders ?? [];
+      setFolders(detected);
       setLogs(payload.logs ?? []);
-      showToast('success', `Detected ${payload.folders?.length ?? 0} MT5 data folders.`);
+      if (detected.length === 1) {
+        const folder = detected[0] as MT5DataFolder;
+        setSelectedFolderId(folder.id);
+        setConfig((current) => ({
+          ...current,
+          mt5DataFolder: folder.path,
+          mt5ExpertsFolder: joinExpertsPath(folder.path, current.targetFolderName || CANONICAL_EA_TARGET_FOLDER),
+          targetFolderName: current.targetFolderName || CANONICAL_EA_TARGET_FOLDER,
+          mt5DataRoot: runtime?.mt5MetaquotesRoot ?? current.mt5DataRoot,
+        }));
+        showToast('success', 'Detected 1 MT5 terminal and selected it automatically.');
+      } else {
+        showToast('success', `Detected ${detected.length} MT5 data folders. Click a row to select your terminal.`);
+      }
     } catch (error) {
       showToast('error', error instanceof Error ? error.message : 'Failed to detect MT5 folders.');
     } finally {
@@ -388,7 +422,8 @@ export function EADeploymentLinkPage() {
           <CardContent className="p-4 text-sm text-amber-900">
             Docker runtime detected. Your Windows MetaQuotes folder is mounted at{' '}
             <span className="font-mono">{runtime.mt5TerminalRoot}</span>. Use <strong>Copy files</strong> to deploy
-            into MT5 (symlinks are not supported inside the container).
+            into <span className="font-mono">MQL5/Experts/CacsmsTraderEA</span> (symlinks are not supported inside the container).
+            The only EA source is <span className="font-mono">{runtime.projectEaFolder}</span>.
           </CardContent>
         </Card>
       ) : null}
@@ -431,13 +466,13 @@ export function EADeploymentLinkPage() {
               label="MT5 Experts target folder"
               value={config.mt5ExpertsFolder || derivedMt5ExpertsFolder}
               onChange={(value) => setConfig((c) => ({ ...c, mt5ExpertsFolder: value }))}
-              placeholder="...\\MQL5\\Experts\\CacsmsTrader"
+              placeholder="...\\MQL5\\Experts\\CacsmsTraderEA"
             />
             <PathInputField
               label="Target folder name"
               value={config.targetFolderName}
               onChange={(value) => setConfig((c) => ({ ...c, targetFolderName: value }))}
-              placeholder="CacsmsTrader"
+              placeholder="CacsmsTraderEA"
             />
           </div>
 
@@ -501,6 +536,9 @@ export function EADeploymentLinkPage() {
               Detect MT5 Data Folders
             </Button>
           </div>
+          {folders.length === 1 && !selectedFolderId ? (
+            <p className="text-xs text-amber-700">One terminal was detected. Click the row below if it is not already highlighted.</p>
+          ) : null}
           <MT5FolderTable folders={folders} selectedId={selectedFolderId} onSelect={applySelectedFolder} />
         </CardContent>
       </Card>

@@ -4,6 +4,7 @@ import { queryPostgres } from '@/lib/postgres';
 import { appendExecutionEvent, reconcileBridgeExecutionState } from '@/lib/execution-bridge-store';
 import { dispatchExecutionCommand } from '@/lib/execution-dispatch';
 import { isExecutionEnabled } from '@/lib/execution-policy';
+import { rankedTradableSymbols } from '@/lib/mt5-symbol-telemetry';
 
 export const runtime = 'nodejs';
 
@@ -31,6 +32,7 @@ type BridgeTerminal = {
   xauusdAvailable?: boolean;
   eurusdSpreadPoints?: number;
   xauusdSpreadPoints?: number;
+  symbolTelemetry?: unknown;
 };
 
 type AutoTestToggleEventType = 'AUTO_TEST_ENABLED' | 'AUTO_TEST_DISABLED' | 'AUTO_TEST_DISABLED_AFTER_SUCCESS';
@@ -122,11 +124,20 @@ function describeTerminalPresence(terminal: BridgeTerminal | null, heartbeatFres
 }
 
 function pickSymbol(terminal: BridgeTerminal, maxSpreadPoints: number): { symbol: 'EURUSD' | 'XAUUSD' | null; reason: string } {
+  const ranked = rankedTradableSymbols(terminal, undefined, maxSpreadPoints);
+  if (ranked.length > 0) {
+    const best = ranked[0];
+    if (best.symbol === 'EURUSD' || best.symbol === 'XAUUSD') {
+      return { symbol: best.symbol, reason: `${best.symbol} selected from EA telemetry (${best.spreadPoints} pts spread).` };
+    }
+  }
+
   const telemetryMissing =
     terminal.eurusdAvailable == null
     && terminal.xauusdAvailable == null
     && terminal.eurusdSpreadPoints == null
-    && terminal.xauusdSpreadPoints == null;
+    && terminal.xauusdSpreadPoints == null
+    && !Array.isArray(terminal.symbolTelemetry);
   if (telemetryMissing) return { symbol: 'EURUSD', reason: 'Symbol telemetry missing; attempting EURUSD as default.' };
 
   const eurusdOk = Boolean(terminal.eurusdAvailable) && Number.isFinite(Number(terminal.eurusdSpreadPoints)) && Number(terminal.eurusdSpreadPoints) <= maxSpreadPoints;

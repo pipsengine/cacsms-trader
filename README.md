@@ -61,7 +61,7 @@ In MT5 on your host machine, add `http://127.0.0.1:8787` to allowed WebRequest U
 
 ### EA deployment in Docker (Windows)
 
-The EA deployment tool can symlink or copy `mt5/experts/CacsmsTraderEA` into your local MT5 `Experts` folder when the container can see your MetaQuotes data directory.
+The only EA source in this repo is `mt5/experts/CacsmsTraderEA/CacsmsTraderEA.mq5`. The EA deployment tool copies it into your local MT5 `MQL5/Experts/CacsmsTraderEA/` folder when the container can see your MetaQuotes data directory. Do not use legacy copies under `MQL5/Experts/CacsmsTrader` or `Experts/CACSMS` in MetaTrader.
 
 1. Set your host MetaQuotes path in `.env` (forward slashes):
 

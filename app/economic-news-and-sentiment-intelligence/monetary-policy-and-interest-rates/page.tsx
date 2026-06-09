@@ -323,7 +323,7 @@ export default function MonetaryPolicyInterestRatesPage() {
   }, [currentRows]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-slate-50">
+    <div className="flex h-screen overflow-hidden bg-white">
       <TraderSidebar bridgeOnline={false} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
 
       <div className="flex flex-1 flex-col overflow-hidden">

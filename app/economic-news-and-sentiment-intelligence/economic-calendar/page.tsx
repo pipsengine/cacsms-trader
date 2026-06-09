@@ -300,7 +300,7 @@ function EconomicCalendarIntelligencePage() {
   return (
     <div className="macro-light flex h-screen overflow-hidden bg-white text-slate-900 font-sans">
       <TraderSidebar bridgeOnline={false} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
-      <div className="flex min-w-0 flex-1 flex-col bg-slate-50">
+      <div className="flex min-w-0 flex-1 flex-col bg-white">
         <header className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 py-3 md:px-6">
           <div className="flex items-center gap-4">
             <button
@@ -325,7 +325,7 @@ function EconomicCalendarIntelligencePage() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto bg-slate-50">
+        <div className="flex-1 overflow-y-auto bg-white">
           <main className="space-y-5 p-4 md:p-6 lg:p-8">
             {loadError ? (
               <AlertBanner tone="rose" icon={AlertTriangle}>
@@ -1093,7 +1093,7 @@ function decisionTone(value: string | null): Tone {
 
 export default function EconomicCalendarIntelligencePageRoute() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-slate-950 text-slate-200 p-6">Loading economic calendar...</div>}>
+    <Suspense fallback={<div className="min-h-screen bg-white text-slate-600 p-6">Loading economic calendar...</div>}>
       <EconomicCalendarIntelligencePage />
     </Suspense>
   );

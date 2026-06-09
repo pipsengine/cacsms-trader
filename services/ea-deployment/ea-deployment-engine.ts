@@ -100,7 +100,7 @@ export interface EnginePolicy {
   allowedRoots: string[];
 }
 
-export const DEFAULT_TARGET_FOLDER_NAME = 'CacsmsTrader';
+export const DEFAULT_TARGET_FOLDER_NAME = 'CacsmsTraderEA';
 
 export interface DeploymentRuntime {
   mt5TerminalRoot: string;
@@ -422,8 +422,23 @@ export async function verifyDeployment(config: EADeploymentConfig, policy: Engin
   };
 }
 
+function migrateLegacyEaDeploymentConfig(config: EADeploymentConfig): EADeploymentConfig {
+  if (config.targetFolderName !== 'CacsmsTrader') {
+    return config;
+  }
+  const targetFolderName = DEFAULT_TARGET_FOLDER_NAME;
+  const mt5ExpertsFolder = config.mt5ExpertsFolder
+    ? config.mt5ExpertsFolder.replace(/[/\\]CacsmsTrader[/\\]?$/, `/${targetFolderName}`)
+    : config.mt5ExpertsFolder;
+  return {
+    ...config,
+    targetFolderName,
+    mt5ExpertsFolder,
+  };
+}
+
 export function sanitizeEaDeploymentConfig(config: EADeploymentConfig): EADeploymentConfig {
-  return normalizeConfig(config);
+  return normalizeConfig(migrateLegacyEaDeploymentConfig(config));
 }
 
 function normalizeConfig(config: EADeploymentConfig): EADeploymentConfig {

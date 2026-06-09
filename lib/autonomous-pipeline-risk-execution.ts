@@ -9,6 +9,7 @@ import {
 import { getAutonomyConfig } from './autonomy-store';
 import { resolveExecutionAccountContext } from './execution-account-context';
 import { evaluateExecutionRiskGate } from './execution-risk-gate';
+import { getOpenPositionMetrics } from './execution-open-positions';
 import { queryPostgres } from './postgres';
 import { completePipelineStage } from './top-down-orchestrator';
 
@@ -391,16 +392,47 @@ export async function getPipelineExecutionStatus(symbol: string) {
 
 async function getBridgeExecutionMetrics() {
   try {
-    const response = await fetch(`${process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787'}/commands`, { cache: 'no-store' });
+    const [response, openPositionMetrics] = await Promise.all([
+      fetch(`${process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787'}/commands`, { cache: 'no-store' }),
+      getOpenPositionMetrics(),
+    ]);
     if (!response.ok) throw new Error('bridge commands unavailable');
     const payload = await response.json();
     const commands = Array.isArray(payload.commands) ? payload.commands : [];
     return {
       acked: commands.filter((item: { status?: string }) => item.status === 'acknowledged').length,
       queued: commands.filter((item: { status?: string }) => item.status === 'queued' || item.status === 'leased').length,
-      openOrders: Number(payload.openOrders ?? 0),
+      openOrders: openPositionMetrics.openOrders,
+      trackedOpen: openPositionMetrics.trackedOpen,
+      terminalOpen: openPositionMetrics.terminalOpen,
+      openPositions: openPositionMetrics.positions.map((position) => ({
+        ticket: position.ticket,
+        symbol: position.symbol,
+        side: position.side,
+        volumeLots: position.volumeLots,
+        profitLoss: position.profitLoss,
+      })),
     };
   } catch {
-    return { acked: 0, queued: 0, openOrders: 0 };
+    const openPositionMetrics = await getOpenPositionMetrics().catch(() => ({
+      trackedOpen: 0,
+      terminalOpen: 0,
+      openOrders: 0,
+      positions: [],
+    }));
+    return {
+      acked: 0,
+      queued: 0,
+      openOrders: openPositionMetrics.openOrders,
+      trackedOpen: openPositionMetrics.trackedOpen,
+      terminalOpen: openPositionMetrics.terminalOpen,
+      openPositions: openPositionMetrics.positions.map((position) => ({
+        ticket: position.ticket,
+        symbol: position.symbol,
+        side: position.side,
+        volumeLots: position.volumeLots,
+        profitLoss: position.profitLoss,
+      })),
+    };
   }
 }

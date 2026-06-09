@@ -1,5 +1,6 @@
 'use client';
 
+import Link from "next/link";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -187,7 +188,7 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
     }));
   };
 
-  const selectPage = (pageId: string) => {
+  const selectPage = (pageId: string, navigate = true) => {
     const ancestors = findNavigationAncestors(pageId);
 
     setPreferences((current) => {
@@ -202,6 +203,7 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
       return nextPreferences;
     });
     onMobileOpenChange(false);
+    if (!navigate) return;
     const href = hrefForPageId(pageId);
     if (href) {
       router.push(href);
@@ -274,8 +276,8 @@ function SidebarShell(props: {
 }) {
   return (
     <aside className={cn(
-      "hidden h-screen shrink-0 flex-col border-r border-slate-200 bg-white transition-[width] duration-200 lg:flex",
-      props.collapsed ? "w-20" : "w-84",
+      "sticky top-0 z-40 hidden h-screen shrink-0 self-start flex-col overflow-hidden border-r border-slate-200 bg-white transition-[width] duration-200 lg:flex",
+      props.collapsed ? "w-20" : "w-80",
     )}>
       <div className="flex h-16 items-center justify-between border-b border-slate-200 px-4">
         {props.collapsed ? (
@@ -461,18 +463,30 @@ function GroupItem(props: {
   );
 }
 
-function PageItem({ active, item, onSelect }: { active: boolean; item: NavigationItem; onSelect: (pageId: string) => void }) {
-  return (
-    <button
-      type="button"
-      className={cn(
-        "flex min-h-8 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs leading-4 transition-colors",
-        active ? "bg-blue-600 text-white shadow-sm shadow-blue-900/15" : "text-slate-500 hover:bg-slate-50 hover:text-slate-900",
-      )}
-      onClick={() => onSelect(item.id)}
-    >
+function PageItem({ active, item, onSelect }: { active: boolean; item: NavigationItem; onSelect: (pageId: string, navigate?: boolean) => void }) {
+  const href = hrefForPageId(item.id);
+  const className = cn(
+    "flex min-h-8 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs leading-4 transition-colors",
+    active ? "bg-blue-600 text-white shadow-sm shadow-blue-900/15" : "text-slate-500 hover:bg-slate-50 hover:text-slate-900",
+  );
+  const content = (
+    <>
       <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", active ? "bg-white" : kindDotClass(item.kind))} />
       <span className="line-clamp-2">{item.label}</span>
+    </>
+  );
+
+  if (href) {
+    return (
+      <Link href={href} className={className} onClick={() => onSelect(item.id, false)}>
+        {content}
+      </Link>
+    );
+  }
+
+  return (
+    <button type="button" className={className} onClick={() => onSelect(item.id)}>
+      {content}
     </button>
   );
 }

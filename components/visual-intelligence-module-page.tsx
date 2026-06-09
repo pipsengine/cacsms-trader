@@ -116,9 +116,9 @@ export function VisualIntelligenceModulePage(props: {
   const selectedCapture = captures.find((capture) => capture.id === selectedCaptureId) ?? null;
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
+    <div className="flex h-screen overflow-hidden bg-white">
       <TraderSidebar bridgeOnline={bridgeOnline} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
-      <main className="flex-1 overflow-hidden">
+      <main className="min-w-0 flex-1 overflow-hidden">
         <div className="border-b border-slate-200 bg-white px-4 py-4 md:px-6">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">

@@ -2,6 +2,7 @@ import { evaluatePropFirmRisk } from '@/packages/risk-core';
 import type { PropFirmRiskRules, RiskDecision, RiskState } from '@/packages/shared-types';
 import { appendExecutionEvent } from '@/lib/execution-bridge-store';
 import { isExecutionKillSwitchActive } from '@/lib/execution-kill-switch';
+import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
 import { queryPostgres } from '@/lib/postgres';
 
 export class ExecutionRiskBlockedError extends Error {
@@ -52,6 +53,7 @@ export function loadPropFirmRiskRulesFromEnv(): PropFirmRiskRules {
     dailyDrawdownPercent: envNumber('RISK_DAILY_DRAWDOWN_PERCENT', 4),
     maxDrawdownPercent: envNumber('RISK_MAX_DRAWDOWN_PERCENT', 8),
     riskPerTradePercent: envNumber('RISK_PER_TRADE_PERCENT', 0.5),
+    dailyTradeLimitEnabled: envBool('RISK_DAILY_TRADE_LIMIT_ENABLED', false),
     maxTradesPerDay: envNumber('RISK_MAX_TRADES_PER_DAY', 5),
     maxOpenTrades: envNumber('RISK_MAX_OPEN_TRADES', 3),
     maxLotSize: envNumber('RISK_MAX_LOT_SIZE', 1),
@@ -63,6 +65,16 @@ export function loadPropFirmRiskRulesFromEnv(): PropFirmRiskRules {
     monthlyProfitTargetPercent: envNumber('RISK_MONTHLY_PROFIT_TARGET_PERCENT', 100),
     newsBlackoutMinutesBefore: envNumber('RISK_NEWS_BLACKOUT_MINUTES_BEFORE', 0),
     newsBlackoutMinutesAfter: envNumber('RISK_NEWS_BLACKOUT_MINUTES_AFTER', 0),
+  };
+}
+
+export async function loadPropFirmRiskRules(): Promise<PropFirmRiskRules> {
+  const base = loadPropFirmRiskRulesFromEnv();
+  const settings = await getExecutionRiskSettings();
+  return {
+    ...base,
+    dailyTradeLimitEnabled: settings.dailyTradeLimitEnabled,
+    maxTradesPerDay: settings.maxTradesPerDay,
   };
 }
 
@@ -228,7 +240,7 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
   state: RiskState;
   rewardRiskRatio: number;
 }> {
-  const rules = loadPropFirmRiskRulesFromEnv();
+  const rules = await loadPropFirmRiskRules();
   const accountNumber = await resolveAccountNumber(input.terminalId);
   const state = await loadRiskState(accountNumber);
   const rewardRiskRatio = resolveRewardRiskRatio(input, rules);

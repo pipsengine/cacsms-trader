@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 
 import { AutonomousPipelineStageCard } from '@/components/autonomous-pipeline-stage-card';
+import { ExecutionRiskSettingsPanel } from '@/components/execution-risk-settings-panel';
 import { TraderSidebar } from '@/components/trader-sidebar';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -20,6 +21,7 @@ import {
   PIPELINE_STAGE_STATUS_META,
   type PipelineStageStatus,
 } from '@/lib/autonomous-pipeline';
+import { SYSTEM_FOCUS_SYMBOL_LABELS, SYSTEM_FOCUS_SYMBOLS } from '@/lib/focus-symbols';
 import { cn } from '@/lib/utils';
 
 interface PipelineStatusPayload {
@@ -143,15 +145,15 @@ export default function AutonomousPipelinePage() {
   const overallMeta = PIPELINE_STAGE_STATUS_META[status?.overallStatus ?? 'not_started'];
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
+    <div className="flex h-screen overflow-hidden bg-white">
       <TraderSidebar
         bridgeOnline={Boolean(status?.bridgeOnline)}
         mobileOpen={mobileSidebarOpen}
         onMobileOpenChange={setMobileSidebarOpen}
       />
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="z-20 shrink-0 border-b border-slate-200 bg-white/90 backdrop-blur">
           <div className="flex items-center justify-between gap-4 px-4 py-4 lg:px-8">
             <div className="flex items-center gap-3">
               <Button variant="outline" size="icon" className="lg:hidden" onClick={() => setMobileSidebarOpen(true)}>
@@ -168,11 +170,12 @@ export default function AutonomousPipelinePage() {
                 onChange={(event) => setSymbol(event.target.value)}
                 className="rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
               >
-                <option value="AUTO">Auto (best pair)</option>
-                <option value="XAUUSD">XAUUSD</option>
-                <option value="EURUSD">EURUSD</option>
-                <option value="GBPUSD">GBPUSD</option>
-                <option value="USDJPY">USDJPY</option>
+                <option value="AUTO">Auto (all {SYSTEM_FOCUS_SYMBOLS.length} focus symbols)</option>
+                {SYSTEM_FOCUS_SYMBOLS.map((focusSymbol) => (
+                  <option key={focusSymbol} value={focusSymbol}>
+                    {SYSTEM_FOCUS_SYMBOL_LABELS[focusSymbol]} ({focusSymbol})
+                  </option>
+                ))}
               </select>
               <Button variant="outline" onClick={loadStatus} disabled={loading}>
                 <RefreshCw className={cn('mr-2 h-4 w-4', loading && 'animate-spin')} />
@@ -186,7 +189,7 @@ export default function AutonomousPipelinePage() {
           </div>
         </header>
 
-        <main className="flex-1 space-y-6 px-4 py-6 lg:px-8">
+        <main className="flex-1 space-y-6 overflow-auto bg-white px-4 py-6 lg:px-8">
           {error ? (
             <Card className="border-rose-200 bg-rose-50">
               <CardContent className="py-4 text-sm text-rose-700">{error}</CardContent>
@@ -264,6 +267,8 @@ export default function AutonomousPipelinePage() {
               </CardContent>
             </Card>
           </div>
+
+          <ExecutionRiskSettingsPanel />
 
           {status?.pairSelection?.candidates?.length ? (
             <Card id="pair-selection" className="border-slate-200 bg-white shadow-sm">

@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { applyAutonomyAccountProfile } from './autonomy-account-profiles';
 import { buildAutonomousDecision } from './autonomous-decision-engine';
 import { resolveExecutionAccountContext } from './execution-account-context';
+import { SYSTEM_FOCUS_SYMBOLS } from './focus-symbols';
 import { DEFAULT_PAIR_SELECTION_CONFIG, runAutonomousPairSelection } from './pair-selector';
 import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
 import { analyzeAiVisualInterpretation } from './ai-visual-interpretation-store';
@@ -218,18 +219,18 @@ CREATE INDEX IF NOT EXISTS idx_autonomous_decisions_symbol_tf ON autonomous_deci
 `;
 
 const defaultConfig: AutonomyConfig = {
-  activeSymbols: ['XAUUSD'],
-  watchlistSymbols: [...DEFAULT_PAIR_SELECTION_CONFIG.watchlistSymbols],
+  activeSymbols: [...SYSTEM_FOCUS_SYMBOLS],
+  watchlistSymbols: [...SYSTEM_FOCUS_SYMBOLS],
   maxSpreadPoints: DEFAULT_PAIR_SELECTION_CONFIG.maxSpreadPoints,
   pairSelectionEnabled: DEFAULT_PAIR_SELECTION_CONFIG.pairSelectionEnabled,
-  maxSelectedSymbols: DEFAULT_PAIR_SELECTION_CONFIG.maxSelectedSymbols,
+  maxSelectedSymbols: SYSTEM_FOCUS_SYMBOLS.length,
   activeTimeframes: [...AUTONOMY_TIMEFRAMES],
   mode: 'full_auto',
   confidenceThreshold: 60,
   alertThreshold: 72,
   riskThreshold: 70,
   retryLimit: 3,
-  workerConcurrency: 2,
+  workerConcurrency: 8,
   newsBlackoutMinutes: 30,
   scanFrequencySeconds: 60,
   captureSources: ['mt5_bridge', 'chart_capture_service'],
@@ -253,6 +254,7 @@ export async function ensureAutonomySchema() {
 
 export async function ensureAutonomyRuntime() {
   await ensureAutonomySchema();
+  await ensureFocusSymbolsConfigured();
   if (runtimeStarted) return;
   runtimeStarted = true;
   runtimeTimer = setInterval(() => {
@@ -599,6 +601,7 @@ async function selectAutonomousPairs() {
     maxSelectedSymbols: config.maxSelectedSymbols,
   });
   await saveAutonomyConfig({ activeSymbols: selection.selectedSymbols });
+  await syncAutonomySymbolSchedules({ ...(await readAutonomyConfigRow()), activeSymbols: selection.selectedSymbols });
   await publishAutonomyEvent('autonomy.pair.selected', {
     selectedSymbol: selection.selectedSymbol,
     selectedSymbols: selection.selectedSymbols,
@@ -731,15 +734,7 @@ async function seedAutonomyDefaults() {
     `, [worker]);
   }
   const config = await readAutonomyConfigRow();
-  for (const symbol of config.activeSymbols) {
-    for (const timeframe of config.activeTimeframes) {
-      await seedSchedule('AutonomousChartCaptureWorker', symbol, timeframe, cadenceForTimeframe(timeframe));
-      await seedSchedule('AutonomousCacsmsVisionWorker', symbol, timeframe, cadenceForTimeframe(timeframe) + 10);
-      await seedSchedule('AutonomousMarketInterpretationWorker', symbol, timeframe, cadenceForTimeframe(timeframe) + 20);
-      await seedSchedule('AutonomousSignalGenerationWorker', symbol, timeframe, cadenceForTimeframe(timeframe) + 40);
-    }
-    await seedSchedule('AutonomousMultiTimeframeComparisonWorker', symbol, null, 3600);
-  }
+  await syncAutonomySymbolSchedules(config);
   await seedSchedule('AutonomousPairSelectorWorker', null, null, config.scanFrequencySeconds);
   await seedSchedule('AutonomousSymbolScannerWorker', null, null, config.scanFrequencySeconds + 5);
   await seedSchedule('AutonomousFailureRecoveryWorker', null, null, 120);
@@ -749,6 +744,44 @@ async function seedAutonomyDefaults() {
   await seedSchedule('AutonomousInterestRateSyncWorker', null, null, 86400);
   await seedSchedule('AutonomousOutcomeTrackingWorker', null, null, 86400);
   await seedSchedule('AutonomousModelLearningWorker', null, null, 604800);
+}
+
+export async function ensureFocusSymbolsConfigured() {
+  const config = await readAutonomyConfigRow();
+  const watchlist = config.watchlistSymbols.map((symbol) => symbol.toUpperCase());
+  const expected = SYSTEM_FOCUS_SYMBOLS.map((symbol) => symbol.toUpperCase());
+  const matchesFocusUniverse =
+    expected.every((symbol) => watchlist.includes(symbol))
+    && watchlist.length === expected.length
+    && config.maxSelectedSymbols >= expected.length
+    && config.activeSymbols.length >= expected.length;
+  if (matchesFocusUniverse) return config;
+  const nextConfig: AutonomyConfig = {
+    ...config,
+    watchlistSymbols: [...SYSTEM_FOCUS_SYMBOLS],
+    activeSymbols: [...SYSTEM_FOCUS_SYMBOLS],
+    maxSelectedSymbols: SYSTEM_FOCUS_SYMBOLS.length,
+    workerConcurrency: Math.max(config.workerConcurrency, 8),
+  };
+  await saveAutonomyConfig(nextConfig);
+  await syncAutonomySymbolSchedules(nextConfig);
+  return nextConfig;
+}
+
+async function syncAutonomySymbolSchedules(config: AutonomyConfig) {
+  const symbols = Array.from(new Set([
+    ...config.watchlistSymbols.map((symbol) => symbol.toUpperCase()),
+    ...config.activeSymbols.map((symbol) => symbol.toUpperCase()),
+  ]));
+  for (const symbol of symbols) {
+    for (const timeframe of config.activeTimeframes) {
+      await seedSchedule('AutonomousChartCaptureWorker', symbol, timeframe, cadenceForTimeframe(timeframe));
+      await seedSchedule('AutonomousCacsmsVisionWorker', symbol, timeframe, cadenceForTimeframe(timeframe) + 10);
+      await seedSchedule('AutonomousMarketInterpretationWorker', symbol, timeframe, cadenceForTimeframe(timeframe) + 20);
+      await seedSchedule('AutonomousSignalGenerationWorker', symbol, timeframe, cadenceForTimeframe(timeframe) + 40);
+    }
+    await seedSchedule('AutonomousMultiTimeframeComparisonWorker', symbol, null, 3600);
+  }
 }
 
 async function seedSchedule(workerName: string, symbol: string | null, timeframe: string | null, cadenceSeconds: number) {

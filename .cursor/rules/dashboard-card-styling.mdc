@@ -1,0 +1,19 @@
+---
+description: Dense color-coded card backgrounds for dashboard and command-center pages
+globs: app/**/*.tsx,components/**/*overview*.tsx,components/**/*dashboard*.tsx
+alwaysApply: false
+---
+
+# Dashboard card styling
+
+When building or upgrading dashboard, overview, or command-center pages:
+
+- **Every card must be color-coded** — no plain `bg-white` panels unless it is a nested item inside an already-colored card.
+- Use **moderate tinted backgrounds** (not heavy saturation): gradients like `from-{tone}-100 via-{tone}-50 to-white` with `border-{tone}-200`, dark text (`text-{tone}-900`), and soft shadows (`shadow-md shadow-{tone}-200/20`).
+- Assign a **distinct tone per card** (blue, emerald, purple, violet, orange, rose, cyan, amber, slate) so sections are scannable at a glance.
+- Card headers should use a **slightly stronger tint** than the body (`border-b` + `bg-{tone}-100/70` on header).
+- Nested metric tiles use `border-{tone}-200 bg-{tone}-50` with tone-matched dark text.
+- Status badges use `border-{tone}-300 bg-{tone}-100 text-{tone}-800`.
+- Page canvas must use a **white background** (`bg-white`) — cards remain the primary color carriers.
+
+Reference implementation: `lib/dashboard-card-tones.ts` (`toneCard`, `toneCardHeader`, `toneMetric`, `toneTitle`, `toneBody`).

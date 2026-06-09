@@ -1,11 +1,5 @@
-import { VisualIntelligenceModulePage } from '@/components/visual-intelligence-module-page';
+import { VisualIntelligenceOverviewDashboard } from '@/components/visual-intelligence-overview-dashboard';
 
 export default function VisualIntelligenceOverviewPage() {
-  return (
-    <VisualIntelligenceModulePage
-      title="Visual Intelligence Overview"
-      description="Live chart capture registry and processing status. No synthetic dashboard metrics are shown."
-      module="overview"
-    />
-  );
+  return <VisualIntelligenceOverviewDashboard />;
 }

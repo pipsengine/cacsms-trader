@@ -3,7 +3,7 @@ import { getAutonomousPipelineStatus } from '@/lib/autonomous-pipeline-store';
 export async function GET(request: Request): Promise<Response> {
   try {
     const url = new URL(request.url);
-    const symbol = url.searchParams.get('symbol') ?? 'XAUUSD';
+    const symbol = url.searchParams.get('symbol') ?? 'AUTO';
     const status = await getAutonomousPipelineStatus(symbol);
     return Response.json({ ok: true, status }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {

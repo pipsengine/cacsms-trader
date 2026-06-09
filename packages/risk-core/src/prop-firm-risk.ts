@@ -27,7 +27,7 @@ export function evaluatePropFirmRisk(input: EvaluateRiskInput): RiskDecision {
     return block("monthly_target_reached", "Monthly profit target reached. Trading is locked.", remainingDailyLossAmount);
   }
 
-  if (state.tradesOpenedToday >= rules.maxTradesPerDay) {
+  if (rules.dailyTradeLimitEnabled && state.tradesOpenedToday >= rules.maxTradesPerDay) {
     return block("max_trades_per_day", "Maximum trades per day reached.", remainingDailyLossAmount);
   }
 

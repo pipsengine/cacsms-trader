@@ -284,6 +284,101 @@ server.listen(PORT, () => {
   console.log("Mode: broker demo account readiness. Live order execution is disabled.");
 });
 
+const STALE_TICK_AGE_SECONDS = 120;
+
+function classifySymbolSector(symbol) {
+  const normalized = String(symbol ?? "").toUpperCase();
+  if (normalized.startsWith("XAU")) return "metals";
+  if (normalized.startsWith("BTC")) return "crypto";
+  if (["US30", "NASDAQ100", "NAS100", "SP500", "SPX500", "US500"].includes(normalized)) return "indices";
+  return "forex";
+}
+
+function normalizeSymbolTelemetryRow(row) {
+  if (!row || typeof row !== "object") return null;
+  const symbol = String(row.symbol ?? "").toUpperCase().trim();
+  if (!symbol) return null;
+  const tickAgeSeconds = Number.isFinite(Number(row.tickAgeSeconds)) ? Number(row.tickAgeSeconds) : -1;
+  const spreadPoints = Number.isFinite(Number(row.spreadPoints)) ? Number(row.spreadPoints) : null;
+  const available = Boolean(row.available);
+  const stale = tickAgeSeconds < 0 ? !available : tickAgeSeconds > STALE_TICK_AGE_SECONDS;
+  return {
+    symbol,
+    brokerSymbol: String(row.brokerSymbol ?? symbol),
+    available,
+    tradable: Boolean(row.tradable),
+    sessionOpen: Boolean(row.sessionOpen),
+    bid: Number.isFinite(Number(row.bid)) ? Number(row.bid) : 0,
+    ask: Number.isFinite(Number(row.ask)) ? Number(row.ask) : 0,
+    spreadPoints,
+    digits: Number.isFinite(Number(row.digits)) ? Number(row.digits) : 0,
+    point: Number.isFinite(Number(row.point)) ? Number(row.point) : 0,
+    tickAgeSeconds,
+    volume: Number.isFinite(Number(row.volume)) ? Number(row.volume) : 0,
+    sector: String(row.sector ?? classifySymbolSector(symbol)),
+    stale,
+    lastError: Number.isFinite(Number(row.lastError)) ? Number(row.lastError) : 0,
+    receivedAt: new Date().toISOString(),
+  };
+}
+
+function normalizeSymbolTelemetry(payload, existing) {
+  const raw = payload.symbolTelemetry;
+  if (Array.isArray(raw) && raw.length > 0) {
+    return raw.map(normalizeSymbolTelemetryRow).filter(Boolean);
+  }
+  if (Array.isArray(existing?.symbolTelemetry) && existing.symbolTelemetry.length > 0) {
+    return existing.symbolTelemetry;
+  }
+  return [];
+}
+
+function normalizeTelemetrySummary(payload, symbolTelemetry) {
+  const raw = payload.telemetrySummary;
+  if (raw && typeof raw === "object") {
+    return {
+      tracked: Number(raw.tracked ?? symbolTelemetry.length),
+      available: Number(raw.available ?? symbolTelemetry.filter((row) => row.available).length),
+      tradable: Number(raw.tradable ?? symbolTelemetry.filter((row) => row.tradable).length),
+      sessionOpen: Number(raw.sessionOpen ?? symbolTelemetry.filter((row) => row.sessionOpen).length),
+      stale: Number(raw.stale ?? symbolTelemetry.filter((row) => row.stale).length),
+      avgSpreadPoints: Number.isFinite(Number(raw.avgSpreadPoints)) ? Number(raw.avgSpreadPoints) : null,
+      version: Number.isFinite(Number(raw.version)) ? Number(raw.version) : 2,
+    };
+  }
+  const spreads = symbolTelemetry.map((row) => row.spreadPoints).filter((value) => Number.isFinite(value));
+  const avgSpreadPoints = spreads.length
+    ? Math.round(spreads.reduce((sum, value) => sum + value, 0) / spreads.length)
+    : null;
+  return {
+    tracked: symbolTelemetry.length,
+    available: symbolTelemetry.filter((row) => row.available).length,
+    tradable: symbolTelemetry.filter((row) => row.tradable).length,
+    sessionOpen: symbolTelemetry.filter((row) => row.sessionOpen).length,
+    stale: symbolTelemetry.filter((row) => row.stale).length,
+    avgSpreadPoints,
+    version: 2,
+  };
+}
+
+function legacySymbolTelemetryFields(symbolTelemetry) {
+  const pick = (symbol) => symbolTelemetry.find((row) => row.symbol === symbol) ?? null;
+  const eurusd = pick("EURUSD");
+  const xauusd = pick("XAUUSD");
+  const gbpusd = pick("GBPUSD");
+  const usdjpy = pick("USDJPY");
+  return {
+    eurusdAvailable: eurusd ? eurusd.available : null,
+    xauusdAvailable: xauusd ? xauusd.available : null,
+    gbpusdAvailable: gbpusd ? gbpusd.available : null,
+    usdjpyAvailable: usdjpy ? usdjpy.available : null,
+    eurusdSpreadPoints: eurusd?.spreadPoints ?? null,
+    xauusdSpreadPoints: xauusd?.spreadPoints ?? null,
+    gbpusdSpreadPoints: gbpusd?.spreadPoints ?? null,
+    usdjpySpreadPoints: usdjpy?.spreadPoints ?? null,
+  };
+}
+
 function normalizeHeartbeat(payload, existing) {
   const now = new Date().toISOString();
   const terminalId = requiredString(payload.terminalId, "terminalId");
@@ -302,14 +397,30 @@ function normalizeHeartbeat(payload, existing) {
   const enableExecution = Boolean(payload.enableExecution ?? payload.enable_execution ?? false);
   const accountTradeAllowed = payload.accountTradeAllowed == null ? null : Boolean(payload.accountTradeAllowed);
   const terminalTradeAllowed = payload.terminalTradeAllowed == null ? null : Boolean(payload.terminalTradeAllowed);
-  const eurusdAvailable = payload.eurusdAvailable == null ? null : Boolean(payload.eurusdAvailable);
-  const xauusdAvailable = payload.xauusdAvailable == null ? null : Boolean(payload.xauusdAvailable);
-  const gbpusdAvailable = payload.gbpusdAvailable == null ? null : Boolean(payload.gbpusdAvailable);
-  const usdjpyAvailable = payload.usdjpyAvailable == null ? null : Boolean(payload.usdjpyAvailable);
-  const eurusdSpreadPoints = Number.isFinite(Number(payload.eurusdSpreadPoints)) ? Number(payload.eurusdSpreadPoints) : null;
-  const xauusdSpreadPoints = Number.isFinite(Number(payload.xauusdSpreadPoints)) ? Number(payload.xauusdSpreadPoints) : null;
-  const gbpusdSpreadPoints = Number.isFinite(Number(payload.gbpusdSpreadPoints)) ? Number(payload.gbpusdSpreadPoints) : null;
-  const usdjpySpreadPoints = Number.isFinite(Number(payload.usdjpySpreadPoints)) ? Number(payload.usdjpySpreadPoints) : null;
+  const symbolTelemetry = normalizeSymbolTelemetry(payload, existing);
+  const telemetrySummary = normalizeTelemetrySummary(payload, symbolTelemetry);
+  const legacyTelemetry = symbolTelemetry.length > 0
+    ? legacySymbolTelemetryFields(symbolTelemetry)
+    : {
+      eurusdAvailable: payload.eurusdAvailable == null ? null : Boolean(payload.eurusdAvailable),
+      xauusdAvailable: payload.xauusdAvailable == null ? null : Boolean(payload.xauusdAvailable),
+      gbpusdAvailable: payload.gbpusdAvailable == null ? null : Boolean(payload.gbpusdAvailable),
+      usdjpyAvailable: payload.usdjpyAvailable == null ? null : Boolean(payload.usdjpyAvailable),
+      eurusdSpreadPoints: Number.isFinite(Number(payload.eurusdSpreadPoints)) ? Number(payload.eurusdSpreadPoints) : null,
+      xauusdSpreadPoints: Number.isFinite(Number(payload.xauusdSpreadPoints)) ? Number(payload.xauusdSpreadPoints) : null,
+      gbpusdSpreadPoints: Number.isFinite(Number(payload.gbpusdSpreadPoints)) ? Number(payload.gbpusdSpreadPoints) : null,
+      usdjpySpreadPoints: Number.isFinite(Number(payload.usdjpySpreadPoints)) ? Number(payload.usdjpySpreadPoints) : null,
+    };
+  const {
+    eurusdAvailable,
+    xauusdAvailable,
+    gbpusdAvailable,
+    usdjpyAvailable,
+    eurusdSpreadPoints,
+    xauusdSpreadPoints,
+    gbpusdSpreadPoints,
+    usdjpySpreadPoints,
+  } = legacyTelemetry;
   const historyItem = {
     sequence,
     receivedAt: now,
@@ -343,6 +454,8 @@ function normalizeHeartbeat(payload, existing) {
     xauusdSpreadPoints,
     gbpusdSpreadPoints,
     usdjpySpreadPoints,
+    symbolTelemetry,
+    telemetrySummary,
     balance: historyItem.balance,
     equity: historyItem.equity,
     margin: finiteNumber(payload.margin, "margin"),

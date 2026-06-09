@@ -142,6 +142,7 @@ function classifyCandle(
   const institutionalDisplacementScore = clamp((range / Math.max(0.0001, context.atr)) * bodyRatio * 0.72, 0, 1);
   const candleReliabilityScore = clamp((candle.confidence + bodyStrengthScore + (1 - manipulationScore * 0.35)) / 3, 0, 1);
 
+  const multiCandlePattern = detectMultiCandlePattern(candles, index, context);
   const flags = {
     doji: bodyRatio <= 0.12,
     hammer: lowerRatio >= 0.48 && upperRatio <= 0.2 && bodyRatio <= 0.38,
@@ -153,14 +154,16 @@ function classifyCandle(
     rejection: wickRejectionScore >= 0.62,
     liquidity: (candle.highPrice >= context.recentHigh || candle.lowPrice <= context.recentLow) && wickRejectionScore >= 0.45,
     manipulation: manipulationScore >= 0.62,
-    engulfing: previous ? candle.highPrice > previous.highPrice && candle.lowPrice < previous.lowPrice && body > Math.abs(previous.closePrice - previous.openPrice) * 1.1 : false,
+    engulfing: previous ? isEngulfing(candle, previous) : false,
+    harami: previous ? isHarami(candle, previous) : false,
     insideBar: previous ? candle.highPrice < previous.highPrice && candle.lowPrice > previous.lowPrice : false,
     outsideBar: previous ? candle.highPrice > previous.highPrice && candle.lowPrice < previous.lowPrice : false,
     displacement: institutionalDisplacementScore >= 0.68,
     imbalance: previous ? Math.abs(candle.closePrice - previous.closePrice) > previousRange * 0.8 && bodyRatio > 0.55 : false,
+    multiCandlePattern: multiCandlePattern !== null,
   };
 
-  const detectedCandleType = pickCandleType(flags, direction);
+  const detectedCandleType = multiCandlePattern ?? pickCandleType(flags, direction);
   const implication = implicationFor(detectedCandleType, direction, lowerRatio, upperRatio);
   const supportsDecision = decisionFor(detectedCandleType, implication, institutionalDisplacementScore, manipulationScore);
   const finalConfidenceScore = clamp(
@@ -204,7 +207,9 @@ function classifyCandle(
       causesBos: flags.displacement && direction === context.trendDirection,
       liquiditySweepCandle: flags.liquidity,
       stopHuntCandle: flags.manipulation && flags.liquidity,
-      openCvPipeline: ['color_segmentation', 'contour_filtering', 'vertical_wick_detection', 'pixel_price_interpolation'],
+      openCvPipeline: ['color_segmentation', 'contour_filtering', 'vertical_wick_detection', 'pixel_price_interpolation', 'wick_body_ratio_classifier', 'multi_candle_sequence_scan'],
+      multiCandlePattern: multiCandlePattern ?? null,
+      atr: context.atr,
     },
   };
 }
@@ -291,7 +296,7 @@ function classifySequence(
 
 function buildContext(candles: ReconstructedCandle[]) {
   const ranges = candles.map((candle) => candle.highPrice - candle.lowPrice);
-  const atr = average(ranges.slice(-14)) || average(ranges) || 1;
+  const atr = wilderAtr(ranges) || average(ranges) || 1;
   const recent = candles.slice(-20);
   const first = candles[0];
   const last = candles[candles.length - 1];
@@ -303,10 +308,138 @@ function buildContext(candles: ReconstructedCandle[]) {
   };
 }
 
+function detectMultiCandlePattern(
+  candles: ReconstructedCandle[],
+  index: number,
+  context: ReturnType<typeof buildContext>,
+): string | null {
+  const current = candles[index];
+  const previous = candles[index - 1];
+  const prior = candles[index - 2];
+
+  if (prior && previous && current) {
+    const priorBody = Math.abs(prior.closePrice - prior.openPrice);
+    const middleBody = Math.abs(previous.closePrice - previous.openPrice);
+    const currentBody = Math.abs(current.closePrice - current.openPrice);
+    const priorRange = Math.max(0.0001, prior.highPrice - prior.lowPrice);
+    const middleRange = Math.max(0.0001, previous.highPrice - previous.lowPrice);
+    const middleBodyRatio = middleBody / middleRange;
+
+    if (
+      prior.closePrice < prior.openPrice &&
+      middleBodyRatio <= 0.35 &&
+      current.closePrice > current.openPrice &&
+      current.closePrice > (prior.openPrice + prior.closePrice) / 2
+    ) {
+      return 'morning star';
+    }
+
+    if (
+      prior.closePrice > prior.openPrice &&
+      middleBodyRatio <= 0.35 &&
+      current.closePrice < current.openPrice &&
+      current.closePrice < (prior.openPrice + prior.closePrice) / 2
+    ) {
+      return 'evening star';
+    }
+
+    const trio = candles.slice(index - 2, index + 1);
+    if (trio.length === 3 && trio.every((item) => item.closePrice > item.openPrice)) {
+      const bodies = trio.map((item) => Math.abs(item.closePrice - item.openPrice));
+      const ranges = trio.map((item) => item.highPrice - item.lowPrice);
+      const bodyRatios = bodies.map((body, idx) => body / Math.max(0.0001, ranges[idx]));
+      if (
+        bodyRatios.every((ratio) => ratio >= 0.45) &&
+        trio[1].closePrice > trio[0].closePrice &&
+        trio[2].closePrice > trio[1].closePrice
+      ) {
+        return 'three white soldiers';
+      }
+    }
+
+    if (trio.length === 3 && trio.every((item) => item.closePrice < item.openPrice)) {
+      const bodies = trio.map((item) => Math.abs(item.closePrice - item.openPrice));
+      const ranges = trio.map((item) => item.highPrice - item.lowPrice);
+      const bodyRatios = bodies.map((body, idx) => body / Math.max(0.0001, ranges[idx]));
+      if (
+        bodyRatios.every((ratio) => ratio >= 0.45) &&
+        trio[1].closePrice < trio[0].closePrice &&
+        trio[2].closePrice < trio[1].closePrice
+      ) {
+        return 'three black crows';
+      }
+    }
+  }
+
+  if (previous && current) {
+    const highDelta = Math.abs(previous.highPrice - current.highPrice);
+    const lowDelta = Math.abs(previous.lowPrice - current.lowPrice);
+    const tolerance = context.atr * 0.12;
+
+    if (
+      previous.closePrice > previous.openPrice &&
+      current.closePrice < current.openPrice &&
+      highDelta <= tolerance &&
+      Math.max(previous.highPrice, current.highPrice) >= context.recentHigh * 0.998
+    ) {
+      return 'tweezer top';
+    }
+
+    if (
+      previous.closePrice < previous.openPrice &&
+      current.closePrice > current.openPrice &&
+      lowDelta <= tolerance &&
+      Math.min(previous.lowPrice, current.lowPrice) <= context.recentLow * 1.002
+    ) {
+      return 'tweezer bottom';
+    }
+  }
+
+  return null;
+}
+
+function isEngulfing(current: ReconstructedCandle, previous: ReconstructedCandle): boolean {
+  const currentBody = Math.abs(current.closePrice - current.openPrice);
+  const previousBody = Math.abs(previous.closePrice - previous.openPrice);
+  const currentBullish = current.closePrice > current.openPrice;
+  const previousBearish = previous.closePrice < previous.openPrice;
+  const currentBearish = current.closePrice < current.openPrice;
+  const previousBullish = previous.closePrice > previous.openPrice;
+
+  if (currentBullish && previousBearish) {
+    return current.openPrice <= previous.closePrice && current.closePrice >= previous.openPrice && currentBody > previousBody * 1.05;
+  }
+  if (currentBearish && previousBullish) {
+    return current.openPrice >= previous.closePrice && current.closePrice <= previous.openPrice && currentBody > previousBody * 1.05;
+  }
+  return false;
+}
+
+function isHarami(current: ReconstructedCandle, previous: ReconstructedCandle): boolean {
+  const previousHigh = Math.max(previous.openPrice, previous.closePrice);
+  const previousLow = Math.min(previous.openPrice, previous.closePrice);
+  const currentHigh = Math.max(current.openPrice, current.closePrice);
+  const currentLow = Math.min(current.openPrice, current.closePrice);
+  const currentBody = currentHigh - currentLow;
+  const previousBody = previousHigh - previousLow;
+  return currentHigh < previousHigh && currentLow > previousLow && currentBody < previousBody * 0.72;
+}
+
+function wilderAtr(ranges: number[], period = 14): number {
+  if (ranges.length === 0) return 0;
+  if (ranges.length < period) return average(ranges);
+  let atr = average(ranges.slice(0, period));
+  for (let index = period; index < ranges.length; index += 1) {
+    atr = (atr * (period - 1) + ranges[index]) / period;
+  }
+  return atr;
+}
+
 function pickCandleType(flags: Record<string, boolean>, direction: string): string {
   if (flags.manipulation && flags.liquidity) return 'manipulation candle';
   if (flags.liquidity) return 'liquidity candle';
   if (flags.engulfing) return 'engulfing candle';
+  if (flags.harami) return 'harami';
   if (flags.outsideBar) return 'outside bar';
   if (flags.insideBar) return 'inside bar';
   if (flags.marubozu) return 'marubozu';
@@ -321,8 +454,11 @@ function pickCandleType(flags: Record<string, boolean>, direction: string): stri
 }
 
 function implicationFor(type: string, direction: string, lowerRatio: number, upperRatio: number): string {
+  if (['morning star', 'three white soldiers', 'tweezer bottom'].includes(type)) return 'bullish';
+  if (['evening star', 'three black crows', 'tweezer top'].includes(type)) return 'bearish';
   if (['hammer', 'inverted hammer'].includes(type)) return 'bullish';
   if (['shooting star'].includes(type)) return 'bearish';
+  if (type === 'harami') return 'indecision';
   if (type === 'pin bar' || type === 'rejection candle') return lowerRatio > upperRatio ? 'bullish rejection' : 'bearish rejection';
   if (type === 'manipulation candle') return 'two-sided risk';
   if (type === 'doji' || type === 'inside bar') return 'indecision';
@@ -338,6 +474,13 @@ function decisionFor(type: string, implication: string, displacement: number, ma
 }
 
 function tradingMeaningFor(type: string, implication: string): string {
+  if (type === 'morning star') return 'Three-candle bullish reversal sequence. Confirm with structure reclaim before entry.';
+  if (type === 'evening star') return 'Three-candle bearish reversal sequence. Confirm with breakdown or liquidity sweep.';
+  if (type === 'three white soldiers') return 'Sustained bullish momentum across three consecutive candles.';
+  if (type === 'three black crows') return 'Sustained bearish momentum across three consecutive candles.';
+  if (type === 'tweezer top') return 'Equal-high rejection cluster near resistance. Watch for bearish continuation.';
+  if (type === 'tweezer bottom') return 'Equal-low rejection cluster near support. Watch for bullish continuation.';
+  if (type === 'harami') return 'Compression inside prior candle body. Potential pause before next expansion leg.';
   if (type.includes('manipulation')) return 'Possible stop-hunt or engineered liquidity event. Wait for confirmation after the sweep.';
   if (type.includes('liquidity')) return 'Liquidity interaction candle near a recent extreme. Watch for sweep and reclaim logic.';
   if (type.includes('momentum') || type === 'marubozu') return 'Strong directional participation and possible institutional displacement.';

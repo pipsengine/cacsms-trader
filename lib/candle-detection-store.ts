@@ -116,6 +116,20 @@ export async function getCandleClassifications(captureId: string): Promise<Candl
   return result.rows.map(mapClassification);
 }
 
+export async function getCandleCoverageMap(): Promise<Record<string, number>> {
+  await ensureCandleDetectionSchema();
+  const result = await queryPostgres(`
+    SELECT chart_capture_id, COUNT(*)::int AS classification_count
+    FROM candle_classifications
+    GROUP BY chart_capture_id
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.chart_capture_id)] = Number(row.classification_count);
+  }
+  return coverage;
+}
+
 export async function getCandleSequences(captureId: string): Promise<CandleSequenceAnalysis[]> {
   await ensureCandleDetectionSchema();
   const result = await queryPostgres(`

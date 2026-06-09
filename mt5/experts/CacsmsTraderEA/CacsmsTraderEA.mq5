@@ -3,7 +3,7 @@
 //| Demo heartbeat bridge first, execution later.                     |
 //+------------------------------------------------------------------+
 #property strict
-#property version "001.002"
+#property version "001.004"
 
 #include <Trade\Trade.mqh>
 
@@ -135,6 +135,253 @@ void OnTimer()
    }
 }
 
+const int FOCUS_SYMBOL_COUNT = 16;
+const int TELEMETRY_STALE_SECONDS = 120;
+
+string g_telemetrySymbols[16];
+bool g_telemetryAvailable[16];
+int g_telemetrySpreads[16];
+int g_telemetryCount = 0;
+
+string FocusSymbolKeys[16] =
+{
+   "EURUSD", "GBPUSD", "EURGBP", "EURJPY", "GBPJPY", "USDJPY", "USDCAD", "USDCHF",
+   "AUDUSD", "NZDUSD", "AUDJPY", "XAUUSD", "BTCUSD", "US30", "NASDAQ100", "SP500"
+};
+
+string FocusSymbolAliases[16] =
+{
+   "EURUSD|EURUSDm",
+   "GBPUSD|GBPUSDm",
+   "EURGBP|EURGBPm",
+   "EURJPY|EURJPYm",
+   "GBPJPY|GBPJPYm",
+   "USDJPY|USDJPYm",
+   "USDCAD|USDCADm",
+   "USDCHF|USDCHFm",
+   "AUDUSD|AUDUSDm",
+   "NZDUSD|NZDUSDm",
+   "AUDJPY|AUDJPYm",
+   "XAUUSD|XAUUSDm|GOLD",
+   "BTCUSD|BTCUSDm",
+   "US30|DJ30|US30Cash",
+   "NASDAQ100|NAS100|USTEC|US100",
+   "SP500|SPX500|US500|SP500m"
+};
+
+string ClassifySymbolSector(string focusSymbol)
+{
+   if (StringFind(focusSymbol, "XAU") == 0) return "metals";
+   if (StringFind(focusSymbol, "BTC") == 0) return "crypto";
+   if (focusSymbol == "US30" || focusSymbol == "NASDAQ100" || focusSymbol == "SP500") return "indices";
+   return "forex";
+}
+
+bool ResolveFocusBrokerSymbol(string aliasCsv, string &brokerSymbolOut)
+{
+   string aliases[];
+   int count = StringSplit(aliasCsv, '|', aliases);
+   for (int i = 0; i < count; i++)
+   {
+      string candidate = aliases[i];
+      StringTrimLeft(candidate);
+      StringTrimRight(candidate);
+      if (candidate == "") continue;
+      if (SymbolSelect(candidate, true))
+      {
+         brokerSymbolOut = candidate;
+         return true;
+      }
+   }
+   brokerSymbolOut = "";
+   return false;
+}
+
+bool CollectFocusSymbolTelemetry(
+   string focusSymbol,
+   string aliasCsv,
+   string &brokerSymbolOut,
+   bool &availableOut,
+   bool &tradableOut,
+   bool &sessionOpenOut,
+   double &bidOut,
+   double &askOut,
+   int &spreadPointsOut,
+   int &digitsOut,
+   double &pointOut,
+   long &tickAgeSecondsOut,
+   long &volumeOut,
+   string &sectorOut,
+   int &lastErrorOut
+)
+{
+   brokerSymbolOut = "";
+   availableOut = false;
+   tradableOut = false;
+   sessionOpenOut = false;
+   bidOut = 0.0;
+   askOut = 0.0;
+   spreadPointsOut = 0;
+   digitsOut = 0;
+   pointOut = 0.0;
+   tickAgeSecondsOut = -1;
+   volumeOut = 0;
+   sectorOut = ClassifySymbolSector(focusSymbol);
+   lastErrorOut = 0;
+
+   if (!ResolveFocusBrokerSymbol(aliasCsv, brokerSymbolOut))
+   {
+      lastErrorOut = ERR_MARKET_UNKNOWN_SYMBOL;
+      return false;
+   }
+
+   availableOut = true;
+   digitsOut = (int)SymbolInfoInteger(brokerSymbolOut, SYMBOL_DIGITS);
+   pointOut = SymbolInfoDouble(brokerSymbolOut, SYMBOL_POINT);
+
+   MqlTick tick;
+   if (SymbolInfoTick(brokerSymbolOut, tick))
+   {
+      bidOut = tick.bid;
+      askOut = tick.ask;
+      tickAgeSecondsOut = (long)MathMax(0, TimeCurrent() - tick.time);
+      volumeOut = (long)tick.volume;
+   }
+   else
+   {
+      SymbolInfoDouble(brokerSymbolOut, SYMBOL_BID, bidOut);
+      SymbolInfoDouble(brokerSymbolOut, SYMBOL_ASK, askOut);
+      tickAgeSecondsOut = -1;
+      lastErrorOut = GetLastError();
+   }
+
+   if (pointOut > 0.0 && askOut >= bidOut)
+      spreadPointsOut = (int)MathRound((askOut - bidOut) / pointOut);
+
+   long tradeMode = SymbolInfoInteger(brokerSymbolOut, SYMBOL_TRADE_MODE);
+   tradableOut = (tradeMode == SYMBOL_TRADE_MODE_FULL || tradeMode == SYMBOL_TRADE_MODE_LONGONLY || tradeMode == SYMBOL_TRADE_MODE_SHORTONLY);
+   sessionOpenOut = (bidOut > 0.0 && askOut > 0.0 && spreadPointsOut > 0);
+   return sessionOpenOut;
+}
+
+string BuildFocusSymbolTelemetryJson(int &availableCount, int &tradableCount, int &sessionOpenCount, int &staleCount, double &spreadSum)
+{
+   g_telemetryCount = 0;
+   availableCount = 0;
+   tradableCount = 0;
+   sessionOpenCount = 0;
+   staleCount = 0;
+   spreadSum = 0.0;
+
+   string json = "[";
+   bool first = true;
+   for (int i = 0; i < FOCUS_SYMBOL_COUNT; i++)
+   {
+      string brokerSymbol = "";
+      bool available = false;
+      bool tradable = false;
+      bool sessionOpen = false;
+      double bid = 0.0;
+      double ask = 0.0;
+      int spreadPoints = 0;
+      int digits = 0;
+      double point = 0.0;
+      long tickAgeSeconds = -1;
+      long volume = 0;
+      string sector = "";
+      int lastError = 0;
+
+      CollectFocusSymbolTelemetry(
+         FocusSymbolKeys[i],
+         FocusSymbolAliases[i],
+         brokerSymbol,
+         available,
+         tradable,
+         sessionOpen,
+         bid,
+         ask,
+         spreadPoints,
+         digits,
+         point,
+         tickAgeSeconds,
+         volume,
+         sector,
+         lastError
+      );
+
+      if (!first) json += ",";
+      first = false;
+
+      bool stale = (tickAgeSeconds < 0 || tickAgeSeconds > TELEMETRY_STALE_SECONDS);
+      json += StringFormat(
+         "{\"symbol\":\"%s\",\"brokerSymbol\":\"%s\",\"available\":%s,\"tradable\":%s,\"sessionOpen\":%s,\"bid\":%.10f,\"ask\":%.10f,\"spreadPoints\":%d,\"digits\":%d,\"point\":%.10f,\"tickAgeSeconds\":%I64d,\"volume\":%I64d,\"sector\":\"%s\",\"stale\":%s,\"lastError\":%d}",
+         EscapeJson(FocusSymbolKeys[i]),
+         EscapeJson(brokerSymbol),
+         BoolToString(available),
+         BoolToString(tradable),
+         BoolToString(sessionOpen),
+         bid,
+         ask,
+         spreadPoints,
+         digits,
+         point,
+         tickAgeSeconds,
+         volume,
+         EscapeJson(sector),
+         BoolToString(stale),
+         lastError
+      );
+
+      if (g_telemetryCount < 16)
+      {
+         g_telemetrySymbols[g_telemetryCount] = FocusSymbolKeys[i];
+         g_telemetryAvailable[g_telemetryCount] = available;
+         g_telemetrySpreads[g_telemetryCount] = spreadPoints;
+         g_telemetryCount++;
+      }
+
+      if (available) availableCount++;
+      if (tradable) tradableCount++;
+      if (sessionOpen) sessionOpenCount++;
+      if (stale) staleCount++;
+      if (available && spreadPoints > 0) spreadSum += spreadPoints;
+   }
+   json += "]";
+   return json;
+}
+
+string BuildTelemetrySummaryJson(int availableCount, int tradableCount, int sessionOpenCount, int staleCount, double spreadSum, int availableSpreadCount)
+{
+   int avgSpread = availableSpreadCount > 0 ? (int)MathRound(spreadSum / availableSpreadCount) : 0;
+   return StringFormat(
+      "{\"tracked\":%d,\"available\":%d,\"tradable\":%d,\"sessionOpen\":%d,\"stale\":%d,\"avgSpreadPoints\":%d,\"version\":2}",
+      FOCUS_SYMBOL_COUNT,
+      availableCount,
+      tradableCount,
+      sessionOpenCount,
+      staleCount,
+      avgSpread
+   );
+}
+
+int LookupTelemetrySpread(string symbol)
+{
+   for (int i = 0; i < g_telemetryCount; i++)
+   {
+      if (g_telemetrySymbols[i] == symbol) return g_telemetrySpreads[i];
+   }
+   return 0;
+}
+
+bool LookupTelemetryAvailable(string symbol)
+{
+   for (int i = 0; i < g_telemetryCount; i++)
+   {
+      if (g_telemetrySymbols[i] == symbol) return g_telemetryAvailable[i];
+   }
+   return false;
+}
+
 void SendHeartbeat()
 {
    lastHeartbeat = TimeLocal();
@@ -148,14 +395,32 @@ void SendHeartbeat()
    string accountType = tradeMode == 2 ? "live" : "demo";
    bool accountTradeAllowed = (AccountInfoInteger(ACCOUNT_TRADE_ALLOWED) != 0);
    bool terminalTradeAllowed = (TerminalInfoInteger(TERMINAL_TRADE_ALLOWED) != 0);
-   bool eurusdAvailable = SymbolSelect("EURUSD", true);
-   bool xauusdAvailable = SymbolSelect("XAUUSD", true);
-   bool gbpusdAvailable = SymbolSelect("GBPUSD", true);
-   bool usdjpyAvailable = SymbolSelect("USDJPY", true);
-   int eurusdSpreadPoints = SymbolSpreadPoints("EURUSD", eurusdAvailable);
-   int xauusdSpreadPoints = SymbolSpreadPoints("XAUUSD", xauusdAvailable);
-   int gbpusdSpreadPoints = SymbolSpreadPoints("GBPUSD", gbpusdAvailable);
-   int usdjpySpreadPoints = SymbolSpreadPoints("USDJPY", usdjpyAvailable);
+
+   int availableCount = 0;
+   int tradableCount = 0;
+   int sessionOpenCount = 0;
+   int staleCount = 0;
+   double spreadSum = 0.0;
+   int availableSpreadCount = 0;
+   string telemetryJson = BuildFocusSymbolTelemetryJson(availableCount, tradableCount, sessionOpenCount, staleCount, spreadSum);
+   for (int i = 0; i < g_telemetryCount; i++)
+   {
+      if (g_telemetryAvailable[i] && g_telemetrySpreads[i] > 0)
+      {
+         availableSpreadCount++;
+      }
+   }
+   string summaryJson = BuildTelemetrySummaryJson(availableCount, tradableCount, sessionOpenCount, staleCount, spreadSum, availableSpreadCount);
+
+   bool eurusdAvailable = LookupTelemetryAvailable("EURUSD");
+   bool xauusdAvailable = LookupTelemetryAvailable("XAUUSD");
+   bool gbpusdAvailable = LookupTelemetryAvailable("GBPUSD");
+   bool usdjpyAvailable = LookupTelemetryAvailable("USDJPY");
+   int eurusdSpreadPoints = LookupTelemetrySpread("EURUSD");
+   int xauusdSpreadPoints = LookupTelemetrySpread("XAUUSD");
+   int gbpusdSpreadPoints = LookupTelemetrySpread("GBPUSD");
+   int usdjpySpreadPoints = LookupTelemetrySpread("USDJPY");
+
    string enableExecutionJson = EnableExecution ? "true" : "false";
    string accountTradeAllowedJson = accountTradeAllowed ? "true" : "false";
    string terminalTradeAllowedJson = terminalTradeAllowed ? "true" : "false";
@@ -163,8 +428,9 @@ void SendHeartbeat()
    string xauusdAvailableJson = xauusdAvailable ? "true" : "false";
    string gbpusdAvailableJson = gbpusdAvailable ? "true" : "false";
    string usdjpyAvailableJson = usdjpyAvailable ? "true" : "false";
+
    string heartbeat = StringFormat(
-      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"accountType\":\"%s\",\"enableExecution\":%s,\"accountTradeAllowed\":%s,\"terminalTradeAllowed\":%s,\"eurusdAvailable\":%s,\"xauusdAvailable\":%s,\"gbpusdAvailable\":%s,\"usdjpyAvailable\":%s,\"eurusdSpreadPoints\":%d,\"xauusdSpreadPoints\":%d,\"gbpusdSpreadPoints\":%d,\"usdjpySpreadPoints\":%d,\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.002\"}",
+      "{\"terminalId\":\"%s\",\"computerId\":\"%s\",\"computerName\":\"%s\",\"accountNumber\":\"%I64d\",\"brokerName\":\"%s\",\"serverName\":\"%s\",\"accountType\":\"%s\",\"enableExecution\":%s,\"accountTradeAllowed\":%s,\"terminalTradeAllowed\":%s,\"eurusdAvailable\":%s,\"xauusdAvailable\":%s,\"gbpusdAvailable\":%s,\"usdjpyAvailable\":%s,\"eurusdSpreadPoints\":%d,\"xauusdSpreadPoints\":%d,\"gbpusdSpreadPoints\":%d,\"usdjpySpreadPoints\":%d",
       EscapeJson(TerminalId),
       EscapeJson(computerId),
       EscapeJson(computerName),
@@ -182,7 +448,12 @@ void SendHeartbeat()
       eurusdSpreadPoints,
       xauusdSpreadPoints,
       gbpusdSpreadPoints,
-      usdjpySpreadPoints,
+      usdjpySpreadPoints
+   );
+   heartbeat += ",\"symbolTelemetry\":" + telemetryJson;
+   heartbeat += ",\"telemetrySummary\":" + summaryJson;
+   heartbeat += StringFormat(
+      ",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.004\"}",
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_MARGIN),
@@ -227,7 +498,13 @@ void SendHeartbeat()
       return;
    }
 
-   Print("Cacsms heartbeat failed. Sequence: ", heartbeatSequence, " HTTP status: ", statusCode, " MT5 error: ", GetLastError(), " Latency: ", lastWebRequestLatencyMs, "ms");
+   string responseBody = CharArrayToString(result, 0, -1, CP_UTF8);
+   string bridgeError = ReadBridgeErrorBody(responseBody);
+   Print("Cacsms heartbeat failed. Sequence: ", heartbeatSequence, " HTTP status: ", statusCode, " MT5 error: ", GetLastError(), " Latency: ", lastWebRequestLatencyMs, "ms", bridgeError != "" ? " Bridge: " + bridgeError : "");
+   if (statusCode == 400 && StringFind(bridgeError, "invalid bridge secret") >= 0)
+   {
+      Print("Cacsms bridge secret mismatch. Open MT5 Infrastructure > Bridge Secret in the portal, copy the active secret, and paste it into this chart's EA BridgeSecret input.");
+   }
 }
 
 void PollNextCommand()
@@ -258,7 +535,13 @@ void PollNextCommand()
 
    if (statusCode != 200)
    {
-      Print("Cacsms command poll failed. HTTP status: ", statusCode, " MT5 error: ", GetLastError(), " Latency: ", latencyMs, "ms");
+      string responseBody = CharArrayToString(result, 0, -1, CP_UTF8);
+      string bridgeError = ReadBridgeErrorBody(responseBody);
+      Print("Cacsms command poll failed. HTTP status: ", statusCode, " MT5 error: ", GetLastError(), " Latency: ", latencyMs, "ms", bridgeError != "" ? " Bridge: " + bridgeError : "");
+      if (statusCode == 400 && StringFind(bridgeError, "invalid bridge secret") >= 0)
+      {
+         Print("Cacsms bridge secret mismatch. Update the EA BridgeSecret input on this chart to match the portal bridge secret.");
+      }
       return;
    }
 
@@ -1112,6 +1395,16 @@ string DoubleToJson(double value)
       return "0";
    }
    return DoubleToString(value, 6);
+}
+
+string ReadBridgeErrorBody(string body)
+{
+   string errorMessage = "";
+   if (ExtractJsonString(body, "error", errorMessage) && errorMessage != "")
+   {
+      return errorMessage;
+   }
+   return TruncateString(body, 240);
 }
 
 bool ExtractJsonString(string json, string key, string &outValue)

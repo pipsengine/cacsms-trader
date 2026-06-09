@@ -141,7 +141,7 @@ export default function MacroIntelligenceOverviewPage() {
     <div className="macro-light flex h-screen overflow-hidden bg-white text-slate-900 font-sans">
       <TraderSidebar bridgeOnline={false} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
 
-      <div className="flex min-w-0 flex-1 flex-col bg-slate-50">
+      <div className="flex min-w-0 flex-1 flex-col bg-white">
         <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 md:px-6 shrink-0">
           <div className="flex items-center gap-4">
             <button
@@ -164,7 +164,7 @@ export default function MacroIntelligenceOverviewPage() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto bg-slate-50">
+        <div className="flex-1 overflow-y-auto bg-white">
           <main className="space-y-5 p-4 md:p-6 lg:p-8">
             <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.6fr_1fr]">
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/80 p-4 shadow-2xl shadow-black/20">

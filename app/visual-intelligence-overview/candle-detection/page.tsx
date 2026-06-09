@@ -1,11 +1,5 @@
-import { VisualIntelligenceModulePage } from '@/components/visual-intelligence-module-page';
+import { CandleDetectionDashboard } from '@/components/candle-detection-dashboard';
 
 export default function CandleDetectionPage() {
-  return (
-    <VisualIntelligenceModulePage
-      title="Candle Detection"
-      description="Review persisted candle detection output for each chart capture."
-      module="candles"
-    />
-  );
+  return <CandleDetectionDashboard />;
 }

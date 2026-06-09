@@ -2,6 +2,7 @@ export interface PropFirmRiskRules {
   dailyDrawdownPercent: number;
   maxDrawdownPercent: number;
   riskPerTradePercent: number;
+  dailyTradeLimitEnabled: boolean;
   maxTradesPerDay: number;
   maxOpenTrades: number;
   maxLotSize: number;

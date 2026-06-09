@@ -242,7 +242,7 @@ export default function ImageComparisonEnginePage() {
     <div className="flex h-screen overflow-hidden bg-white text-slate-950">
       <TraderSidebar bridgeOnline mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
 
-      <main className="min-w-0 flex-1 overflow-y-auto">
+      <main className="min-w-0 flex-1 overflow-y-auto bg-white">
         <div className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 shadow-sm backdrop-blur">
           <div className="flex items-center gap-3 px-4 py-3 lg:hidden">
             <Button size="icon" variant="outline" onClick={() => setMobileSidebarOpen(true)}><Menu className="h-4 w-4" /></Button>

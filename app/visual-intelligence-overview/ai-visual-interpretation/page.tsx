@@ -150,7 +150,7 @@ export default function AiVisualInterpretationPage() {
     <div className="flex h-screen overflow-hidden bg-white text-slate-950">
       <TraderSidebar bridgeOnline mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
 
-      <main className="min-w-0 flex-1 overflow-y-auto bg-slate-50">
+      <main className="min-w-0 flex-1 overflow-y-auto bg-white">
         <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 px-4 py-3 shadow-sm backdrop-blur md:px-5">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             <div className="flex min-w-0 items-center gap-3">

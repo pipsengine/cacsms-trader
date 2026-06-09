@@ -609,7 +609,7 @@ function detectSymbol(fileName: string, metadata: Record<string, unknown>): stri
   const explicit = String(metadata.symbol ?? '').trim();
   if (explicit) return explicit.toUpperCase();
   const text = fileName.toUpperCase();
-  return text.match(/\b(XAUUSD|EURUSD|GBPUSD|USDJPY|BTCUSD|US30|NAS100|SPX500)\b/)?.[1] ?? 'UNKNOWN';
+  return text.match(/\b(EURUSD|GBPUSD|EURGBP|EURJPY|GBPJPY|USDJPY|USDCAD|USDCHF|AUDUSD|NZDUSD|AUDJPY|XAUUSD|BTCUSD|US30|NASDAQ100|NAS100|SP500|SPX500)\b/)?.[1] ?? 'UNKNOWN';
 }
 
 function detectTimeframe(fileName: string, metadata: Record<string, unknown>): string {

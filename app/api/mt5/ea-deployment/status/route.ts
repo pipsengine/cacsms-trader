@@ -1,7 +1,7 @@
 export const runtime = 'nodejs';
 
 import { enginePolicyFromEnv, assertPolicy, verifyDeployment, getDeploymentRuntime, sanitizeEaDeploymentConfig } from '@/services/ea-deployment/ea-deployment-engine';
-import { getLatestEaDeploymentSnapshot } from '@/lib/ea-deployment-store';
+import { getLatestEaDeploymentSnapshot, upsertEaDeploymentConfig } from '@/lib/ea-deployment-store';
 
 export async function GET(request: Request): Promise<Response> {
   try {
@@ -9,7 +9,11 @@ export async function GET(request: Request): Promise<Response> {
     assertPolicy(policy, request.headers);
 
     const snapshot = await safeSnapshot();
-    const config = snapshot.config ? sanitizeEaDeploymentConfig(snapshot.config) : null;
+    const rawConfig = snapshot.config;
+    const config = rawConfig ? sanitizeEaDeploymentConfig(rawConfig) : null;
+    if (config && rawConfig && rawConfig.targetFolderName !== config.targetFolderName) {
+      await upsertEaDeploymentConfig(config);
+    }
     const verification = config ? await verifyDeployment(config, policy, config.deploymentMethod) : null;
 
     return Response.json(

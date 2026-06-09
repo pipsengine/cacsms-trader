@@ -244,7 +244,7 @@ export default function MultiTimeframeComparisonPage() {
           </div>
         </header>
 
-        <main className="min-h-0 flex-1 overflow-y-auto bg-slate-50">
+        <main className="min-h-0 flex-1 overflow-y-auto bg-white">
           <div className="p-4 md:p-5">
             {error ? <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">{error}</div> : null}
 

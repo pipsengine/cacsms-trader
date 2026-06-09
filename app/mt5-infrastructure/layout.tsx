@@ -18,7 +18,7 @@ function resolveMt5Meta(pathname: string): { title: string; subtitle: string } {
   if (pathname === '/mt5-infrastructure') {
     return {
       title: 'MT5 Infrastructure & Broker Connectivity',
-      subtitle: 'Infrastructure overview',
+      subtitle: 'Bridge health, terminal fleet, readiness gates, and quick operations',
     };
   }
 

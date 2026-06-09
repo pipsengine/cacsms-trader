@@ -2,9 +2,11 @@ import { randomUUID } from 'crypto';
 
 import { MarketIntelligenceEngine } from '@/services/market-intelligence-engine';
 import type { TickSnapshot, TradingSession } from '@/packages/shared-types';
+import { SYSTEM_FOCUS_SYMBOLS, SYSTEM_FOCUS_SYMBOL_COUNT } from './focus-symbols';
+import { extractSymbolTelemetry, symbolTelemetryMap } from './mt5-symbol-telemetry';
 import { queryPostgres } from './postgres';
 
-export const DEFAULT_WATCHLIST = ['XAUUSD', 'EURUSD', 'GBPUSD', 'USDJPY'] as const;
+export const DEFAULT_WATCHLIST = [...SYSTEM_FOCUS_SYMBOLS];
 
 export interface PairSelectionConfig {
   watchlistSymbols: string[];
@@ -17,7 +19,7 @@ export const DEFAULT_PAIR_SELECTION_CONFIG: PairSelectionConfig = {
   watchlistSymbols: [...DEFAULT_WATCHLIST],
   maxSpreadPoints: 35,
   pairSelectionEnabled: true,
-  maxSelectedSymbols: 1,
+  maxSelectedSymbols: SYSTEM_FOCUS_SYMBOL_COUNT,
 };
 
 export interface PairSelectionCandidate {
@@ -46,6 +48,8 @@ export interface PairSelectionResult {
 type BridgeTerminal = {
   terminalId?: string;
   status?: string;
+  symbolTelemetry?: unknown;
+  telemetrySummary?: unknown;
   eurusdAvailable?: boolean | null;
   xauusdAvailable?: boolean | null;
   gbpusdAvailable?: boolean | null;
@@ -96,12 +100,21 @@ export async function runAutonomousPairSelection(
 
   const eligibleSymbols = engine.selectPairs({ symbols: watchlist, ticks, candlesBySymbol: {}, now });
   const marketScans = engine.scan({ symbols: eligibleSymbols.length > 0 ? eligibleSymbols : watchlist, ticks, candlesBySymbol: {}, now });
+  const telemetry = symbolTelemetryMap(terminal);
 
   const candidates: PairSelectionCandidate[] = marketScans
     .map((scan) => {
       const tick = ticks.find((item) => item.symbol === scan.symbol);
+      const telemetryRow = telemetry.get(scan.symbol);
       const spreadOk = tick ? tick.spreadPoints <= resolved.maxSpreadPoints : false;
-      const available = Boolean(tick);
+      const available = Boolean(telemetryRow?.available);
+      const tradableTelemetry = Boolean(
+        telemetryRow?.available
+        && telemetryRow.tradable
+        && telemetryRow.sessionOpen
+        && !telemetryRow.stale
+        && spreadOk,
+      );
       const macroScore = macroScores[scan.symbol] ?? 50;
       const macroPenalty = macroScore < 35 ? -15 : macroScore > 65 ? 8 : 0;
       const compositeScore = clampScore(
@@ -111,12 +124,15 @@ export async function runAutonomousPairSelection(
         + (session === 'closed' ? 0 : 10)
         + macroPenalty,
       );
-      const tradable = scan.tradable && spreadOk && available;
+      const tradable = scan.tradable && tradableTelemetry;
       const reasons = [
         ...scan.reasons,
-        available ? `Spread ${tick?.spreadPoints ?? 'n/a'} pts` : 'No live terminal telemetry',
+        telemetryRow
+          ? `${telemetryRow.brokerSymbol} spread ${telemetryRow.spreadPoints ?? 'n/a'} pts, tick age ${telemetryRow.tickAgeSeconds}s`
+          : 'No live terminal telemetry',
+        telemetryRow?.stale ? 'Stale tick feed' : 'Tick feed fresh',
         `Macro alignment ${macroScore}`,
-        tradable ? 'Eligible for autonomous pipeline' : 'Filtered by spread, liquidity, or macro risk',
+        tradable ? 'Eligible for autonomous pipeline' : 'Filtered by spread, liquidity, session, or macro risk',
       ];
       return {
         symbol: scan.symbol,
@@ -134,10 +150,15 @@ export async function runAutonomousPairSelection(
     .sort((a, b) => b.compositeScore - a.compositeScore)
     .map((candidate, index) => ({ ...candidate, rank: index + 1 }));
 
-  const selected = candidates.filter((candidate) => candidate.tradable).slice(0, Math.max(1, resolved.maxSelectedSymbols));
+  const fullUniverse = resolved.maxSelectedSymbols >= watchlist.length;
+  const rankedTradable = candidates.filter((candidate) => candidate.tradable).slice(0, Math.max(1, resolved.maxSelectedSymbols));
   const fallback = watchlist[0] ?? 'XAUUSD';
-  const selectedSymbols = selected.length > 0 ? selected.map((item) => item.symbol) : [fallback];
-  const selectedSymbol = selectedSymbols[0] ?? fallback;
+  const selectedSymbols = fullUniverse
+    ? watchlist
+    : rankedTradable.length > 0
+      ? rankedTradable.map((item) => item.symbol)
+      : [fallback];
+  const selectedSymbol = candidates.find((item) => item.tradable)?.symbol ?? selectedSymbols[0] ?? fallback;
 
   const result: PairSelectionResult = {
     id: randomUUID(),
@@ -146,7 +167,7 @@ export async function runAutonomousPairSelection(
     candidates,
     session,
     selectedAt: now.toISOString(),
-    source: selected.length > 0 ? 'autonomous_scan' : 'config_fallback',
+    source: fullUniverse || rankedTradable.length > 0 ? 'autonomous_scan' : 'config_fallback',
   };
 
   await persistPairSelection(result);
@@ -211,28 +232,24 @@ async function fetchBestConnectedTerminal(): Promise<BridgeTerminal | null> {
 
 function buildTickSnapshots(watchlist: string[], terminal: BridgeTerminal | null, maxSpreadPoints: number): TickSnapshot[] {
   const now = new Date().toISOString();
-  const telemetry: Record<string, { available: boolean | null; spreadPoints: number | null }> = {
-    EURUSD: { available: terminal?.eurusdAvailable ?? null, spreadPoints: terminal?.eurusdSpreadPoints ?? null },
-    XAUUSD: { available: terminal?.xauusdAvailable ?? null, spreadPoints: terminal?.xauusdSpreadPoints ?? null },
-    GBPUSD: { available: terminal?.gbpusdAvailable ?? null, spreadPoints: terminal?.gbpusdSpreadPoints ?? null },
-    USDJPY: { available: terminal?.usdjpyAvailable ?? null, spreadPoints: terminal?.usdjpySpreadPoints ?? null },
-  };
-
+  const telemetryRows = extractSymbolTelemetry(terminal);
+  const telemetry = new Map(telemetryRows.map((row) => [row.symbol, row]));
   return watchlist.map((symbol) => {
-    const item = telemetry[symbol];
-    const available = item?.available !== false;
-    const spreadPoints = Number.isFinite(Number(item?.spreadPoints))
-      ? Number(item?.spreadPoints)
+    const row = telemetry.get(symbol);
+    const available = row?.available ?? false;
+    const tradable = row ? row.tradable && row.sessionOpen && !row.stale : false;
+    const spreadPoints = Number.isFinite(Number(row?.spreadPoints))
+      ? Number(row?.spreadPoints)
       : available
         ? maxSpreadPoints
         : maxSpreadPoints + 50;
     return {
       symbol,
-      bid: 0,
-      ask: 0,
-      spreadPoints,
+      bid: row?.bid ?? 0,
+      ask: row?.ask ?? 0,
+      spreadPoints: tradable ? spreadPoints : maxSpreadPoints + 25,
       serverTime: now,
-      receivedAt: now,
+      receivedAt: row?.receivedAt ?? now,
     };
   });
 }
@@ -278,6 +295,8 @@ async function loadPairMacroScores(symbols: string[]): Promise<Record<string, nu
 function parsePairCurrencies(symbol: string): [string, string] {
   const normalized = symbol.toUpperCase();
   if (normalized.startsWith('XAU')) return ['XAU', normalized.slice(3)];
+  if (normalized.startsWith('BTC')) return ['BTC', normalized.slice(3)];
+  if (['US30', 'NASDAQ100', 'SP500', 'NAS100', 'SPX500'].includes(normalized)) return [normalized, 'USD'];
   if (normalized.length >= 6) return [normalized.slice(0, 3), normalized.slice(3)];
   return [normalized.slice(0, 3), normalized.slice(3)];
 }

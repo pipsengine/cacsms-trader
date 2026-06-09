@@ -4,7 +4,7 @@ import {
   type PipelineStageId,
   type PipelineStageStatus,
 } from './autonomous-pipeline';
-import { ensureAutonomySchema } from './autonomy-store';
+import { ensureAutonomySchema, ensureFocusSymbolsConfigured } from './autonomy-store';
 import { advancePipelineAnalysis } from './autonomous-pipeline-analysis';
 import { getPipelineExecutionStatus, getPipelineRiskStatus } from './autonomous-pipeline-risk-execution';
 import { getMacroPipelineStatus } from './macro-intelligence-store';
@@ -52,8 +52,9 @@ export interface AutonomousPipelineStatus {
   generatedAt: string;
 }
 
-export async function getAutonomousPipelineStatus(symbol = 'XAUUSD'): Promise<AutonomousPipelineStatus> {
+export async function getAutonomousPipelineStatus(symbol = 'AUTO'): Promise<AutonomousPipelineStatus> {
   await ensureAutonomySchema();
+  await ensureFocusSymbolsConfigured();
   const requestedSymbol = symbol.toUpperCase();
   let latestSelection = await getLatestPairSelection();
   const normalizedSymbol = requestedSymbol === 'AUTO'
@@ -178,12 +179,24 @@ export async function getAutonomousPipelineStatus(symbol = 'XAUUSD'): Promise<Au
     'signal-generation': () => decisions,
     'risk-gate': () => risk,
     'execution': () => execution,
-    'trade-monitoring': () => ({
-      status: execution.metrics.openOrders > 0 ? 'in_progress' : execution.status === 'completed' ? 'in_progress' : 'not_started',
-      detail: execution.metrics.openOrders > 0 ? `${execution.metrics.openOrders} open order(s) require monitoring.` : 'No open positions to monitor.',
-      progress: execution.metrics.openOrders > 0 ? 50 : 0,
-      metrics: execution.metrics,
-    }),
+    'trade-monitoring': () => {
+      const openOrders = Number(execution.metrics.openOrders ?? 0);
+      const trackedOpen = Number(execution.metrics.trackedOpen ?? 0);
+      const terminalOpen = Number(execution.metrics.terminalOpen ?? 0);
+      const hasOpen = openOrders > 0;
+      const liveCount = terminalOpen > 0 ? terminalOpen : trackedOpen;
+      const detail = hasOpen
+        ? trackedOpen === liveCount
+          ? `${liveCount} open position(s) under live monitor.`
+          : `${liveCount} open on terminal · ${trackedOpen} tracked in monitor registry.`
+        : 'No open positions to monitor.';
+      return {
+        status: hasOpen ? 'in_progress' : execution.status === 'completed' ? 'in_progress' : 'not_started',
+        detail,
+        progress: hasOpen ? Math.min(100, trackedOpen > 0 ? 70 : 35) : 0,
+        metrics: execution.metrics,
+      };
+    },
     'unattended-operations': () => {
       const running = jobs.running > 0;
       const emergency = autonomyConfig.emergencyStopped;

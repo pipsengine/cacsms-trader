@@ -177,6 +177,8 @@ function mapBridgeTerminalToHeartbeatPayload(terminal: any): Record<string, unkn
     xauusdAvailable: terminal.xauusdAvailable,
     eurusdSpreadPoints: terminal.eurusdSpreadPoints,
     xauusdSpreadPoints: terminal.xauusdSpreadPoints,
+    symbolTelemetry: terminal.symbolTelemetry ?? [],
+    telemetrySummary: terminal.telemetrySummary ?? null,
     balance: terminal.balance,
     equity: terminal.equity,
     margin: terminal.margin,

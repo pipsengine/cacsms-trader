@@ -414,7 +414,11 @@ async function syncOpenPositionFromAck(input: {
   const payload = (row.payload ?? {}) as Record<string, unknown>;
   const ticket = input.ticket ?? String(payload.ticket ?? '').trim();
 
-  if (commandType === 'place_order' && input.mappedState === 'EXECUTED' && ticket) {
+  if (
+    commandType === 'place_order'
+    && ticket
+    && (input.mappedState === 'EXECUTED' || input.mappedState === 'ACKNOWLEDGED')
+  ) {
     await trackOpenPositionFromFill({
       terminalId: input.terminalId,
       commandId: input.commandId,
