@@ -268,6 +268,23 @@ export async function resolveExecutableAutonomyDecision(
     side,
   });
   if (!stopTargets) {
+    const storedStop = Number(decision.stopLoss ?? 0);
+    const storedTp = Number(decision.takeProfitLevels?.[0] ?? 0);
+    if (hasValidStopTargets({ side, stopLoss: storedStop, takeProfit: storedTp })) {
+      return {
+        decision,
+        stopTargets: {
+          entryPrice: 0,
+          stopLoss: storedStop,
+          takeProfit: storedTp,
+          takeProfitLevels: decision.takeProfitLevels ?? [storedTp],
+          invalidationLevel: Number(decision.invalidationLevel ?? storedStop),
+          stopPips: 0,
+          rewardRiskRatio: 0,
+          method: 'pip_default',
+        },
+      };
+    }
     return { decision, stopTargets: null };
   }
   return {

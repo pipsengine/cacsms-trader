@@ -1,7 +1,7 @@
 import { resolveConnectedTerminalId } from '@/lib/autonomy-execution-adapter';
 import { loadPropFirmRiskRulesFromEnv } from '@/lib/execution-risk-gate';
 import { resolveLatestCaptureId } from '@/lib/capture-analysis-bootstrap';
-import { extractSymbolTelemetry } from '@/lib/mt5-symbol-telemetry';
+import { telemetryForSymbol } from '@/lib/mt5-symbol-telemetry';
 import { getSwingDetections } from '@/lib/swing-point-store';
 import { getSupportResistanceAnalysis } from '@/lib/support-resistance-store';
 import { queryPostgres } from '@/lib/postgres';
@@ -132,11 +132,12 @@ async function resolveLiveEntryPrice(symbol: string, side: AutonomousTradeSide):
     const terminals = Array.isArray(payload.terminals) ? payload.terminals : [];
     const terminal = terminals.find((row: { terminalId?: string }) => String(row?.terminalId ?? '') === terminalId);
     if (!terminal) return null;
-    const telemetry = extractSymbolTelemetry(terminal);
-    const row = telemetry.find((item) => item.symbol === symbol.toUpperCase());
+    const row = telemetryForSymbol(terminal, symbol);
     if (!row) return null;
     const price = side === 'BUY' ? row.ask : row.bid;
-    return price > 0 ? price : null;
+    if (price > 0) return price;
+    const mid = row.bid > 0 && row.ask > 0 ? (row.bid + row.ask) / 2 : 0;
+    return mid > 0 ? mid : null;
   } catch {
     return null;
   }
@@ -273,15 +274,23 @@ export async function resolveAutonomousStopTargets(input: {
     method = 'pip_default';
   }
 
-  const stopDistance = Math.abs(resolvedEntry - stopLoss);
+  let stopDistance = Math.abs(resolvedEntry - stopLoss);
+  if (stopDistance < minStopDistance) {
+    stopLoss = input.side === 'BUY'
+      ? resolvedEntry - minStopDistance
+      : resolvedEntry + minStopDistance;
+    stopDistance = minStopDistance;
+    method = 'pip_default';
+  }
+
   const takeProfit = input.side === 'BUY'
     ? resolvedEntry + stopDistance * rules.minRewardRiskRatio
     : resolvedEntry - stopDistance * rules.minRewardRiskRatio;
 
   const roundedEntry = roundPrice(symbol, resolvedEntry);
-  const roundedStop = roundPrice(symbol, stopLoss);
-  const roundedTp = roundPrice(symbol, takeProfit);
-  const validationError = validateStopTargets({
+  let roundedStop = roundPrice(symbol, stopLoss);
+  let roundedTp = roundPrice(symbol, takeProfit);
+  let validationError = validateStopTargets({
     symbol,
     side: input.side,
     entryPrice: roundedEntry,
@@ -290,7 +299,33 @@ export async function resolveAutonomousStopTargets(input: {
     minRewardRiskRatio: rules.minRewardRiskRatio,
     minStopDistance,
   });
-  if (validationError) return null;
+
+  if (validationError) {
+    const widenedDistance = minStopDistance * 1.25;
+    roundedStop = roundPrice(
+      symbol,
+      input.side === 'BUY' ? roundedEntry - widenedDistance : roundedEntry + widenedDistance,
+    );
+    roundedTp = roundPrice(
+      symbol,
+      input.side === 'BUY'
+        ? roundedEntry + widenedDistance * rules.minRewardRiskRatio
+        : roundedEntry - widenedDistance * rules.minRewardRiskRatio,
+    );
+    validationError = validateStopTargets({
+      symbol,
+      side: input.side,
+      entryPrice: roundedEntry,
+      stopLoss: roundedStop,
+      takeProfit: roundedTp,
+      minRewardRiskRatio: rules.minRewardRiskRatio,
+      minStopDistance,
+    });
+    if (validationError) return null;
+    method = 'pip_default';
+  }
+
+  stopDistance = Math.abs(roundedEntry - roundedStop);
 
   const stopPips = stopPipsFromDistance(symbol, roundedEntry, roundedStop);
   const rewardDistance = Math.abs(roundedTp - roundedEntry);

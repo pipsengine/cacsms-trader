@@ -9,6 +9,7 @@ import { advancePipelineAnalysis } from './autonomous-pipeline-analysis';
 import { getPipelineExecutionStatus, getPipelineRiskStatus } from './autonomous-pipeline-risk-execution';
 import { getMacroPipelineStatus } from './macro-intelligence-store';
 import { syncMt5CaptureAcks } from './mt5-capture-ingest';
+import { ensureContinuousChartNavigation } from './continuous-pipeline-navigation';
 import { getContinuousTradingSessionStatus } from './continuous-trading-session';
 import { getLastInstitutionalMaintenanceSnapshot } from './institutional-position-maintenance';
 import { isContinuousTradingEnabled } from './execution-risk-limits';
@@ -116,6 +117,18 @@ export async function advanceAutonomousPipeline(symbol = 'AUTO'): Promise<{ symb
     }
   }
 
+  if (bridge.connected > 0 && latestSelection) {
+    try {
+      await ensureContinuousChartNavigation({
+        latestSelection,
+        connectedTerminals: bridge.connected,
+        maxSessionsPerCycle: 1,
+      });
+    } catch {
+      // navigation retries on next advance tick
+    }
+  }
+
   try {
     const { runTradeMonitorTick } = await import('./trade-monitor-runtime');
     await runTradeMonitorTick(Date.now());
@@ -123,7 +136,15 @@ export async function advanceAutonomousPipeline(symbol = 'AUTO'): Promise<{ symb
     // trade monitor retries on next advance tick
   }
 
-  for (const pipelineSymbol of pipelineSymbols) {
+  const eligiblePriority = (latestSelection?.eligibleSymbols ?? [])
+    .map((item) => item.toUpperCase())
+    .filter(Boolean);
+  const orderedPipelineSymbols = [
+    ...eligiblePriority,
+    ...pipelineSymbols.filter((item) => !eligiblePriority.includes(item)),
+  ];
+
+  for (const pipelineSymbol of orderedPipelineSymbols) {
     try {
       await syncMt5CaptureAcks({ symbol: pipelineSymbol, limit: 12 });
     } catch {
@@ -222,6 +243,7 @@ export async function getAutonomousPipelineStatus(
         const top = latestSelection.candidates.find((candidate) => candidate.symbol === latestSelection.selectedSymbol);
         const tradablePick = latestSelection.candidates.some((candidate) => candidate.tradable);
         const isActiveSymbol = latestSelection.selectedSymbol === normalizedSymbol;
+        const eligibleCount = latestSelection.eligibleSymbols?.length ?? 0;
         const tradableSymbols = latestSelection.candidates.filter((candidate) => candidate.tradable).map((candidate) => candidate.symbol);
         const detail = latestSelection.scanSummary
           || (latestSelection.source === 'config_fallback' && !tradablePick
@@ -229,10 +251,11 @@ export async function getAutonomousPipelineStatus(
             : tradableSymbols.length > 1
               ? `${tradableSymbols.length} tradable symbols active: ${tradableSymbols.join(', ')}.`
               : `Latest autonomous pick: ${latestSelection.selectedSymbol} (${top?.compositeScore ?? 0} score, ${latestSelection.session} session).`);
+        const continuousReady = isContinuousTradingEnabled() && eligibleCount > 0;
         return {
-          status: isActiveSymbol ? 'completed' : 'in_progress',
+          status: continuousReady || isActiveSymbol ? 'completed' : 'in_progress',
           detail,
-          progress: isActiveSymbol ? 100 : 70,
+          progress: continuousReady || isActiveSymbol ? 100 : 70,
           metrics: { selection: latestSelection },
         };
       }
@@ -246,6 +269,24 @@ export async function getAutonomousPipelineStatus(
       if (sessionStatus === 'completed') return { status: 'completed', detail: 'Chart navigation commands completed for active session.', progress: 100, metrics: { sessionId: session?.id ?? null } };
       if (sessionStatus === 'in_progress' || session?.current_stage === 'chart-navigation') {
         return { status: 'in_progress', detail: 'MT5 chart navigation session is active.', progress: 55, metrics: { sessionId: session?.id ?? null } };
+      }
+      const eligibleCount = latestSelection?.eligibleSymbols?.length ?? 0;
+      const capturedTf = AUTONOMY_TIMEFRAME_SEQUENCE.filter((tf) => captureCounts.timeframes[tf] > 0).length;
+      if (isContinuousTradingEnabled() && capturedTf === AUTONOMY_TIMEFRAME_SEQUENCE.length) {
+        return {
+          status: 'completed',
+          detail: 'Continuous mode — active symbol has full top-down captures; navigation satisfied.',
+          progress: 100,
+          metrics: { sessionId: session?.id ?? null, capturedTf },
+        };
+      }
+      if (isContinuousTradingEnabled() && bridge.connected > 0 && eligibleCount > 0) {
+        return {
+          status: 'in_progress',
+          detail: `Auto-navigation advancing for ${eligibleCount} eligible symbol(s) on scheduler tick.`,
+          progress: 40,
+          metrics: { eligibleCount, capturedTf },
+        };
       }
       if (bridge.connected > 0) return { status: 'in_progress', detail: 'Terminal ready — navigation session not started.', progress: 20, metrics: {} };
       return { status: 'not_started', detail: 'Requires connected terminal before chart navigation.', progress: 0, metrics: {} };

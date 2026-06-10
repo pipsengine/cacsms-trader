@@ -118,7 +118,7 @@ export async function advancePipelineRiskGate(
     const row = existing.rows[0];
     const allowed = Boolean(row?.allowed);
     const code = String(row?.code ?? '');
-    if (!allowed && code === 'consecutive_loss_limit') {
+    if (!allowed && (code === 'consecutive_loss_limit' || code === 'stop_loss_required' || code === 'invalid_stop_loss')) {
       await queryPostgres('DELETE FROM risk_decisions WHERE intent_id = $1', [decision.decisionLogId]);
     } else {
       return {
@@ -144,6 +144,24 @@ export async function advancePipelineRiskGate(
   }
 
   const { decision: executableDecision, stopTargets } = await resolveExecutableAutonomyDecision(decision);
+  if (stopTargets && executableDecision.stopLoss) {
+    await queryPostgres(
+      `
+        UPDATE autonomous_decision_logs
+        SET stop_loss = $2,
+            take_profit_levels_json = $3::jsonb,
+            invalidation_level = $4
+        WHERE id = $1
+          AND (stop_loss IS NULL OR stop_loss <= 0)
+      `,
+      [
+        decision.decisionLogId,
+        executableDecision.stopLoss,
+        JSON.stringify(executableDecision.takeProfitLevels ?? [stopTargets.takeProfit]),
+        executableDecision.invalidationLevel ?? stopTargets.invalidationLevel,
+      ],
+    ).catch(() => null);
+  }
   const sized = resolveAutonomousVolumeLots({
     decision: executableDecision,
     account,
