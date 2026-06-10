@@ -1,3 +1,5 @@
+import { isContinuousTradingEnabled } from './execution-risk-limits';
+import { SYSTEM_FOCUS_SYMBOLS } from './focus-symbols';
 import type { PairSelectionResult } from './pair-selector';
 
 /** All symbols that should advance through the autonomous pipeline this cycle. */
@@ -7,6 +9,10 @@ export function resolvePipelineSymbolUniverse(
 ): string[] {
   const normalized = requestedSymbol.toUpperCase();
   if (normalized !== 'AUTO') return [normalized];
+
+  if (isContinuousTradingEnabled()) {
+    return [...SYSTEM_FOCUS_SYMBOLS];
+  }
 
   if (!latestSelection) return ['XAUUSD'];
 

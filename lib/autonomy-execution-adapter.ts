@@ -1,9 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { getAutonomyThresholdProfile } from '@/lib/autonomy-account-profiles';
+import {
+  hasValidStopTargets,
+  isStopLossRequired,
+  resolveAutonomousStopTargets,
+  type AutonomousStopTargetResult,
+  type AutonomousTradeSide,
+} from '@/lib/autonomous-stop-targets';
 import { resolveAutonomousVolumeLots } from '@/lib/autonomy-lot-sizing';
 import type { AutonomousDecisionOutput, AutonomyConfig, AutonomyMode } from '@/lib/autonomy-types';
 import { dispatchExecutionCommand, ExecutionPolicyBlockedError, ExecutionRiskBlockedError } from '@/lib/execution-dispatch';
 import { liveExecutionBlockReason, resolveExecutionAccountContext } from '@/lib/execution-account-context';
+import { isContinuousTradingEnabled } from '@/lib/execution-risk-limits';
 import { getExecutionKillSwitchStatus } from '@/lib/execution-kill-switch';
 import { getExecutionPolicyStatus, isExecutionEnabled } from '@/lib/execution-policy';
 import { listTerminalSnapshots } from '@/lib/mt5-heartbeat-store';
@@ -28,6 +36,10 @@ export type AutonomyExecutionDispatchResult = {
   blockers: string[];
   error?: string;
 };
+
+function isAutonomyExecutionEnabled(): boolean {
+  return envBool('CACSMS_ENABLE_AUTONOMY_EXECUTION', false) || isContinuousTradingEnabled();
+}
 
 function envBool(name: string, fallback = false): boolean {
   const raw = String(process.env[name] ?? '').trim().toLowerCase();
@@ -87,8 +99,8 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     blockers.push('CACSMS_ENABLE_EXECUTION is false.');
   }
 
-  if (!envBool('CACSMS_ENABLE_AUTONOMY_EXECUTION', false) && !manual) {
-    blockers.push('Autonomous execution is disabled. Set CACSMS_ENABLE_AUTONOMY_EXECUTION=true or dispatch manually.');
+  if (!isAutonomyExecutionEnabled() && !manual) {
+    blockers.push('Autonomous execution is disabled. Set CACSMS_ENABLE_AUTONOMY_EXECUTION=true or enable continuous trading.');
   }
 
   if (manual && !executionModeAllowsManualDispatch(mode)) {
@@ -157,6 +169,18 @@ export async function evaluateAutonomyExecutionChecklist(input: {
 
   if (input.decision.macroRiskWarning && /blackout|blocked|avoid/i.test(input.decision.macroRiskWarning)) {
     blockers.push(input.decision.macroRiskWarning);
+  }
+
+  if (
+    isStopLossRequired()
+    && ['BUY', 'SELL'].includes(input.decision.decision)
+    && !hasValidStopTargets({
+      side: input.decision.decision,
+      stopLoss: input.decision.stopLoss,
+      takeProfit: input.decision.takeProfitLevels?.[0] ?? null,
+    })
+  ) {
+    blockers.push('Stop loss and take profit must be resolved before execution dispatch.');
   }
 
   return {
@@ -231,6 +255,32 @@ async function hasExistingDispatch(decisionLogId: string): Promise<boolean> {
   return result.rows.length > 0;
 }
 
+export async function resolveExecutableAutonomyDecision(
+  decision: AutonomousDecisionOutput,
+): Promise<{ decision: AutonomousDecisionOutput; stopTargets: AutonomousStopTargetResult | null }> {
+  if (!['BUY', 'SELL'].includes(decision.decision)) {
+    return { decision, stopTargets: null };
+  }
+  const side = decision.decision as AutonomousTradeSide;
+  const stopTargets = await resolveAutonomousStopTargets({
+    symbol: decision.symbol,
+    timeframe: decision.timeframe,
+    side,
+  });
+  if (!stopTargets) {
+    return { decision, stopTargets: null };
+  }
+  return {
+    decision: {
+      ...decision,
+      stopLoss: stopTargets.stopLoss,
+      takeProfitLevels: stopTargets.takeProfitLevels,
+      invalidationLevel: stopTargets.invalidationLevel,
+    },
+    stopTargets,
+  };
+}
+
 export async function dispatchAutonomyDecision(input: {
   decisionLogId: string;
   decision: AutonomousDecisionOutput;
@@ -247,8 +297,9 @@ export async function dispatchAutonomyDecision(input: {
     };
   }
 
+  const { decision: executableDecision, stopTargets } = await resolveExecutableAutonomyDecision(input.decision);
   const checklist = await evaluateAutonomyExecutionChecklist({
-    decision: input.decision,
+    decision: executableDecision,
     config: input.config,
     manual: input.manual,
   });
@@ -271,7 +322,26 @@ export async function dispatchAutonomyDecision(input: {
     };
   }
 
-  const side = input.decision.decision === 'SELL' ? 'SELL' : 'BUY';
+  if (!stopTargets) {
+    const blockers = ['Unable to resolve structural stop loss and take profit for this signal.'];
+    await persistDispatchRecord({
+      decisionLogId: input.decisionLogId,
+      terminalId: checklist.terminalId,
+      symbol: executableDecision.symbol,
+      side: executableDecision.decision,
+      status: 'blocked',
+      blockers,
+      payload: { manual: Boolean(input.manual), mode: checklist.mode },
+    });
+    return {
+      ok: false,
+      status: 'blocked',
+      decisionLogId: input.decisionLogId,
+      blockers,
+    };
+  }
+
+  const side = executableDecision.decision === 'SELL' ? 'SELL' : 'BUY';
   const account = await resolveExecutionAccountContext(checklist.terminalId);
   if (!account) {
     return {
@@ -283,11 +353,11 @@ export async function dispatchAutonomyDecision(input: {
   }
 
   const sized = input.volumeLots != null
-    ? { lots: Number(input.volumeLots), riskAmount: 0, stopPips: 0, method: 'fixed' as const }
-    : resolveAutonomousVolumeLots({ decision: input.decision, account });
+    ? { lots: Number(input.volumeLots), riskAmount: 0, stopPips: stopTargets.stopPips, method: 'fixed' as const }
+    : resolveAutonomousVolumeLots({ decision: executableDecision, account, entryPrice: stopTargets.entryPrice });
   const volumeLots = sized.lots;
-  const stopLoss = Number(input.decision.stopLoss ?? 0);
-  const takeProfit = Number(input.decision.takeProfitLevels?.[0] ?? 0);
+  const stopLoss = stopTargets.stopLoss;
+  const takeProfit = stopTargets.takeProfit;
   const commandId = `autonomy-${input.decisionLogId.slice(0, 8)}-${randomUUID()}`;
   const dedupeKey = `AUTONOMY:${input.decisionLogId}:${input.decision.symbol}:${side}:${volumeLots}`;
   const executionMode = account.sandboxMode ? 'SANDBOX' : 'LIVE';
@@ -301,7 +371,7 @@ export async function dispatchAutonomyDecision(input: {
         source: 'AUTONOMY_EXECUTION_ADAPTER',
         decisionLogId: input.decisionLogId,
         intentId: input.decisionLogId,
-        symbol: input.decision.symbol,
+        symbol: executableDecision.symbol,
         side,
         orderType: 'MARKET',
         volume: volumeLots,
@@ -310,7 +380,10 @@ export async function dispatchAutonomyDecision(input: {
         tp: takeProfit,
         stopLoss,
         takeProfit,
-        comment: `Cacsms autonomy ${side} ${input.decision.symbol}`,
+        entryPrice: stopTargets.entryPrice,
+        rewardRiskRatio: stopTargets.rewardRiskRatio,
+        stopTargetMethod: stopTargets.method,
+        comment: `Cacsms autonomy ${side} ${executableDecision.symbol}`,
         mode: executionMode,
         environment: account.environment,
         accountClass: account.accountClass,
@@ -319,9 +392,9 @@ export async function dispatchAutonomyDecision(input: {
         sizingMethod: sized.method,
         riskAmount: sized.riskAmount,
         stopPips: sized.stopPips,
-        timeframe: input.decision.timeframe,
-        confidenceScore: input.decision.confidenceScore,
-        setupReadinessScore: input.decision.setupReadinessScore,
+        timeframe: executableDecision.timeframe,
+        confidenceScore: executableDecision.confidenceScore,
+        setupReadinessScore: executableDecision.setupReadinessScore,
       },
       environment: account.environment,
       sandboxMode: account.sandboxMode,
@@ -334,7 +407,7 @@ export async function dispatchAutonomyDecision(input: {
       decisionLogId: input.decisionLogId,
       commandId: result.command.commandId,
       terminalId: checklist.terminalId,
-      symbol: input.decision.symbol,
+      symbol: executableDecision.symbol,
       side,
       status: 'dispatched',
       blockers: [],
@@ -346,6 +419,11 @@ export async function dispatchAutonomyDecision(input: {
         environment: account.environment,
         volumeLots,
         sizingMethod: sized.method,
+        stopLoss,
+        takeProfit,
+        entryPrice: stopTargets.entryPrice,
+        stopTargetMethod: stopTargets.method,
+        rewardRiskRatio: stopTargets.rewardRiskRatio,
       },
     });
 
@@ -392,7 +470,7 @@ export async function maybeAutoDispatchAutonomyDecision(input: {
 }): Promise<AutonomyExecutionDispatchResult | null> {
   if (!['BUY', 'SELL'].includes(input.decision.decision)) return null;
   if (!executionModeAllowsAutoDispatch(input.config.tradeExecutionMode)) return null;
-  if (!envBool('CACSMS_ENABLE_AUTONOMY_EXECUTION', false)) return null;
+  if (!isAutonomyExecutionEnabled()) return null;
   const account = await resolveExecutionAccountContext();
   const { shouldDispatchPipelineExecution } = await import('@/lib/autonomy-pipeline-throttle');
   if (!(await shouldDispatchPipelineExecution(input.decisionLogId, account?.accountClass ?? 'demo', input.decision.symbol))) {

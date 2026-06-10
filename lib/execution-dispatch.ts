@@ -109,9 +109,12 @@ export async function dispatchExecutionCommand(input: DispatchExecutionCommandIn
       commandId,
       intentId: input.intentId ?? (String(payload.intentId ?? '').trim() || undefined),
       symbol: String(payload.symbol ?? '').trim().toUpperCase() || undefined,
+      side: String(payload.side ?? '').trim().toUpperCase() || undefined,
+      entryPrice: Number(payload.entryPrice ?? payload.executedPrice ?? 0) || undefined,
       requestedLots: Number.isFinite(volume) ? volume : 0,
       stopLoss: Number(payload.sl ?? payload.stopLoss ?? 0),
       takeProfit: Number(payload.tp ?? payload.takeProfit ?? 0),
+      rewardRiskRatio: Number(payload.rewardRiskRatio ?? 0) || undefined,
       sandboxMode,
       environment,
     });

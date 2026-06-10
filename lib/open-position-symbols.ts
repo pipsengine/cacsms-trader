@@ -1,4 +1,4 @@
-import { listOpenPositions } from './execution-open-positions';
+import { getOpenPositionMetrics, listOpenPositions } from './execution-open-positions';
 import { resolveTerminalOpenPositionCount } from './open-position-count';
 
 type BridgeTerminal = {
@@ -8,10 +8,24 @@ type BridgeTerminal = {
   margin?: number | null;
   equity?: number | null;
   balance?: number | null;
+  openPositionSnapshots?: unknown;
 };
 
-/** Distinct symbols with open exposure (DB registry, then recent fills, then active chart symbol). */
+function symbolsFromSnapshots(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const symbols: string[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const symbol = String((item as { symbol?: string }).symbol ?? '').toUpperCase().trim();
+    if (symbol) symbols.push(symbol);
+  }
+  return symbols;
+}
+
+/** Distinct symbols with live open exposure (registry synced to terminal, then EA snapshots). */
 export async function getOpenPositionSymbols(): Promise<string[]> {
+  await getOpenPositionMetrics().catch(() => null);
+
   const symbols = new Set<string>();
 
   try {
@@ -20,31 +34,7 @@ export async function getOpenPositionSymbols(): Promise<string[]> {
       if (position.symbol) symbols.add(position.symbol.toUpperCase());
     }
   } catch {
-    // registry may be empty on first run
-  }
-
-  if (symbols.size === 0) {
-    try {
-      const { queryPostgres } = await import('./postgres');
-      const result = await queryPostgres(
-        `
-          SELECT DISTINCT upper(symbol) AS symbol
-          FROM execution_commands
-          WHERE lifecycle_state = 'EXECUTED'
-            AND upper(replace(type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
-            AND symbol IS NOT NULL
-            AND btrim(symbol) <> ''
-            AND created_at >= now() - interval '3 days'
-          ORDER BY symbol
-        `,
-      );
-      for (const row of result.rows) {
-        const symbol = String((row as { symbol?: string }).symbol ?? '').toUpperCase();
-        if (symbol) symbols.add(symbol);
-      }
-    } catch {
-      // fall through to bridge hint
-    }
+    // registry may be unavailable on first run
   }
 
   if (symbols.size === 0) {
@@ -56,20 +46,27 @@ export async function getOpenPositionSymbols(): Promise<string[]> {
         const payload = await response.json();
         const terminals = Array.isArray(payload.terminals) ? payload.terminals as BridgeTerminal[] : [];
         for (const terminal of terminals) {
-          const openCount = resolveTerminalOpenPositionCount({
-            openPositions: terminal.openPositions,
-            openOrders: terminal.openOrders,
-            margin: terminal.margin,
-            equity: terminal.equity,
-            balance: terminal.balance,
-          });
-          if (openCount > 0 && terminal.symbol) {
-            symbols.add(String(terminal.symbol).toUpperCase());
+          for (const symbol of symbolsFromSnapshots(terminal.openPositionSnapshots)) {
+            symbols.add(symbol);
+          }
+        }
+        if (symbols.size === 0) {
+          for (const terminal of terminals) {
+            const openCount = resolveTerminalOpenPositionCount({
+              openPositions: terminal.openPositions,
+              openOrders: terminal.openOrders,
+              margin: terminal.margin,
+              equity: terminal.equity,
+              balance: terminal.balance,
+            });
+            if (openCount > 0 && terminal.symbol) {
+              symbols.add(String(terminal.symbol).toUpperCase());
+            }
           }
         }
       }
     } catch {
-      // no bridge symbols available
+      // bridge unavailable
     }
   }
 

@@ -4,11 +4,19 @@ import {
   analyzeImageComparison,
   normalizeImageComparisonTimeframe,
   type ComparisonAnalysisPayload,
+  type FinalImageInterpretation,
   type ImageComparisonResult,
   type ImageComparisonTimeframe,
 } from './image-comparison-engine';
+import {
+  biasFromInterpretation,
+  synthesizeTopDownDecision,
+  TOP_DOWN_TIMEFRAMES,
+  type TopDownComparisonDecision,
+  type TopDownTimeframeResult,
+} from './image-comparison-topdown-engine';
 import { queryPostgres } from './postgres';
-import { publishVisualIntelligenceEvent } from './visual-intelligence-store';
+import { listCaptures, publishVisualIntelligenceEvent } from './visual-intelligence-store';
 import type { ReconstructedCandle } from './visual-intelligence-types';
 
 type Row = Record<string, unknown>;
@@ -204,6 +212,21 @@ export async function getImageComparison(comparisonId: string) {
   return mapComparison(row, events.rows);
 }
 
+export async function getComparisonCoverageMap(): Promise<Record<string, number>> {
+  await ensureImageComparisonSchema();
+  const result = await queryPostgres(`
+    SELECT upper(symbol) AS symbol, COUNT(*)::int AS comparison_count
+    FROM image_comparison_jobs
+    WHERE status = 'completed'
+    GROUP BY upper(symbol)
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.symbol)] = Number(row.comparison_count);
+  }
+  return coverage;
+}
+
 export async function getImageComparisonHistory(symbol: string, timeframe: string, limit = 20) {
   await ensureImageComparisonSchema();
   const normalizedTimeframe = normalizeImageComparisonTimeframe(timeframe);
@@ -216,6 +239,150 @@ export async function getImageComparisonHistory(symbol: string, timeframe: strin
   `, [symbol.toUpperCase(), normalizedTimeframe, limit]);
   const comparisons = await Promise.all(result.rows.map((row) => getImageComparison(String(row.id))));
   return comparisons.filter(Boolean);
+}
+
+export async function getTopDownComparisonState(symbol: string): Promise<TopDownComparisonDecision> {
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const captures = (await listCaptures(300)).filter((item) => item.symbol.toUpperCase() === normalizedSymbol);
+  const timeframeResults = await Promise.all(
+    TOP_DOWN_TIMEFRAMES.map(async (timeframe) => buildTopDownTimeframeState(normalizedSymbol, timeframe, captures, false)),
+  );
+  return synthesizeTopDownDecision(normalizedSymbol, timeframeResults);
+}
+
+export async function compareTopDownSymbol(symbol: string): Promise<TopDownComparisonDecision> {
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  await publishVisualIntelligenceEvent('comparison.topdown.started', null, null, { symbol: normalizedSymbol });
+  const captures = (await listCaptures(300)).filter((item) => item.symbol.toUpperCase() === normalizedSymbol);
+  const timeframeResults: TopDownTimeframeResult[] = [];
+
+  for (const timeframe of TOP_DOWN_TIMEFRAMES) {
+    const state = await buildTopDownTimeframeState(normalizedSymbol, timeframe, captures, true);
+    timeframeResults.push(state);
+    if (state.ready && state.comparisonId) {
+      await publishVisualIntelligenceEvent('comparison.topdown.timeframe.completed', null, null, {
+        symbol: normalizedSymbol,
+        timeframe,
+        comparisonId: state.comparisonId,
+        interpretation: state.interpretation,
+      });
+    }
+  }
+
+  const decision = synthesizeTopDownDecision(normalizedSymbol, timeframeResults);
+  await publishVisualIntelligenceEvent('comparison.topdown.completed', null, null, {
+    symbol: normalizedSymbol,
+    finalDecision: decision.finalDecision,
+    confidence: decision.confidence,
+    analyzedTimeframes: decision.metadata.analyzedTimeframes,
+  });
+  return decision;
+}
+
+async function buildTopDownTimeframeState(
+  symbol: string,
+  timeframe: ImageComparisonTimeframe,
+  captures: Awaited<ReturnType<typeof listCaptures>>,
+  executeComparison: boolean,
+): Promise<TopDownTimeframeResult> {
+  const scoped = captures
+    .filter((item) => item.symbol.toUpperCase() === symbol && item.timeframe.toUpperCase() === timeframe)
+    .sort((a, b) => new Date(b.capturedAt).getTime() - new Date(a.capturedAt).getTime());
+
+  if (scoped.length < 2) {
+    return {
+      timeframe,
+      ready: false,
+      previousCaptureId: scoped[1]?.id ?? null,
+      currentCaptureId: scoped[0]?.id ?? null,
+      comparisonId: null,
+      result: null,
+      bias: 'neutral',
+      interpretation: 'unavailable',
+      changeScore: 0,
+    };
+  }
+
+  const currentCapture = scoped[0];
+  const previousCapture = scoped[1];
+
+  if (executeComparison) {
+    try {
+      const payload = await compareChartImages({
+        symbol,
+        timeframe,
+        previousImageUrl: previousCapture.imageUrl,
+        currentImageUrl: currentCapture.imageUrl,
+        previousCaptureId: previousCapture.id,
+        currentCaptureId: currentCapture.id,
+      });
+      const result = payload.result;
+      return {
+        timeframe,
+        ready: true,
+        previousCaptureId: previousCapture.id,
+        currentCaptureId: currentCapture.id,
+        comparisonId: payload.comparisonId,
+        result: toTopDownSnapshot(result),
+        bias: biasFromInterpretation(result.finalInterpretation),
+        interpretation: result.finalInterpretation,
+        changeScore: result.comparisonScore,
+      };
+    } catch {
+      // Fall through to latest persisted comparison if execution fails.
+    }
+  }
+
+  const history = await getImageComparisonHistory(symbol, timeframe, 1);
+  const latest = history[0];
+  if (!latest?.result) {
+    return {
+      timeframe,
+      ready: true,
+      previousCaptureId: previousCapture.id,
+      currentCaptureId: currentCapture.id,
+      comparisonId: latest?.comparisonId ?? null,
+      result: null,
+      bias: 'neutral' as const,
+      interpretation: 'unavailable' as const,
+      changeScore: 0,
+    };
+  }
+
+  return {
+    timeframe,
+    ready: true,
+    previousCaptureId: previousCapture.id,
+    currentCaptureId: currentCapture.id,
+    comparisonId: latest.comparisonId,
+    result: toTopDownSnapshot(latest.result),
+    bias: biasFromInterpretation(latest.result.finalInterpretation as FinalImageInterpretation),
+    interpretation: latest.result.finalInterpretation as FinalImageInterpretation,
+    changeScore: latest.result.comparisonScore,
+  };
+}
+
+function toTopDownSnapshot(result: ImageComparisonResult | NonNullable<Awaited<ReturnType<typeof getImageComparison>>>['result']) {
+  if (!result) return null;
+  return {
+    comparisonScore: Number(result.comparisonScore),
+    similarityPercentage: Number(result.similarityPercentage),
+    visualChangeConfidence: Number(result.visualChangeConfidence),
+    changedBias: String(result.changedBias),
+    finalInterpretation: result.finalInterpretation as ImageComparisonResult['finalInterpretation'],
+    changedStructures: result.changedStructures ?? [],
+    newZones: result.newZones ?? [],
+    invalidatedZones: result.invalidatedZones ?? [],
+    heatmapUrl: String(result.heatmapUrl ?? ''),
+    differenceBlocks: result.differenceBlocks ?? [],
+    aiExplanation: String(result.aiExplanation ?? ''),
+    marketChangeTimeline: result.marketChangeTimeline ?? [],
+    institutionalInterpretation: String(result.institutionalInterpretation ?? ''),
+    recommendation: String(result.recommendation ?? ''),
+    confidence: Number(result.confidence ?? 0),
+    previousImageUrl: result.previousImageUrl ?? null,
+    currentImageUrl: result.currentImageUrl ?? null,
+  };
 }
 
 async function insertJob(id: string, symbol: string, timeframe: ImageComparisonTimeframe, previousCaptureId: string | null, currentCaptureId: string | null, metadata: Record<string, unknown>) {
@@ -291,11 +458,26 @@ async function persistResult(jobId: string, result: ImageComparisonResult) {
 
 async function hydrateImage(image?: string, imageUrl?: string | null, captureId?: string | null) {
   if (image?.trim()) return { image, url: imageUrl ?? null };
-  if (imageUrl?.trim()) return { image: imageUrl, url: imageUrl };
+  if (imageUrl?.trim() && !imageUrl.startsWith('memory://')) return { image: imageUrl, url: imageUrl };
   if (captureId) {
-    const capture = await queryPostgres('SELECT image_url FROM chart_captures WHERE id = $1 LIMIT 1', [captureId]);
-    const url = capture.rows[0]?.image_url ? String(capture.rows[0].image_url) : null;
-    if (url) return { image: url, url };
+    const capture = await queryPostgres(
+      'SELECT image_url, image_hash, metadata_json FROM chart_captures WHERE id = $1 LIMIT 1',
+      [captureId],
+    );
+    const row = capture.rows[0];
+    if (!row) throw new Error('Capture not found.');
+    const url = row.image_url ? String(row.image_url) : null;
+    const hash = row.image_hash ? String(row.image_hash) : null;
+    const metadata = readJson(row.metadata_json, {}) as Record<string, unknown>;
+    const candidates = [
+      url,
+      typeof metadata.processedImageUrl === 'string' ? metadata.processedImageUrl : null,
+      typeof metadata.originalImageUrl === 'string' ? metadata.originalImageUrl : null,
+    ];
+    for (const candidate of candidates) {
+      if (candidate && !candidate.startsWith('memory://')) return { image: candidate, url: candidate };
+    }
+    if (hash) return { image: hash, url: url };
   }
   throw new Error('Both previous and current images, image URLs, or capture ids are required.');
 }

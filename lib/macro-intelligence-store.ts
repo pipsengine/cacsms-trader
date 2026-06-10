@@ -217,15 +217,35 @@ async function loadRatesComponent(currencies: string[]) {
     };
   }
 
+  const eventRegistry = await queryPostgres(
+    `SELECT upper(currency) AS currency
+     FROM central_bank_rate_events
+     WHERE upper(currency) = ANY($1::text[]) AND is_active = true`,
+    [currencies.map((item) => item.toUpperCase())],
+  );
+  if (eventRegistry.rows.length > 0) {
+    const labels = eventRegistry.rows.map((row) => `${String(row.currency)} Neutral`);
+    return {
+      id: 'rates' as const,
+      label: 'Interest rates',
+      status: 'partial' as const,
+      detail: `Rate registry ready (${labels.join(', ')}) — sync rate history for full policy bias.`,
+      progress: 18,
+      metrics: { registeredCurrencies: eventRegistry.rows.length },
+      interestRateBias: labels.join(' / '),
+      source: 'rate_events_registry',
+    };
+  }
+
   return {
     id: 'rates' as const,
     label: 'Interest rates',
-    status: 'missing' as const,
-    detail: 'No central bank rate history or policy events found for active currencies.',
-    progress: 0,
+    status: 'partial' as const,
+    detail: 'No rate history loaded — using neutral monetary policy assumption for fusion.',
+    progress: 12,
     metrics: {},
-    interestRateBias: null as string | null,
-    source: 'none',
+    interestRateBias: 'Neutral',
+    source: 'neutral_fallback',
   };
 }
 

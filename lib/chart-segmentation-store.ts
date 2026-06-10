@@ -2,8 +2,22 @@ import { randomUUID } from 'crypto';
 
 import { segmentChart, type ChartSegmentResult, type ChartSegmentType } from './chart-segmentation-engine';
 import { queryPostgres } from './postgres';
-import { getCaptureAnalysis, publishVisualIntelligenceEvent } from './visual-intelligence-store';
+import { getCaptureAnalysis, listCaptures, publishVisualIntelligenceEvent } from './visual-intelligence-store';
 import type { ChartCaptureRecord, ReconstructedCandle } from './visual-intelligence-types';
+
+export const SEGMENTATION_TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+export type SegmentationTopDownTimeframe = (typeof SEGMENTATION_TOP_DOWN_TIMEFRAMES)[number];
+
+export interface SegmentationTimeframeReadiness {
+  timeframe: SegmentationTopDownTimeframe;
+  captureId: string | null;
+  capturedAt: string | null;
+  candleCount: number;
+  hasCapture: boolean;
+  segmentCount: number;
+  latestSegmentAt: string | null;
+  readyForSegmentation: boolean;
+}
 
 type Row = Record<string, unknown>;
 
@@ -108,11 +122,94 @@ export async function ensureChartSegmentationSchema() {
   return schemaReady;
 }
 
+async function shouldRefreshChartSegmentation(captureId: string): Promise<boolean> {
+  const [captureResult, segmentResult] = await Promise.all([
+    queryPostgres('SELECT captured_at FROM chart_captures WHERE id = $1 LIMIT 1', [captureId]),
+    queryPostgres('SELECT MAX(created_at) AS latest_at FROM chart_segments WHERE chart_capture_id = $1', [captureId]),
+  ]);
+  if (!captureResult.rows[0]) return false;
+  if (!segmentResult.rows[0]?.latest_at) return true;
+  const captureAt = new Date(String(captureResult.rows[0].captured_at)).getTime();
+  const segmentAt = new Date(String(segmentResult.rows[0].latest_at)).getTime();
+  return captureAt > segmentAt;
+}
+
+/** Idempotent autonomous entry — only segments when the capture is new or updated. */
+export async function ensureChartSegmentationForCapture(input: {
+  captureId: string;
+  symbol: string;
+  timeframe: string;
+}): Promise<StoredSegmentationReport | null> {
+  await ensureChartSegmentationSchema();
+  if (!(await shouldRefreshChartSegmentation(input.captureId))) {
+    return getChartSegmentation(input.captureId);
+  }
+  try {
+    return await analyzeChartSegmentation(input);
+  } catch {
+    return getChartSegmentation(input.captureId);
+  }
+}
+
+export async function getSegmentationReadiness(symbol: string): Promise<SegmentationTimeframeReadiness[]> {
+  await ensureChartSegmentationSchema();
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const captures = (await listCaptures(300)).filter((item) => item.symbol.toUpperCase() === normalizedSymbol);
+
+  const readiness: SegmentationTimeframeReadiness[] = [];
+  for (const timeframe of SEGMENTATION_TOP_DOWN_TIMEFRAMES) {
+    const scoped = captures.filter((item) => item.timeframe.toUpperCase() === timeframe);
+    const latestCapture = scoped[0] ?? null;
+    let candleCount = 0;
+    let segmentCount = 0;
+    let latestSegmentAt: string | null = null;
+    if (latestCapture) {
+      const [candleResult, segmentResult] = await Promise.all([
+        queryPostgres('SELECT COUNT(*)::int AS count FROM reconstructed_candles WHERE chart_capture_id = $1', [latestCapture.id]),
+        queryPostgres('SELECT COUNT(*)::int AS count, MAX(created_at) AS latest_at FROM chart_segments WHERE chart_capture_id = $1', [latestCapture.id]),
+      ]);
+      candleCount = Number(candleResult.rows[0]?.count ?? 0);
+      segmentCount = Number(segmentResult.rows[0]?.count ?? 0);
+      latestSegmentAt = segmentResult.rows[0]?.latest_at ? dateString(segmentResult.rows[0].latest_at) : null;
+    }
+    readiness.push({
+      timeframe,
+      captureId: latestCapture?.id ?? null,
+      capturedAt: latestCapture?.capturedAt ?? null,
+      candleCount,
+      hasCapture: Boolean(latestCapture),
+      segmentCount,
+      latestSegmentAt,
+      readyForSegmentation: candleCount >= 5,
+    });
+  }
+  return readiness;
+}
+
+export async function analyzeTopDownChartSegmentation(symbol: string): Promise<StoredSegmentationReport[]> {
+  const readiness = await getSegmentationReadiness(symbol);
+  const reports: StoredSegmentationReport[] = [];
+  for (const item of readiness.filter((entry) => entry.readyForSegmentation && entry.captureId)) {
+    const report = await ensureChartSegmentationForCapture({
+      captureId: item.captureId!,
+      symbol,
+      timeframe: item.timeframe,
+    });
+    if (report?.segments.length) reports.push(report);
+  }
+  return reports;
+}
+
 export async function analyzeChartSegmentation(input: { captureId?: string; symbol?: string; timeframe?: string }): Promise<StoredSegmentationReport> {
   await ensureChartSegmentationSchema();
   const capture = input.captureId ? await loadCapture(input.captureId) : await findLatestCapture(input.symbol, input.timeframe);
   if (!capture) throw new Error('No chart capture found for AI chart segmentation.');
   const candles = await loadCandles(capture.id);
+  if (candles.length < 5) {
+    throw new Error(
+      `Insufficient candle data for ${capture.symbol} ${capture.timeframe} (${candles.length} reconstructed candles). Sync chart captures first.`,
+    );
+  }
 
   await publishVisualIntelligenceEvent('segmentation.started', capture.id, null, { symbol: capture.symbol, timeframe: capture.timeframe });
   const result = segmentChart({ symbol: capture.symbol, timeframe: capture.timeframe, imageUrl: capture.imageUrl, candles });
@@ -155,8 +252,13 @@ export async function getChartSegmentation(captureId: string): Promise<StoredSeg
 
 export async function getLatestChartSegmentation(symbol: string, timeframe: string): Promise<StoredSegmentationReport | null> {
   await ensureChartSegmentationSchema();
-  const capture = await findLatestSegmentCapture(symbol, timeframe);
-  return capture ? getChartSegmentation(capture) : null;
+  const latestCapture = await findLatestCapture(symbol, timeframe);
+  if (latestCapture) {
+    const latestReport = await getChartSegmentation(latestCapture.id);
+    if (latestReport?.segments.length) return latestReport;
+  }
+  const segmentedCaptureId = await findLatestSegmentCapture(symbol, timeframe);
+  return segmentedCaptureId ? getChartSegmentation(segmentedCaptureId) : null;
 }
 
 export async function createSegmentFeedback(input: { segmentId: string; feedbackType: string; correction?: Record<string, unknown>; comment?: string; userId?: string }) {

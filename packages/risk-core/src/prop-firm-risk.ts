@@ -10,10 +10,13 @@ interface EvaluateRiskInput {
   tradesPerSymbolPerDay?: number;
   maxOpenTradesOverride?: number;
   maxTradesPerDayOverride?: number;
+  /** When true, only daily drawdown (and core safety checks) can block new trades. */
+  continuousTradingEnabled?: boolean;
 }
 
 export function evaluatePropFirmRisk(input: EvaluateRiskInput): RiskDecision {
   const { rules, state } = input;
+  const continuousTrading = input.continuousTradingEnabled ?? false;
   const remainingDailyLossAmount = getRemainingDailyLossAmount(rules, state);
 
   if (state.killSwitchActive) {
@@ -24,11 +27,11 @@ export function evaluatePropFirmRisk(input: EvaluateRiskInput): RiskDecision {
     return block("daily_drawdown_exceeded", "Daily drawdown limit has been reached.", remainingDailyLossAmount);
   }
 
-  if (getTotalDrawdownPercent(state) >= rules.maxDrawdownPercent) {
+  if (!continuousTrading && getTotalDrawdownPercent(state) >= rules.maxDrawdownPercent) {
     return block("max_drawdown_exceeded", "Maximum drawdown limit has been reached.", remainingDailyLossAmount);
   }
 
-  if (rules.stopTradingAfterDailyTargetHit && state.monthlyProfitPercent >= rules.monthlyProfitTargetPercent) {
+  if (!continuousTrading && rules.stopTradingAfterDailyTargetHit && state.monthlyProfitPercent >= rules.monthlyProfitTargetPercent) {
     return block("monthly_target_reached", "Monthly profit target reached. Trading is locked.", remainingDailyLossAmount);
   }
 
@@ -36,7 +39,8 @@ export function evaluatePropFirmRisk(input: EvaluateRiskInput): RiskDecision {
   const maxOpenTrades = input.maxOpenTradesOverride ?? rules.maxOpenTrades;
 
   if (
-    rules.dailyTradeLimitEnabled
+    !continuousTrading
+    && rules.dailyTradeLimitEnabled
     && input.symbol
     && input.tradesPerSymbolPerDay
     && (input.tradesOpenedTodayForSymbol ?? 0) >= input.tradesPerSymbolPerDay
@@ -48,7 +52,7 @@ export function evaluatePropFirmRisk(input: EvaluateRiskInput): RiskDecision {
     );
   }
 
-  if (rules.dailyTradeLimitEnabled && state.tradesOpenedToday >= maxTradesPerDay) {
+  if (!continuousTrading && rules.dailyTradeLimitEnabled && state.tradesOpenedToday >= maxTradesPerDay) {
     return block("max_trades_per_day", "Maximum trades per day reached.", remainingDailyLossAmount);
   }
 
@@ -60,7 +64,7 @@ export function evaluatePropFirmRisk(input: EvaluateRiskInput): RiskDecision {
     );
   }
 
-  if (state.consecutiveLosses >= rules.stopAfterConsecutiveLosses) {
+  if (!continuousTrading && state.consecutiveLosses >= rules.stopAfterConsecutiveLosses) {
     return block("consecutive_loss_limit", "Consecutive loss limit reached.", remainingDailyLossAmount);
   }
 

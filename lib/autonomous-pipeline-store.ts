@@ -9,6 +9,9 @@ import { advancePipelineAnalysis } from './autonomous-pipeline-analysis';
 import { getPipelineExecutionStatus, getPipelineRiskStatus } from './autonomous-pipeline-risk-execution';
 import { getMacroPipelineStatus } from './macro-intelligence-store';
 import { syncMt5CaptureAcks } from './mt5-capture-ingest';
+import { getContinuousTradingSessionStatus } from './continuous-trading-session';
+import { getLastInstitutionalMaintenanceSnapshot } from './institutional-position-maintenance';
+import { isContinuousTradingEnabled } from './execution-risk-limits';
 import { resolvePipelineSymbolUniverse } from './pipeline-symbol-universe';
 import { getLatestPairSelection, maybeRefreshPairSelection, runAutonomousPairSelection } from './pair-selector';
 import { getLatestPipelineSession, listPipelineEvents } from './top-down-orchestrator';
@@ -31,6 +34,24 @@ export interface AutonomousPipelineStatus {
   mode: string;
   activeSymbol: string;
   activeSymbols: string[];
+  continuousSession: {
+    active: boolean;
+    startedAt: string | null;
+    stoppedAt: string | null;
+  };
+  symbolUniverse: {
+    mode: 'full_universe' | 'selection' | 'single';
+    symbols: string[];
+    scannedCount: number;
+    tradableCount: number;
+  };
+  maintenance: {
+    at: string | null;
+    trigger: string | null;
+    targets: string[];
+    dispatchesAttempted: number;
+    openCount: number | null;
+  } | null;
   pairSelection: {
     selectedSymbol: string;
     selectedAt: string | null;
@@ -75,7 +96,11 @@ export interface AutonomousPipelineStatusOptions {
 }
 
 /** Heavy pipeline work: pair refresh, trade monitor, capture sync, and analysis per symbol. */
-export async function advanceAutonomousPipeline(symbol = 'AUTO'): Promise<{ symbols: string[] }> {
+export async function advanceAutonomousPipeline(symbol = 'AUTO'): Promise<{ symbols: string[]; sessionActive?: boolean }> {
+  const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
+  if (!(await isContinuousTradingSessionActive())) {
+    return { symbols: [], sessionActive: false };
+  }
   await ensureAutonomySchema();
   await ensureFocusSymbolsConfigured();
   const requestedSymbol = symbol.toUpperCase();
@@ -150,7 +175,7 @@ export async function getAutonomousPipelineStatus(
     }
   }
 
-  const [session, captureCounts, mtf, vision, macro, decisions, risk, execution, autonomyConfig, jobs] = await Promise.all([
+  const [session, captureCounts, mtf, vision, macro, decisions, risk, execution, autonomyConfig, jobs, continuousSession, maintenance] = await Promise.all([
     getLatestPipelineSession(normalizedSymbol),
     getCaptureCoverage(normalizedSymbol),
     getMtfStatus(normalizedSymbol),
@@ -161,7 +186,17 @@ export async function getAutonomousPipelineStatus(
     getPipelineExecutionStatus(normalizedSymbol),
     getAutonomyConfigRow(),
     getRunningJobs(),
+    getContinuousTradingSessionStatus(),
+    getLastInstitutionalMaintenanceSnapshot(),
   ]);
+
+  const tradableCount = latestSelection?.candidates.filter((candidate) => candidate.tradable).length ?? 0;
+  const universeMode: AutonomousPipelineStatus['symbolUniverse']['mode'] =
+    requestedSymbol !== 'AUTO'
+      ? 'single'
+      : isContinuousTradingEnabled()
+        ? 'full_universe'
+        : 'selection';
 
   const sessionStageMap = objectValue(session?.stage_status_json);
   const timeframeCapture = objectValue(session?.timeframe_capture_json);
@@ -320,6 +355,18 @@ export async function getAutonomousPipelineStatus(
     mode: stringValue(autonomyConfig.mode, 'full_auto'),
     activeSymbol: normalizedSymbol,
     activeSymbols: pipelineSymbols,
+    continuousSession: {
+      active: continuousSession.active,
+      startedAt: continuousSession.startedAt,
+      stoppedAt: continuousSession.stoppedAt,
+    },
+    symbolUniverse: {
+      mode: universeMode,
+      symbols: pipelineSymbols,
+      scannedCount: latestSelection?.candidates.length ?? pipelineSymbols.length,
+      tradableCount,
+    },
+    maintenance,
     pairSelection: latestSelection
       ? {
           selectedSymbol: latestSelection.selectedSymbol,

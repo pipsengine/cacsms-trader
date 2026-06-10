@@ -156,6 +156,74 @@ export async function getSymbolDecision(symbol: string): Promise<MultiTimeframeD
   return getMultiTimeframeDecision(symbol.toUpperCase());
 }
 
+export interface MtfTimeframeReadiness {
+  timeframe: MtfTimeframe;
+  captureId: string | null;
+  capturedAt: string | null;
+  candleCount: number;
+  analyzed: boolean;
+  analyzedAt: string | null;
+  readyForAnalysis: boolean;
+}
+
+export async function getMtfReadiness(symbol: string): Promise<MtfTimeframeReadiness[]> {
+  await ensureMultiTimeframeSchema();
+  const normalized = symbol.toUpperCase();
+  const snapshots = await getTimeframeSnapshots(normalized);
+  const snapshotByTf = new Map(snapshots.map((item) => [item.timeframe, item]));
+
+  const readiness: MtfTimeframeReadiness[] = [];
+  for (const timeframe of MTF_TIMEFRAMES) {
+    const captureId = await findLatestCaptureId(normalized, timeframe);
+    let candleCount = 0;
+    let capturedAt: string | null = null;
+    if (captureId) {
+      const capture = await queryPostgres(
+        'SELECT captured_at FROM chart_captures WHERE id = $1 LIMIT 1',
+        [captureId],
+      );
+      capturedAt = capture.rows[0]?.captured_at ? dateString(capture.rows[0].captured_at) : null;
+      const candles = await queryPostgres(
+        'SELECT COUNT(*)::int AS count FROM reconstructed_candles WHERE chart_capture_id = $1',
+        [captureId],
+      );
+      candleCount = Number(candles.rows[0]?.count ?? 0);
+    }
+    const snapshot = snapshotByTf.get(timeframe);
+    const analyzed = Boolean(
+      snapshot
+      && snapshot.aiConfidenceScore > 0
+      && snapshot.marketStructure !== 'no_backend_chart_data',
+    );
+    readiness.push({
+      timeframe,
+      captureId,
+      capturedAt,
+      candleCount,
+      analyzed,
+      analyzedAt: snapshot?.createdAt ?? null,
+      readyForAnalysis: candleCount >= 12,
+    });
+  }
+  return readiness;
+}
+
+export async function getMtfCoverageMap(): Promise<Record<string, number>> {
+  await ensureMultiTimeframeSchema();
+  const result = await queryPostgres(`
+    SELECT symbol, COUNT(DISTINCT timeframe)::int AS timeframe_count
+    FROM timeframe_analysis_snapshots
+    WHERE market_structure <> 'no_backend_chart_data'
+      AND ai_confidence_score > 0
+    GROUP BY symbol
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.symbol).toUpperCase()] = Number(row.timeframe_count);
+  }
+  return coverage;
+}
+
 async function loadMtfCandles(symbol: string, input: { candles?: MtfCandleInput; captureIds?: Partial<Record<MtfTimeframe, string>> }) {
   const candleMap: Partial<Record<MtfTimeframe, ReconstructedCandle[]>> = {};
   const captureMap: Partial<Record<MtfTimeframe, string | null>> = {};

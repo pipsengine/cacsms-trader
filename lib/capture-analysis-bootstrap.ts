@@ -1,14 +1,14 @@
 import { AUTONOMY_TIMEFRAME_SEQUENCE } from './autonomous-pipeline';
 import { analyzeAiVisualInterpretation } from './ai-visual-interpretation-store';
 import { analyzeCaptureCandles } from './candle-detection-store';
-import { analyzeChartSegmentation } from './chart-segmentation-store';
+import { ensureChartSegmentationForCapture } from './chart-segmentation-store';
 import { analyzeCaptureLiquidity } from './liquidity-zone-store';
 import { analyzeCaptureOrderBlocks } from './order-block-detection-store';
 import { analyzeCapturePatterns } from './pattern-recognition-store';
 import { queryPostgres } from './postgres';
 import { analyzeCaptureStructure } from './structure-analysis-store';
 import { analyzeCaptureSupportResistance } from './support-resistance-store';
-import { analyzeVisualAnomaly } from './visual-anomaly-detection-store';
+import { ensureVisualAnomalyForCapture } from './visual-anomaly-detection-store';
 
 export interface CaptureAnalysisBootstrapSummary {
   timeframes: number;
@@ -63,8 +63,8 @@ export async function ensureCaptureDerivedAnalyses(
     analyzeCaptureSupportResistance(input).catch(() => null),
     analyzeCaptureCandles(input).catch(() => null),
     analyzeCapturePatterns(input).catch(() => null),
-    analyzeChartSegmentation({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }).catch(() => null),
-    analyzeVisualAnomaly({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }).catch(() => null),
+    ensureChartSegmentationForCapture({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }).catch(() => null),
+    ensureVisualAnomalyForCapture({ captureId, symbol: normalizedSymbol, timeframe: normalizedTimeframe }).catch(() => null),
   ]);
 
   if (!(await hasAiVisualInterpretation(captureId))) {

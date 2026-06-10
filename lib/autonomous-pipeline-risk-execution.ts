@@ -5,6 +5,7 @@ import {
   dispatchAutonomyDecision,
   evaluateAutonomyExecutionChecklist,
   resolveConnectedTerminalId,
+  resolveExecutableAutonomyDecision,
 } from './autonomy-execution-adapter';
 import { getAutonomyConfig } from './autonomy-store';
 import { resolveExecutionAccountContext } from './execution-account-context';
@@ -116,16 +117,21 @@ export async function advancePipelineRiskGate(
     );
     const row = existing.rows[0];
     const allowed = Boolean(row?.allowed);
-    return {
-      status: allowed ? 'completed' : 'blocked',
-      detail: String(row?.message ?? 'Risk evaluation already recorded.'),
-      metrics: {
-        decisionLogId: decision.decisionLogId,
-        allowed,
-        code: String(row?.code ?? ''),
-        decision: decision.decision,
-      },
-    };
+    const code = String(row?.code ?? '');
+    if (!allowed && code === 'consecutive_loss_limit') {
+      await queryPostgres('DELETE FROM risk_decisions WHERE intent_id = $1', [decision.decisionLogId]);
+    } else {
+      return {
+        status: allowed ? 'completed' : 'blocked',
+        detail: String(row?.message ?? 'Risk evaluation already recorded.'),
+        metrics: {
+          decisionLogId: decision.decisionLogId,
+          allowed,
+          code,
+          decision: decision.decision,
+        },
+      };
+    }
   }
 
   const account = await resolveExecutionAccountContext(terminalId);
@@ -137,17 +143,24 @@ export async function advancePipelineRiskGate(
     };
   }
 
+  const { decision: executableDecision, stopTargets } = await resolveExecutableAutonomyDecision(decision);
   const sized = resolveAutonomousVolumeLots({
-    decision,
+    decision: executableDecision,
     account,
+    entryPrice: stopTargets?.entryPrice,
   });
 
   const evaluation = await evaluateExecutionRiskGate({
     terminalId,
     intentId: decision.decisionLogId,
     commandId: `pipeline-risk-${decision.decisionLogId.slice(0, 8)}`,
-    symbol: decision.symbol,
+    symbol: executableDecision.symbol,
+    side: executableDecision.decision,
+    entryPrice: stopTargets?.entryPrice,
     requestedLots: sized.lots,
+    stopLoss: stopTargets?.stopLoss ?? 0,
+    takeProfit: stopTargets?.takeProfit ?? 0,
+    rewardRiskRatio: stopTargets?.rewardRiskRatio,
     sandboxMode: account.sandboxMode,
     environment: account.environment,
   });

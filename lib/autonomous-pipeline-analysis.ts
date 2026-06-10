@@ -6,6 +6,7 @@ import {
   shouldRefreshPipelineInterpretation,
   shouldRefreshPipelineMtf,
 } from './autonomy-pipeline-throttle';
+import { isContinuousTradingEnabled } from './execution-risk-limits';
 import { resolveExecutionAccountContext } from './execution-account-context';
 import { ensureCaptureAnalysesForSymbol } from './capture-analysis-bootstrap';
 import { advanceMacroIntelligence } from './macro-intelligence-store';
@@ -82,8 +83,17 @@ export async function advancePipelineAnalysis(symbol: string): Promise<PipelineA
     errors: [],
   };
 
-  if (!(await hasFullCaptureCoverage(normalized))) {
+  const fullCoverage = await hasFullCaptureCoverage(normalized);
+  if (!fullCoverage && !isContinuousTradingEnabled()) {
     return summary;
+  }
+  if (!fullCoverage) {
+    try {
+      await ensureCaptureAnalysesForSymbol(normalized);
+    } catch (error) {
+      summary.errors.push(error instanceof Error ? error.message : 'Partial capture bootstrap failed.');
+      return summary;
+    }
   }
 
   const session = await getLatestPipelineSession(normalized);

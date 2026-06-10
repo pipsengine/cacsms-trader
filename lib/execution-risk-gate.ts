@@ -10,7 +10,10 @@ import {
   resolveLiveOpenPositionCount,
 } from '@/lib/execution-risk-limits';
 import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
+import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
 import { queryPostgres } from '@/lib/postgres';
+import { hasValidStopTargets, isStopLossRequired } from '@/lib/autonomous-stop-targets';
+import { findCorrelatedOpenSymbol } from '@/lib/symbol-correlation';
 
 export class ExecutionRiskBlockedError extends Error {
   readonly decision: RiskDecision;
@@ -34,6 +37,8 @@ export type ExecutionRiskGateInput = {
   commandId?: string;
   intentId?: string;
   symbol?: string;
+  side?: string;
+  entryPrice?: number;
   requestedLots: number;
   rewardRiskRatio?: number;
   stopLoss?: number;
@@ -79,7 +84,7 @@ function resolveRewardRiskRatio(input: ExecutionRiskGateInput, rules: PropFirmRi
     return Number((takeProfit / stopLoss).toFixed(4));
   }
 
-  if (input.sandboxMode && stopLoss === 0 && takeProfit === 0) {
+  if (!isStopLossRequired() && input.sandboxMode && stopLoss === 0 && takeProfit === 0) {
     return rules.minRewardRiskRatio;
   }
 
@@ -169,30 +174,34 @@ async function loadRiskState(accountNumber: string): Promise<RiskState> {
 }
 
 async function countConsecutiveLosses(accountNumber: string): Promise<number> {
-  const result = await queryPostgres(
+  const closedTrades = await queryPostgres(
     `
-      SELECT c.lifecycle_state, c.ack_status
-      FROM execution_commands c
-      JOIN mt5_terminals t ON t.terminal_id = c.terminal_id
+      SELECT p.profit_loss
+      FROM execution_open_positions p
+      JOIN mt5_terminals t ON t.terminal_id = p.terminal_id
       WHERE t.account_number = $1
-        AND upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
-        AND c.lifecycle_state IN ('EXECUTED', 'FAILED', 'TIMEOUT', 'CANCELLED')
-      ORDER BY c.created_at DESC
+        AND p.status = 'closed'
+        AND p.closed_at IS NOT NULL
+      ORDER BY p.closed_at DESC
       LIMIT 10
     `,
     [accountNumber],
   );
 
-  let losses = 0;
-  for (const row of result.rows as Array<{ lifecycle_state?: string; ack_status?: string }>) {
-    const lifecycle = String(row.lifecycle_state ?? '').toUpperCase();
-    const ack = String(row.ack_status ?? '').toLowerCase();
-    const isFailedPlacement =
-      lifecycle === 'FAILED' || lifecycle === 'TIMEOUT' || lifecycle === 'CANCELLED' || ack === 'failed' || ack === 'rejected';
-    if (!isFailedPlacement) break;
-    losses += 1;
+  if (closedTrades.rows.length > 0) {
+    let losses = 0;
+    for (const row of closedTrades.rows as Array<{ profit_loss?: number }>) {
+      const pnl = Number(row.profit_loss ?? 0);
+      if (pnl < -0.01) {
+        losses += 1;
+        continue;
+      }
+      break;
+    }
+    return losses;
   }
-  return losses;
+
+  return 0;
 }
 
 async function persistRiskDecision(input: {
@@ -239,7 +248,13 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
   const tradesOpenedTodayForSymbol = symbol
     ? await countTradesOpenedTodayForSymbol(symbol, accountNumber)
     : 0;
-  const decision = evaluatePropFirmRisk({
+
+  const side = String(input.side ?? '').trim().toUpperCase();
+  const stopLoss = Number(input.stopLoss ?? 0);
+  const takeProfit = Number(input.takeProfit ?? 0);
+  const entryPrice = Number(input.entryPrice ?? 0);
+
+  const evaluateBaseRisk = () => evaluatePropFirmRisk({
     rules,
     state,
     requestedLots: input.requestedLots,
@@ -249,7 +264,45 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
     tradesPerSymbolPerDay: isSymbolBasedTradeLimitEnabled() ? limits.tradesPerSymbolPerDay : undefined,
     maxOpenTradesOverride: limits.maxOpenPositions,
     maxTradesPerDayOverride: limits.maxTradesPerDay,
+    continuousTradingEnabled: limits.continuousTradingEnabled,
   });
+
+  let decision: RiskDecision;
+  if (symbol) {
+    const openSymbols = await getOpenPositionSymbols();
+    const correlatedWith = findCorrelatedOpenSymbol(symbol, openSymbols, { excludeSameSymbol: true });
+    if (correlatedWith) {
+      decision = {
+        allowed: false,
+        code: 'correlation_protection',
+        message: `${symbol} blocked — shares currency exposure with open ${correlatedWith}`,
+        remainingDailyLossAmount: 0,
+      };
+    } else if (isStopLossRequired() && stopLoss <= 0) {
+      decision = {
+        allowed: false,
+        code: 'stop_loss_required',
+        message: `${symbol} blocked — every trade must include a stop loss.`,
+        remainingDailyLossAmount: 0,
+      };
+    } else if (
+      isStopLossRequired()
+      && (side === 'BUY' || side === 'SELL')
+      && entryPrice > 0
+      && !hasValidStopTargets({ side, entryPrice, stopLoss, takeProfit })
+    ) {
+      decision = {
+        allowed: false,
+        code: 'invalid_stop_loss',
+        message: `${symbol} blocked — stop loss / take profit are invalid for ${side}.`,
+        remainingDailyLossAmount: 0,
+      };
+    } else {
+      decision = evaluateBaseRisk();
+    }
+  } else {
+    decision = evaluateBaseRisk();
+  }
 
   await persistRiskDecision({
     accountNumber,

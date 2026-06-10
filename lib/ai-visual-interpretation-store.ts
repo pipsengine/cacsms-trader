@@ -1,6 +1,8 @@
 import { randomUUID } from 'crypto';
 
+import { resolveCaptureDisplayUrl } from './capture-display';
 import { buildVisualInterpretation, defaultComponents, type AiVisualInterpretationResult, type InterpretationBias, type InterpretationComponentInput } from './ai-visual-interpretation-engine';
+import { getTopDownComparisonState } from './image-comparison-store';
 import { getCandleAnalysis } from './candle-detection-store';
 import { getChannelAnalysis } from './channel-detection-store';
 import { getLiquidityAnalysis } from './liquidity-zone-store';
@@ -12,8 +14,10 @@ import { getStructureAnalysis } from './structure-analysis-store';
 import { getSupportResistanceAnalysis } from './support-resistance-store';
 import { getSwingAnalysis } from './swing-point-store';
 import { getTrendlineAnalysis } from './trendline-detection-store';
-import { getCaptureAnalysis, publishVisualIntelligenceEvent } from './visual-intelligence-store';
-import type { ChartCaptureRecord, VisionDecision } from './visual-intelligence-types';
+import { getCaptureAnalysis, listCaptures, publishVisualIntelligenceEvent } from './visual-intelligence-store';
+import type { ChartCaptureRecord, ReconstructedCandle, VisionDecision } from './visual-intelligence-types';
+
+const TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
 
 type Row = Record<string, unknown>;
 
@@ -96,7 +100,8 @@ export async function analyzeAiVisualInterpretation(input: { captureId?: string;
   });
   await publishVisualIntelligenceEvent('interpretation.collecting.signals', capture.id, null, { captureId: capture.id });
 
-  const signals = await collectSignals(capture);
+  const bundle = await getCaptureAnalysis(capture.id);
+  const signals = await collectSignals(capture, bundle?.candles ?? []);
   await publishVisualIntelligenceEvent('interpretation.reasoning', capture.id, null, {
     components: signals.components.map((component) => ({ name: component.name, score: component.score, bias: component.bias })),
   });
@@ -105,7 +110,7 @@ export async function analyzeAiVisualInterpretation(input: { captureId?: string;
     captureId: capture.id,
     symbol: capture.symbol,
     timeframe: capture.timeframe,
-    imageUrl: capture.imageUrl,
+    imageUrl: resolveCaptureDisplayUrl(capture) ?? capture.imageUrl,
     components: signals.components,
   });
   const stored = await persistInterpretation(capture, result, signals.raw);
@@ -138,6 +143,37 @@ export async function getAiVisualInterpretation(captureId: string): Promise<Stor
   return result.rows[0] ? hydrateInterpretation(result.rows[0]) : null;
 }
 
+export async function getInterpretationReadiness(symbol: string) {
+  await ensureAiVisualInterpretationSchema();
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const captures = (await listCaptures(300)).filter((item) => item.symbol.toUpperCase() === normalizedSymbol);
+  const interpreted = await queryPostgres(`
+    SELECT upper(timeframe) AS timeframe, COUNT(*)::int AS interpretation_count, MAX(created_at) AS latest_at
+    FROM ai_visual_interpretations
+    WHERE upper(symbol) = $1
+    GROUP BY upper(timeframe)
+  `, [normalizedSymbol]);
+  const interpretedByTf = new Map(interpreted.rows.map((row) => [String(row.timeframe), {
+    count: Number(row.interpretation_count),
+    latestAt: row.latest_at ? dateString(row.latest_at) : null,
+  }]));
+
+  return TOP_DOWN_TIMEFRAMES.map((timeframe) => {
+    const scoped = captures.filter((item) => item.timeframe.toUpperCase() === timeframe);
+    const latestCapture = scoped[0] ?? null;
+    const meta = interpretedByTf.get(timeframe);
+    return {
+      timeframe,
+      captureId: latestCapture?.id ?? null,
+      capturedAt: latestCapture?.capturedAt ?? null,
+      hasCapture: scoped.length > 0,
+      interpretationCount: meta?.count ?? 0,
+      latestInterpretationAt: meta?.latestAt ?? null,
+      readyForInterpretation: Boolean(latestCapture),
+    };
+  });
+}
+
 export async function getLatestAiVisualInterpretation(symbol: string, timeframe: string): Promise<StoredAiVisualInterpretation | null> {
   await ensureAiVisualInterpretationSchema();
   const result = await queryPostgres(`
@@ -159,7 +195,7 @@ export interface StoredAiVisualInterpretation extends AiVisualInterpretationResu
   updatedAt: string;
 }
 
-async function collectSignals(capture: ChartCaptureRecord): Promise<{ components: InterpretationComponentInput[]; raw: Record<string, unknown> }> {
+async function collectSignals(capture: ChartCaptureRecord, ohlc: ReconstructedCandle[]): Promise<{ components: InterpretationComponentInput[]; raw: Record<string, unknown> }> {
   const [
     candles,
     swings,
@@ -171,6 +207,7 @@ async function collectSignals(capture: ChartCaptureRecord): Promise<{ components
     liquidity,
     structure,
     multiTimeframe,
+    visualDelta,
   ] = await Promise.all([
     safeSignal(() => getCandleAnalysis(capture.id)),
     safeSignal(() => getSwingAnalysis(capture.id)),
@@ -182,19 +219,23 @@ async function collectSignals(capture: ChartCaptureRecord): Promise<{ components
     safeSignal(() => getLiquidityAnalysis(capture.id)),
     safeSignal(() => getStructureAnalysis(capture.id)),
     safeSignal(() => getSymbolMultiTimeframe(capture.symbol)),
+    safeSignal(() => getTopDownComparisonState(capture.symbol)),
   ]);
+
+  const structureSignal = structure ?? deriveStructureFromSwings(swings, ohlc);
+  const candleSignal = candles ?? deriveCandleComponentFromOhlc(ohlc);
 
   return {
     components: [
-      marketStructureComponent(structure),
+      marketStructureComponent(structureSignal),
       liquidityComponent(liquidity),
       orderBlockComponent(orderBlocks),
       supportResistanceComponent(supportResistance),
-      candleComponent(candles),
+      candleComponent(candleSignal),
       patternComponent(patterns, swings, trendlines, channels),
-      multiTimeframeComponent(multiTimeframe, capture.timeframe),
+      multiTimeframeComponent(multiTimeframe, visualDelta, capture.timeframe),
     ],
-    raw: { candles, swings, patterns, trendlines, channels, supportResistance, orderBlocks, liquidity, structure, multiTimeframe },
+    raw: { candles, swings, patterns, trendlines, channels, supportResistance, orderBlocks, liquidity, structure, multiTimeframe, visualDelta, ohlcCount: ohlc.length },
   };
 }
 
@@ -343,23 +384,94 @@ function patternComponent(
   };
 }
 
-function multiTimeframeComponent(signal: Awaited<ReturnType<typeof getSymbolMultiTimeframe>> | null, timeframe: string): InterpretationComponentInput {
+function multiTimeframeComponent(
+  signal: Awaited<ReturnType<typeof getSymbolMultiTimeframe>> | null,
+  visualDelta: Awaited<ReturnType<typeof getTopDownComparisonState>> | null,
+  timeframe: string,
+): InterpretationComponentInput {
   const snapshot = signal?.snapshots.find((item) => item.timeframe === timeframe);
-  const decision = snapshot?.decisionState ?? signal?.decision.finalDecision;
-  const score = snapshot?.aiConfidenceScore ?? signal?.decision.confidenceScore ?? 0;
+  const decision = visualDelta?.finalDecision ?? snapshot?.decisionState ?? signal?.decision.finalDecision;
+  const score = visualDelta?.confidence ?? snapshot?.aiConfidenceScore ?? signal?.decision.confidenceScore ?? 0;
+  const mtfNarrative = signal?.decision.marketNarrative ?? snapshot?.marketStructure ?? 'No multi-timeframe context is available yet.';
+  const deltaNarrative = visualDelta?.institutionalNarrative ?? '';
   return {
     name: 'Multi-timeframe alignment',
     weight: 0.1,
     bias: biasFromDecision(decision),
     score,
     confidence: score,
-    summary: signal?.decision.marketNarrative ?? snapshot?.marketStructure ?? 'No multi-timeframe context is available yet.',
+    summary: deltaNarrative || mtfNarrative,
     evidence: [
+      visualDelta?.finalDecision ? `Top-down visual delta decision: ${visualDelta.finalDecision}.` : '',
       signal?.decision.finalBias ? `Final MTF bias: ${signal.decision.finalBias}.` : '',
-      signal?.decision.controllingTimeframe ? `Controlling timeframe: ${signal.decision.controllingTimeframe}.` : '',
-      signal?.conflicts?.[0]?.description ?? '',
+      visualDelta?.controllingTimeframe ? `Visual controlling TF: ${visualDelta.controllingTimeframe}.` : signal?.decision.controllingTimeframe ? `Controlling timeframe: ${signal.decision.controllingTimeframe}.` : '',
+      visualDelta?.conflicts?.[0]?.description ?? signal?.conflicts?.[0]?.description ?? '',
     ].filter(Boolean),
   };
+}
+
+function deriveCandleComponentFromOhlc(candles: ReconstructedCandle[]): Awaited<ReturnType<typeof getCandleAnalysis>> | null {
+  if (candles.length < 8) return null;
+  const recent = candles.slice(-12);
+  const ranges = recent.map((item) => Math.max(0.000001, item.highPrice - item.lowPrice));
+  const bodies = recent.map((item) => Math.abs(item.closePrice - item.openPrice));
+  const momentum = average(recent.map((item) => (item.closePrice - item.openPrice) / Math.max(0.000001, item.highPrice - item.lowPrice)));
+  const displacement = Math.max(...bodies.slice(-4)) / Math.max(0.000001, average(ranges));
+  const bullishCount = recent.filter((item) => item.closePrice >= item.openPrice).length;
+  const dominantDirection = momentum > 0.06 ? 'bullish' : momentum < -0.06 ? 'bearish' : 'neutral';
+  const recommendedDecision = momentum > 0.14 ? 'BUY' : momentum < -0.14 ? 'SELL' : displacement > 1.35 ? 'WAIT' : 'WAIT';
+  return {
+    summary: {
+      recommendedDecision,
+      dominantType: displacement > 1.2 ? 'displacement' : bullishCount >= 8 ? 'bullish_sequence' : bullishCount <= 4 ? 'bearish_sequence' : 'mixed_sequence',
+      dominantDirection,
+      confidence: clamp(Math.abs(momentum) * 2.4 + Math.min(displacement, 1.5) * 0.22, 0.18, 0.82),
+      explanation: `OHLC momentum ${(momentum * 100).toFixed(1)}% with displacement ratio ${displacement.toFixed(2)} across ${recent.length} reconstructed candles.`,
+    },
+  } as Awaited<ReturnType<typeof getCandleAnalysis>>;
+}
+
+function deriveStructureFromSwings(
+  _swings: Awaited<ReturnType<typeof getSwingAnalysis>> | null,
+  candles: ReconstructedCandle[],
+): Awaited<ReturnType<typeof getStructureAnalysis>> | null {
+  if (candles.length < 10) return null;
+  const highs = candles.map((item) => item.highPrice);
+  const lows = candles.map((item) => item.lowPrice);
+  const lastHigh = Math.max(...highs.slice(-6));
+  const prevHigh = Math.max(...highs.slice(-12, -6));
+  const lastLow = Math.min(...lows.slice(-6));
+  const prevLow = Math.min(...lows.slice(-12, -6));
+  const bullish = lastHigh > prevHigh && lastLow >= prevLow;
+  const bearish = lastLow < prevLow && lastHigh <= prevHigh;
+  const tradeDecision = bullish ? 'BUY' : bearish ? 'SELL' : 'WAIT';
+  return {
+    summary: {
+      tradeDecision,
+      confidence: 0.42,
+      explanation: bullish
+        ? 'Derived structure: higher highs with defended lows suggest bullish market structure.'
+        : bearish
+          ? 'Derived structure: lower lows with capped highs suggest bearish market structure.'
+          : 'Derived structure: swing geometry is unresolved; treat as ranging.',
+    },
+    output: {
+      tradeDecision,
+      confidenceScore: 0.42,
+      currentStructure: bullish ? 'bullish_structure' : bearish ? 'bearish_structure' : 'ranging_structure',
+      currentMarketPhase: 'derived_from_ohlc',
+      mssStatus: 'unconfirmed',
+      reasoningText: 'Fallback structure algorithm applied because persisted structure analysis is unavailable.',
+    },
+  } as Awaited<ReturnType<typeof getStructureAnalysis>>;
+}
+
+function average(values: number[]) {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min));
 }
 
 async function persistInterpretation(capture: ChartCaptureRecord, result: AiVisualInterpretationResult, raw: Record<string, unknown>): Promise<StoredAiVisualInterpretation> {
@@ -397,7 +509,13 @@ async function persistInterpretation(capture: ChartCaptureRecord, result: AiVisu
     result.higherTimeframeContext,
     result.rankedStructures,
     result.reasoningTimeline,
-    { raw, imageUrl: capture.imageUrl },
+    {
+      raw,
+      imageUrl: resolveCaptureDisplayUrl(capture) ?? capture.imageUrl,
+      algorithmStack: result.algorithmStack,
+      trapRiskScore: result.trapRiskScore,
+      signalEntropy: result.signalEntropy,
+    },
   ]);
 
   await queryPostgres('DELETE FROM ai_reasoning_components WHERE interpretation_id = $1', [id]);
@@ -444,7 +562,7 @@ async function hydrateInterpretation(row: Row): Promise<StoredAiVisualInterpreta
     captureId: String(row.chart_capture_id),
     symbol: String(row.symbol),
     timeframe: String(row.timeframe),
-    imageUrl: typeof metadata.imageUrl === 'string' ? metadata.imageUrl : null,
+    imageUrl: typeof metadata.imageUrl === 'string' ? resolveCaptureDisplayUrl({ imageUrl: metadata.imageUrl }) ?? metadata.imageUrl : null,
     title: String(row.title),
     fullExplanation: String(row.full_explanation),
     dominantBias: String(row.dominant_bias) as InterpretationBias,
@@ -474,6 +592,9 @@ async function hydrateInterpretation(row: Row): Promise<StoredAiVisualInterpreta
       evidence: readJson(component.evidence_json, []),
     })),
     decisionBreakdown: readJson(decisionBreakdown.rows[0]?.breakdown_json, {}),
+    trapRiskScore: Number(metadata.trapRiskScore ?? (readJson(decisionBreakdown.rows[0]?.breakdown_json, {}) as Record<string, unknown>).trapRiskScore ?? 0),
+    signalEntropy: Number(metadata.signalEntropy ?? (readJson(decisionBreakdown.rows[0]?.breakdown_json, {}) as Record<string, unknown>).signalEntropy ?? 0),
+    algorithmStack: Array.isArray(metadata.algorithmStack) ? metadata.algorithmStack as string[] : [],
     createdAt: dateString(row.created_at),
     updatedAt: dateString(row.updated_at),
   };

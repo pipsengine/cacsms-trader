@@ -16,8 +16,10 @@ import {
   LayoutDashboard,
   Menu,
   Network,
+  PlayCircle,
   RefreshCw,
   Radio,
+  Square,
   ShieldAlert,
   Target,
   TrendingUp,
@@ -111,6 +113,9 @@ type OverviewPayload = {
     }>;
   };
   risk: {
+    continuousTradingEnabled?: boolean;
+    remainingDailyLossAmount?: number;
+    propFirmSizingEquity?: number;
     dailyTradeLimitEnabled: boolean;
     maxTradesPerDay: number;
     tradesPerSymbolPerDay: number;
@@ -181,6 +186,21 @@ type OverviewPayload = {
     }>;
   };
   live: { tickSequence: number; tickAt: string };
+  continuousTrading: {
+    active: boolean;
+    startedAt: string | null;
+    stoppedAt: string | null;
+    minOpenPositions: number;
+    maxEntriesPerCycle: number;
+    targetDescription: string;
+    lastMaintenance: {
+      at: string | null;
+      trigger: string | null;
+      targets: string[];
+      dispatchesAttempted: number;
+      openCount: number | null;
+    } | null;
+  };
 };
 
 type DashboardTick = {
@@ -250,6 +270,9 @@ function createBootstrapOverviewFromTick(tick: DashboardTick): OverviewPayload {
       openPositionDetails: tick.trading.openPositionDetails,
     },
     risk: {
+      continuousTradingEnabled: true,
+      remainingDailyLossAmount: 0,
+      propFirmSizingEquity: 0,
       dailyTradeLimitEnabled: false,
       maxTradesPerDay: 0,
       tradesPerSymbolPerDay: 1,
@@ -284,6 +307,15 @@ function createBootstrapOverviewFromTick(tick: DashboardTick): OverviewPayload {
     recentActivity: [],
     propFirm: tick.propFirm,
     live: { tickSequence: tick.sequence, tickAt: tick.tickAt },
+    continuousTrading: {
+      active: false,
+      startedAt: null,
+      stoppedAt: null,
+      minOpenPositions: 1,
+      maxEntriesPerCycle: 3,
+      targetDescription: 'Press Start to begin institutional continuous trading.',
+      lastMaintenance: null,
+    },
   };
 }
 
@@ -298,6 +330,8 @@ export function CommandCenterDashboard() {
   const [tickSequence, setTickSequence] = useState(0);
   const [streamConnected, setStreamConnected] = useState(false);
   const [clockNow, setClockNow] = useState(() => new Date());
+  const [sessionBusy, setSessionBusy] = useState(false);
+  const [sessionMessage, setSessionMessage] = useState<string | null>(null);
 
   const applyTick = useCallback((tick: DashboardTick) => {
     setTickSequence(tick.sequence);
@@ -357,6 +391,28 @@ export function CommandCenterDashboard() {
       setRefreshing(false);
     }
   }, []);
+
+  const toggleContinuousTrading = useCallback(async (action: 'start' | 'stop') => {
+    setSessionBusy(true);
+    setSessionMessage(null);
+    try {
+      const response = await fetch('/api/command-center/continuous-trading', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) {
+        throw new Error(String(payload.error ?? `Unable to ${action} continuous trading.`));
+      }
+      setSessionMessage(String(payload.message ?? (action === 'start' ? 'Trading started.' : 'Trading stopped.')));
+      await loadOverview(true);
+    } catch (toggleError) {
+      setSessionMessage(toggleError instanceof Error ? toggleError.message : `Unable to ${action} continuous trading.`);
+    } finally {
+      setSessionBusy(false);
+    }
+  }, [loadOverview]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockNow(new Date()), 1000);
@@ -506,6 +562,36 @@ export function CommandCenterDashboard() {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              {overview?.continuousTrading.active ? (
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  disabled={sessionBusy}
+                  onClick={() => void toggleContinuousTrading('stop')}
+                >
+                  <Square className="mr-2 h-4 w-4" />
+                  {sessionBusy ? 'Stopping…' : 'Stop trading'}
+                </Button>
+              ) : (
+                <Button
+                  size="sm"
+                  className="bg-emerald-600 hover:bg-emerald-700"
+                  disabled={sessionBusy}
+                  onClick={() => void toggleContinuousTrading('start')}
+                >
+                  <PlayCircle className="mr-2 h-4 w-4" />
+                  {sessionBusy ? 'Starting…' : 'Start trading'}
+                </Button>
+              )}
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold',
+                  overview?.continuousTrading.active ? toneBadge('emerald') : toneBadge('slate'),
+                )}
+              >
+                <Activity className={cn('h-3 w-3', overview?.continuousTrading.active && 'animate-pulse')} />
+                {overview?.continuousTrading.active ? 'Session live' : 'Session stopped'}
+              </span>
               <span
                 className={cn(
                   'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold',
@@ -547,6 +633,68 @@ export function CommandCenterDashboard() {
             <p className="text-sm text-slate-600">Loading live trading snapshot…</p>
           ) : overview ? (
             <>
+              <section
+                className={cn(
+                  'mb-4 rounded-2xl border p-4 shadow-sm',
+                  toneCard(overview.continuousTrading.active ? 'emerald' : 'slate'),
+                )}
+              >
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <p className={cn('text-[11px] font-bold uppercase tracking-[0.18em]', toneMuted(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
+                      Institutional continuous trading
+                    </p>
+                    <p className={cn('text-lg font-semibold', toneTitle(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
+                      {overview.continuousTrading.active ? 'Session running' : 'Session stopped'}
+                    </p>
+                    <p className={cn('text-sm', toneBody(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
+                      {overview.continuousTrading.targetDescription}
+                    </p>
+                    {sessionMessage ? (
+                      <p className="mt-2 text-xs font-medium text-slate-700">{sessionMessage}</p>
+                    ) : null}
+                    <p className={cn('mt-2 text-xs', toneMuted(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
+                      Min open positions: {overview.continuousTrading.minOpenPositions}
+                      {' · '}
+                      Max entries/cycle: {overview.continuousTrading.maxEntriesPerCycle}
+                      {' · '}
+                      Open now: {overview.trading.openPositions}
+                      {' · '}
+                      Slots left: {overview.risk.remainingOpenPositions}
+                      {' · '}
+                      Daily budget left: ${overview.risk.remainingDailyLossAmount?.toFixed(2) ?? '—'}
+                    </p>
+                    {overview.continuousTrading.lastMaintenance?.at ? (
+                      <p className={cn('mt-1 text-xs', toneMuted(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
+                        Last refill: {overview.continuousTrading.lastMaintenance.dispatchesAttempted} dispatch(es)
+                        {overview.continuousTrading.lastMaintenance.targets.length > 0
+                          ? ` · ${overview.continuousTrading.lastMaintenance.targets.join(', ')}`
+                          : ''}
+                        {' · '}
+                        {formatRelativeTime(overview.continuousTrading.lastMaintenance.at, clockNow)}
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {overview.continuousTrading.active ? (
+                      <Button variant="destructive" disabled={sessionBusy} onClick={() => void toggleContinuousTrading('stop')}>
+                        <Square className="mr-2 h-4 w-4" />
+                        {sessionBusy ? 'Stopping…' : 'Stop trading'}
+                      </Button>
+                    ) : (
+                      <Button
+                        className="bg-emerald-600 hover:bg-emerald-700"
+                        disabled={sessionBusy}
+                        onClick={() => void toggleContinuousTrading('start')}
+                      >
+                        <PlayCircle className="mr-2 h-4 w-4" />
+                        {sessionBusy ? 'Starting…' : 'Start trading'}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </section>
+
               <section className={cn('mb-4 rounded-2xl border p-4 shadow-sm', toneCard(healthTone))}>
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div className="flex items-start gap-3">

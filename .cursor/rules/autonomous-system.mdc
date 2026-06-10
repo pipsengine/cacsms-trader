@@ -1,0 +1,24 @@
+---
+description: CACSMS is fully autonomous — no human input required for operation
+alwaysApply: true
+---
+
+# Autonomous System Principle
+
+CACSMS is a fully autonomous trading and analysis system. Human operators observe dashboards; they do not drive runtime behavior.
+
+## Implementation rules
+
+1. **No manual triggers in runtime paths** — Do not add Run, Scan, Execute, Resolve, Approve, or Submit buttons that gate trading or analysis. Dashboards are read-only monitors fed by pipeline, workers, and schedulers.
+
+2. **Pipeline-driven execution** — Pair selection, capture ingest, visual analysis, risk gates, and order dispatch must flow through `autonomous-pipeline`, `capture-analysis-bootstrap`, `autonomy-store` workers, or equivalent schedulers without user action.
+
+3. **Idempotent ensure-* helpers** — Analysis modules should expose `ensure*ForCapture` functions that only recompute when capture data is newer than the last persisted result (see `ensureVisualAnomalyForCapture`, `ensureCaptureDerivedAnalyses`).
+
+4. **Auto-supersede stale state** — When a new autonomous scan completes, supersede outdated alerts/decisions for the same symbol/timeframe rather than requiring manual resolution.
+
+5. **Dashboards follow pipeline context** — UI pages derive active symbol(s) and focus timeframe from `/api/autonomous-pipeline/status` (or pipeline store), not manual pickers.
+
+6. **APIs for observation, not control** — Prefer GET/stream endpoints for dashboards. POST analyze endpoints may exist for workers/bootstrap only; do not wire them to UI buttons.
+
+7. **Safe defaults** — When ambiguous, choose the path that keeps the system running unattended: retry, skip, throttle, or log — never block waiting for human input.

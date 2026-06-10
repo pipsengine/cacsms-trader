@@ -54,6 +54,8 @@ export interface PairSelectionResult {
   qualifiedSymbols: string[];
   openPositionSymbols: string[];
   dailyLimitReached: boolean;
+  continuousTradingEnabled: boolean;
+  dailyLimitReason: 'daily_drawdown' | 'daily_trades' | null;
   scanSummary: string;
   candidates: PairSelectionCandidate[];
   session: TradingSession;
@@ -125,19 +127,23 @@ export async function runAutonomousPairSelection(
     getOpenPositionSymbols(),
     getExecutionRiskSettings(),
   ]);
-  const dailyLimitReached = Boolean(
-    riskSettings.dailyTradeLimitEnabled && (riskSettings.remainingTradesToday ?? 0) <= 0,
-  );
+  const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
+  const sessionActive = await isContinuousTradingSessionActive();
+  const dailyLimitReached = riskSettings.continuousTradingEnabled
+    ? (riskSettings.remainingDailyLossAmount ?? 0) <= 0
+    : Boolean(riskSettings.dailyTradeLimitEnabled && (riskSettings.remainingTradesToday ?? 0) <= 0);
   const openPositionLimitReached = riskSettings.remainingOpenPositions <= 0;
-  const maxNewEntries = dailyLimitReached || openPositionLimitReached
+  const maxNewEntries = !sessionActive || dailyLimitReached || openPositionLimitReached
     ? 0
-    : riskSettings.dailyTradeLimitEnabled
-      ? Math.min(
-        resolved.maxSelectedSymbols,
-        riskSettings.remainingTradesToday ?? resolved.maxSelectedSymbols,
-        riskSettings.remainingOpenPositions,
-      )
-      : Math.min(resolved.maxSelectedSymbols, riskSettings.remainingOpenPositions);
+    : riskSettings.continuousTradingEnabled
+      ? Math.min(resolved.maxSelectedSymbols, riskSettings.remainingOpenPositions)
+      : riskSettings.dailyTradeLimitEnabled
+        ? Math.min(
+          resolved.maxSelectedSymbols,
+          riskSettings.remainingTradesToday ?? resolved.maxSelectedSymbols,
+          riskSettings.remainingOpenPositions,
+        )
+        : Math.min(resolved.maxSelectedSymbols, riskSettings.remainingOpenPositions);
 
   const ticks = buildTickSnapshots(watchlist, terminal, resolved.maxSpreadPoints);
   const macroScores = await loadPairMacroScores(watchlist);
@@ -178,11 +184,14 @@ export async function runAutonomousPairSelection(
       );
       const macroScore = macroScores[scan.symbol] ?? 50;
       const macroPenalty = macroScore < 35 ? -15 : macroScore > 65 ? 8 : 0;
+      const sessionBoost = session === 'overlap' ? 12 : session === 'london' || session === 'new_york' ? 8 : session === 'closed' ? 0 : 5;
+      const liquidityInstitutionalBoost = scan.liquidityScore >= 75 ? 5 : scan.liquidityScore >= 60 ? 2 : 0;
       const compositeScore = clampScore(
-        scan.setupScore * 0.45
-        + scan.liquidityScore * 0.3
-        + macroScore * 0.15
-        + (session === 'closed' ? 0 : 10)
+        scan.setupScore * 0.42
+        + scan.liquidityScore * 0.28
+        + macroScore * 0.18
+        + sessionBoost
+        + liquidityInstitutionalBoost
         + macroPenalty,
       );
       const liquidityQualified = scan.liquidityScore >= 45 && tradableTelemetry && scan.session !== 'closed';
@@ -233,24 +242,6 @@ export async function runAutonomousPairSelection(
       continue;
     }
 
-    const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, openPositionSymbols);
-    if (correlatedWith) {
-      candidate.blocked = true;
-      candidate.blockReason = `Correlated with open ${correlatedWith}`;
-      candidate.eligibleForNewEntry = false;
-      candidate.reasons.push(`Blocked: shares currency exposure with open ${correlatedWith}`);
-      await logPairSelectionEvent({
-        eventType: 'symbol_blocked_correlation',
-        symbol: candidate.symbol,
-        selected: false,
-        message: `${candidate.symbol} blocked — correlated with open ${correlatedWith}`,
-        reasons: candidate.reasons.slice(-3),
-        metadata: { correlatedWith, compositeScore: candidate.compositeScore },
-        selectionId,
-      });
-      continue;
-    }
-
     if (openPositionSymbols.includes(candidate.symbol)) {
       candidate.eligibleForNewEntry = false;
       candidate.reasons.push('Open position already active — monitoring only, not a new entry target');
@@ -266,9 +257,32 @@ export async function runAutonomousPairSelection(
       continue;
     }
 
+    const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, openPositionSymbols, { excludeSameSymbol: true });
+    if (correlatedWith) {
+      candidate.blocked = true;
+      candidate.blockReason = `Correlated with open ${correlatedWith}`;
+      candidate.eligibleForNewEntry = false;
+      candidate.reasons.push(
+        riskSettings.continuousTradingEnabled
+          ? `Blocked: same institutional cluster as open ${correlatedWith}`
+          : `Blocked: shares currency exposure with open ${correlatedWith}`,
+      );
+      await logPairSelectionEvent({
+        eventType: 'symbol_blocked_correlation',
+        symbol: candidate.symbol,
+        selected: false,
+        message: `${candidate.symbol} blocked — correlated with open ${correlatedWith}`,
+        reasons: candidate.reasons.slice(-3),
+        metadata: { correlatedWith, compositeScore: candidate.compositeScore },
+        selectionId,
+      });
+      continue;
+    }
+
     const symbolTradesToday = await countTradesOpenedTodayForSymbol(candidate.symbol);
     if (
-      riskSettings.dailyTradeLimitEnabled
+      !riskSettings.continuousTradingEnabled
+      && riskSettings.dailyTradeLimitEnabled
       && riskSettings.symbolBasedTradeLimit
       && symbolTradesToday >= riskSettings.tradesPerSymbolPerDay
     ) {
@@ -290,27 +304,71 @@ export async function runAutonomousPairSelection(
 
     if (dailyLimitReached) {
       candidate.blocked = true;
-      candidate.blockReason = 'Daily trade limit reached';
+      candidate.blockReason = riskSettings.continuousTradingEnabled
+        ? 'Daily drawdown limit reached'
+        : 'Daily trade limit reached';
       candidate.eligibleForNewEntry = false;
-      candidate.reasons.push(`Blocked: daily trade limit reached (${riskSettings.tradesOpenedToday}/${riskSettings.maxTradesPerDay})`);
+      candidate.reasons.push(
+        riskSettings.continuousTradingEnabled
+          ? 'Blocked: daily drawdown budget exhausted'
+          : `Blocked: daily trade limit reached (${riskSettings.tradesOpenedToday}/${riskSettings.maxTradesPerDay})`,
+      );
       await logPairSelectionEvent({
         eventType: 'symbol_blocked_limit',
         symbol: candidate.symbol,
         selected: false,
-        message: `${candidate.symbol} blocked — daily trade limit reached`,
+        message: riskSettings.continuousTradingEnabled
+          ? `${candidate.symbol} blocked — daily drawdown limit reached`
+          : `${candidate.symbol} blocked — daily trade limit reached`,
         reasons: candidate.reasons.slice(-3),
-        metadata: { tradesOpenedToday: riskSettings.tradesOpenedToday, maxTradesPerDay: riskSettings.maxTradesPerDay },
+        metadata: riskSettings.continuousTradingEnabled
+          ? { remainingDailyLossAmount: riskSettings.remainingDailyLossAmount }
+          : { tradesOpenedToday: riskSettings.tradesOpenedToday, maxTradesPerDay: riskSettings.maxTradesPerDay },
         selectionId,
       });
       continue;
     }
   }
 
-  const qualifiedSymbolsList = candidates
+  const exposureSymbols = [...openPositionSymbols];
+  const qualifiedSymbolsList: string[] = [];
+  const newOrderTargets: PairSelectionCandidate[] = [];
+  const rankedTradable = candidates
     .filter((candidate) => candidate.tradable && !candidate.blocked)
-    .map((candidate) => candidate.symbol);
-  const eligibleForEntry = candidates.filter((candidate) => candidate.eligibleForNewEntry);
-  const newOrderTargets = eligibleForEntry.slice(0, Math.max(0, maxNewEntries));
+    .sort((a, b) => a.rank - b.rank);
+
+  for (const candidate of rankedTradable) {
+    if (openPositionSymbols.includes(candidate.symbol)) {
+      qualifiedSymbolsList.push(candidate.symbol);
+      continue;
+    }
+
+    const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, exposureSymbols, { excludeSameSymbol: true });
+    if (correlatedWith) {
+      if (candidate.eligibleForNewEntry) {
+        candidate.blocked = true;
+        candidate.blockReason = `Correlated with ${correlatedWith}`;
+        candidate.eligibleForNewEntry = false;
+        candidate.reasons.push(`Blocked: shares currency exposure with ${correlatedWith}`);
+        await logPairSelectionEvent({
+          eventType: 'symbol_blocked_correlation',
+          symbol: candidate.symbol,
+          selected: false,
+          message: `${candidate.symbol} blocked — correlated with ${correlatedWith}`,
+          reasons: candidate.reasons.slice(-3),
+          metadata: { correlatedWith, compositeScore: candidate.compositeScore, batch: true },
+          selectionId,
+        });
+      }
+      continue;
+    }
+
+    qualifiedSymbolsList.push(candidate.symbol);
+    exposureSymbols.push(candidate.symbol);
+    if (candidate.eligibleForNewEntry && newOrderTargets.length < maxNewEntries) {
+      newOrderTargets.push(candidate);
+    }
+  }
   const fallback = watchlist[0] ?? 'XAUUSD';
   const eligibleSymbolsList = newOrderTargets.map((item) => item.symbol);
   const selectedSymbols = [...new Set([...qualifiedSymbolsList, ...openPositionSymbols])];
@@ -353,6 +411,10 @@ export async function runAutonomousPairSelection(
     qualifiedSymbols: qualifiedSymbolsList,
     openPositionSymbols,
     dailyLimitReached,
+    continuousTradingEnabled: riskSettings.continuousTradingEnabled,
+    dailyLimitReason: dailyLimitReached
+      ? (riskSettings.continuousTradingEnabled ? 'daily_drawdown' : 'daily_trades')
+      : null,
     scanSummary,
     candidates,
     session,
@@ -411,6 +473,8 @@ export async function getLatestPairSelection(): Promise<PairSelectionResult | nu
       : candidates.filter((candidate) => candidate.tradable && !candidate.blocked).map((candidate) => candidate.symbol),
     openPositionSymbols: metadata.openPositionSymbols,
     dailyLimitReached: metadata.dailyLimitReached,
+    continuousTradingEnabled: metadata.continuousTradingEnabled,
+    dailyLimitReason: metadata.dailyLimitReason,
     scanSummary: metadata.scanSummary ?? `Latest scan: ${selectedSymbols.join(', ')}`,
     candidates,
     session: String(row.session ?? 'closed') as TradingSession,
@@ -441,6 +505,8 @@ export async function persistPairSelection(result: PairSelectionResult) {
         qualifiedSymbols: result.qualifiedSymbols,
         openPositionSymbols: result.openPositionSymbols,
         dailyLimitReached: result.dailyLimitReached,
+        continuousTradingEnabled: result.continuousTradingEnabled,
+        dailyLimitReason: result.dailyLimitReason,
       }),
     ],
   );
@@ -454,15 +520,27 @@ function parseSelectionMetadata(raw: unknown) {
       qualifiedSymbols: [] as string[],
       openPositionSymbols: [] as string[],
       dailyLimitReached: false,
+      continuousTradingEnabled: false,
+      dailyLimitReason: null as 'daily_drawdown' | 'daily_trades' | null,
     };
   }
   const meta = raw as Record<string, unknown>;
+  const dailyLimitReached = Boolean(meta.dailyLimitReached);
+  const continuousTradingEnabled = Boolean(meta.continuousTradingEnabled);
+  const dailyLimitReason: PairSelectionResult['dailyLimitReason'] =
+    meta.dailyLimitReason === 'daily_drawdown' || meta.dailyLimitReason === 'daily_trades'
+      ? meta.dailyLimitReason
+      : dailyLimitReached
+        ? (continuousTradingEnabled ? 'daily_drawdown' : 'daily_trades')
+        : null;
   return {
     scanSummary: meta.scanSummary ? String(meta.scanSummary) : null,
     eligibleSymbols: Array.isArray(meta.eligibleSymbols) ? meta.eligibleSymbols.map(String) : [],
     qualifiedSymbols: Array.isArray(meta.qualifiedSymbols) ? meta.qualifiedSymbols.map(String) : [],
     openPositionSymbols: Array.isArray(meta.openPositionSymbols) ? meta.openPositionSymbols.map(String) : [],
-    dailyLimitReached: Boolean(meta.dailyLimitReached),
+    dailyLimitReached,
+    continuousTradingEnabled,
+    dailyLimitReason,
   };
 }
 

@@ -15,11 +15,40 @@ import { getStructureAnalysis } from './structure-analysis-store';
 import { getSupportResistanceAnalysis } from './support-resistance-store';
 import { resolveLatestCaptureId } from './capture-analysis-bootstrap';
 import { resolveExecutionAccountContext } from './execution-account-context';
-import { publishVisualIntelligenceEvent } from './visual-intelligence-store';
+import { listCaptures, publishVisualIntelligenceEvent } from './visual-intelligence-store';
 
 type Row = Record<string, unknown>;
 
 const fixedTimeframes = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+
+export const MARKET_INTERPRETATION_TIMEFRAMES = fixedTimeframes;
+export type MarketInterpretationTimeframe = (typeof fixedTimeframes)[number];
+export const MARKET_INTERPRETATION_SIGNAL_TIMEFRAME: MarketInterpretationTimeframe = 'M15';
+
+export interface MarketInterpretationTimeframeReadiness {
+  timeframe: MarketInterpretationTimeframe;
+  captureId: string | null;
+  capturedAt: string | null;
+  candleCount: number;
+  hasCapture: boolean;
+  hasMtfSnapshot: boolean;
+  hasAiInterpretation: boolean;
+  hasAnomalyScan: boolean;
+  hasSegmentation: boolean;
+  readyForFusion: boolean;
+}
+
+export interface MarketInterpretationReadiness {
+  symbol: string;
+  signalTimeframe: MarketInterpretationTimeframe;
+  interpretationCount: number;
+  latestInterpretationAt: string | null;
+  finalDecision: string | null;
+  setupReadinessScore: number;
+  confidenceScore: number;
+  dominantTimeframe: string | null;
+  timeframes: MarketInterpretationTimeframeReadiness[];
+}
 
 const schemaSql = `
 CREATE TABLE IF NOT EXISTS visual_market_interpretation_jobs (
@@ -187,6 +216,68 @@ export async function getLatestVisualMarketInterpretation(symbol: string, timefr
 
 export async function getFinalDecision(symbol: string): Promise<StoredVisualMarketInterpretation | null> {
   return getLatestVisualMarketInterpretation(symbol);
+}
+
+export async function getMarketInterpretationReadiness(symbol: string): Promise<MarketInterpretationReadiness> {
+  await ensureVisualMarketInterpretationSchema();
+  const normalized = symbol.trim().toUpperCase();
+  const captures = (await listCaptures(400)).filter((item) => item.symbol.toUpperCase() === normalized);
+  const latestInterpretation = await getLatestVisualMarketInterpretation(normalized, MARKET_INTERPRETATION_SIGNAL_TIMEFRAME)
+    ?? await getLatestVisualMarketInterpretation(normalized);
+
+  const mtf = await safe(() => getSymbolMultiTimeframe(normalized));
+  const mtfSnapshots = new Map((mtf?.snapshots ?? []).map((item) => [item.timeframe.toUpperCase(), item]));
+
+  const timeframes: MarketInterpretationTimeframeReadiness[] = [];
+  for (const timeframe of fixedTimeframes) {
+    const scoped = captures.filter((item) => item.timeframe.toUpperCase() === timeframe);
+    const latestCapture = scoped[0] ?? null;
+    let candleCount = 0;
+    if (latestCapture) {
+      const candleResult = await queryPostgres(
+        'SELECT COUNT(*)::int AS count FROM reconstructed_candles WHERE chart_capture_id = $1',
+        [latestCapture.id],
+      );
+      candleCount = Number(candleResult.rows[0]?.count ?? 0);
+    }
+
+    const [ai, anomaly, segmentation] = await Promise.all([
+      safe(() => getLatestAiVisualInterpretation(normalized, timeframe)),
+      safe(() => getLatestVisualAnomaly(normalized, timeframe)),
+      safe(() => getLatestChartSegmentation(normalized, timeframe)),
+    ]);
+    const snapshot = mtfSnapshots.get(timeframe);
+    const hasMtfSnapshot = Boolean(snapshot && snapshot.aiConfidenceScore > 0 && snapshot.marketStructure !== 'no_backend_chart_data');
+    const hasAiInterpretation = Boolean(ai);
+    const hasAnomalyScan = Boolean(anomaly);
+    const hasSegmentation = Boolean(segmentation?.segments.length);
+    const readyForFusion = candleCount >= 5 && (hasMtfSnapshot || hasAiInterpretation || hasSegmentation);
+
+    timeframes.push({
+      timeframe,
+      captureId: latestCapture?.id ?? null,
+      capturedAt: latestCapture?.capturedAt ?? null,
+      candleCount,
+      hasCapture: Boolean(latestCapture),
+      hasMtfSnapshot,
+      hasAiInterpretation,
+      hasAnomalyScan,
+      hasSegmentation,
+      readyForFusion,
+    });
+  }
+
+  return {
+    symbol: normalized,
+    signalTimeframe: MARKET_INTERPRETATION_SIGNAL_TIMEFRAME,
+    interpretationCount: latestInterpretation ? 1 : 0,
+    latestInterpretationAt: latestInterpretation?.createdAt ?? null,
+    finalDecision: latestInterpretation?.finalDecision ?? null,
+    setupReadinessScore: latestInterpretation?.setupReadinessScore ?? 0,
+    confidenceScore: latestInterpretation?.confidenceScore ?? 0,
+    dominantTimeframe: latestInterpretation?.dominantTimeframe ?? null,
+    timeframes,
+  };
 }
 
 async function collectOutputs(symbol: string, timeframe: string): Promise<{ signals: FusionSignal[]; timeframeStates: VisualMarketInterpretationResult['timeframeStates']; raw: Record<string, unknown> }> {

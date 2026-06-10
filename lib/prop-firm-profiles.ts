@@ -1,4 +1,5 @@
 import { evaluatePropFirmRisk, getRemainingDailyLossAmount, getTotalDrawdownPercent } from '@/packages/risk-core';
+import { isContinuousTradingEnabled } from './execution-risk-limits';
 import type { PropFirmRiskRules, RiskState } from '@/packages/shared-types';
 import { queryPostgres } from './postgres';
 
@@ -189,6 +190,7 @@ export async function buildFundedNextCompliance(input: {
     state,
     requestedLots: 0.01,
     rewardRiskRatio: 2,
+    continuousTradingEnabled: isContinuousTradingEnabled(),
   });
 
   const remainingDailyLossAmount = getRemainingDailyLossAmount(rulesConfig, state);

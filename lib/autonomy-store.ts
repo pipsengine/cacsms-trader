@@ -242,6 +242,7 @@ const defaultConfig: AutonomyConfig = {
 let schemaReady: Promise<void> | null = null;
 let runtimeStarted = false;
 let runtimeTimer: ReturnType<typeof setInterval> | null = null;
+let lastPipelineAdvanceAt = 0;
 
 export async function ensureAutonomySchema() {
   if (!schemaReady) {
@@ -424,6 +425,8 @@ export async function resumeAutonomy() {
 }
 
 async function runAutonomyTick(triggerSource: string) {
+  const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
+  if (!(await isContinuousTradingSessionActive())) return;
   if ((await isEmergencyStopped())) return;
   const config = await getAutonomyConfig();
   const cycleId = randomUUID();
@@ -453,6 +456,34 @@ async function runAutonomyTick(triggerSource: string) {
   await queryPostgres('UPDATE autonomous_scan_cycles SET status = $2, completed_at = now(), summary_json = $3::jsonb WHERE id = $1', [cycleId, 'completed', JSON.stringify({ jobsCreated: created.length })]);
   await publishAutonomyEvent('autonomy.scan.completed', { cycleId, jobsCreated: created.length });
   await updateHealthSummary();
+  await maybeAdvanceAutonomousPipeline(triggerSource);
+}
+
+function pipelineAdvanceIntervalMs(): number {
+  const raw = String(process.env.CACSMS_PIPELINE_ADVANCE_SECONDS ?? '60').trim();
+  const seconds = Number(raw);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 60_000;
+}
+
+async function maybeAdvanceAutonomousPipeline(triggerSource: string) {
+  const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
+  if (!(await isContinuousTradingSessionActive())) return;
+  const intervalMs = pipelineAdvanceIntervalMs();
+  if (Date.now() - lastPipelineAdvanceAt < intervalMs) return;
+  lastPipelineAdvanceAt = Date.now();
+  try {
+    const { advanceAutonomousPipeline } = await import('./autonomous-pipeline-store');
+    const result = await advanceAutonomousPipeline('AUTO');
+    await publishAutonomyEvent('autonomy.pipeline.advanced', {
+      triggerSource,
+      symbols: result.symbols,
+    });
+    const { maintainInstitutionalPositions } = await import('./institutional-position-maintenance');
+    const maintenance = await maintainInstitutionalPositions(triggerSource);
+    await publishAutonomyEvent('autonomy.position.maintenance', maintenance);
+  } catch {
+    // pipeline advance retries on the next scheduler tick
+  }
 }
 
 async function executeAutonomyJob(jobId: string) {
@@ -526,7 +557,7 @@ async function runWorker(workerName: AutonomyWorkerName, symbol: string | null, 
 export async function generateAutonomousSignal(symbol: string, timeframe: string) {
   const account = await resolveExecutionAccountContext();
   const visual = await getLatestVisualMarketInterpretation(symbol, timeframe) ?? await analyzeVisualMarketInterpretation({ symbol, timeframe });
-  const decision = buildAutonomousDecision({
+  let decision = buildAutonomousDecision({
     symbol,
     timeframe,
     accountClass: account?.accountClass ?? 'demo',
@@ -535,6 +566,10 @@ export async function generateAutonomousSignal(symbol: string, timeframe: string
     macro: await loadMacroContext(symbol),
     execution: await loadExecutionContext(symbol, timeframe),
   });
+  if (['BUY', 'SELL'].includes(decision.decision)) {
+    const { resolveExecutableAutonomyDecision } = await import('@/lib/autonomy-execution-adapter');
+    decision = (await resolveExecutableAutonomyDecision(decision)).decision;
+  }
   const decisionId = randomUUID();
   await queryPostgres(`
     INSERT INTO autonomous_decision_logs (
@@ -600,8 +635,9 @@ async function selectAutonomousPairs() {
     pairSelectionEnabled: config.pairSelectionEnabled,
     maxSelectedSymbols: config.maxSelectedSymbols,
   });
-  await saveAutonomyConfig({ activeSymbols: selection.selectedSymbols });
-  await syncAutonomySymbolSchedules({ ...(await readAutonomyConfigRow()), activeSymbols: selection.selectedSymbols });
+  const fullWatchlist = config.watchlistSymbols.length > 0 ? config.watchlistSymbols : [...SYSTEM_FOCUS_SYMBOLS];
+  await saveAutonomyConfig({ activeSymbols: fullWatchlist });
+  await syncAutonomySymbolSchedules({ ...(await readAutonomyConfigRow()), activeSymbols: fullWatchlist });
   await publishAutonomyEvent('autonomy.pair.selected', {
     selectedSymbol: selection.selectedSymbol,
     selectedSymbols: selection.selectedSymbols,
@@ -802,7 +838,16 @@ export async function getAutonomyConfig(): Promise<AutonomyConfig> {
   await ensureAutonomySchema();
   const base = await readAutonomyConfigRow();
   const account = await resolveExecutionAccountContext();
-  return applyAutonomyAccountProfile(base, account?.accountClass ?? 'demo');
+  let config = applyAutonomyAccountProfile(base, account?.accountClass ?? 'demo');
+  const { isContinuousTradingEnabled } = await import('./execution-risk-limits');
+  if (isContinuousTradingEnabled()) {
+    config = {
+      ...config,
+      mode: 'full_auto',
+      tradeExecutionMode: 'full_auto',
+    };
+  }
+  return config;
 }
 
 async function saveAutonomyConfig(patch: Partial<AutonomyConfig>) {

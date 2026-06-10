@@ -2,8 +2,24 @@ import { randomUUID } from 'crypto';
 
 import { analyzeVisualAnomalies, type AnomalyAction, type AnomalySeverity, type VisualAnomalyAnalysisResult } from './visual-anomaly-detection-engine';
 import { queryPostgres } from './postgres';
-import { getCaptureAnalysis, publishVisualIntelligenceEvent } from './visual-intelligence-store';
+import { getCaptureAnalysis, listCaptures, publishVisualIntelligenceEvent } from './visual-intelligence-store';
 import type { ChartCaptureRecord, ReconstructedCandle } from './visual-intelligence-types';
+
+export const ANOMALY_TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+export type AnomalyTopDownTimeframe = (typeof ANOMALY_TOP_DOWN_TIMEFRAMES)[number];
+
+export interface AnomalyTimeframeReadiness {
+  timeframe: AnomalyTopDownTimeframe;
+  captureId: string | null;
+  capturedAt: string | null;
+  candleCount: number;
+  hasCapture: boolean;
+  scanCount: number;
+  latestScanAt: string | null;
+  latestSeverity: AnomalySeverity | null;
+  openAnomalyCount: number;
+  readyForScan: boolean;
+}
 
 type Row = Record<string, unknown>;
 
@@ -140,11 +156,136 @@ export interface StoredVisualAnomalyReport {
   anomalies: StoredVisualAnomaly[];
 }
 
+export async function getAnomalyReadiness(symbol: string): Promise<AnomalyTimeframeReadiness[]> {
+  await ensureVisualAnomalySchema();
+  const normalizedSymbol = symbol.trim().toUpperCase();
+  const captures = (await listCaptures(300)).filter((item) => item.symbol.toUpperCase() === normalizedSymbol);
+
+  const scans = await queryPostgres(`
+    SELECT
+      upper(timeframe) AS timeframe,
+      COUNT(*)::int AS scan_count,
+      MAX(created_at) AS latest_scan_at
+    FROM visual_anomaly_jobs
+    WHERE upper(symbol) = $1 AND status = 'completed'
+    GROUP BY upper(timeframe)
+  `, [normalizedSymbol]);
+  const scansByTf = new Map(scans.rows.map((row) => [String(row.timeframe), {
+    scanCount: Number(row.scan_count),
+    latestScanAt: row.latest_scan_at ? dateString(row.latest_scan_at) : null,
+  }]));
+
+  const readiness: AnomalyTimeframeReadiness[] = [];
+  for (const timeframe of ANOMALY_TOP_DOWN_TIMEFRAMES) {
+    const scoped = captures.filter((item) => item.timeframe.toUpperCase() === timeframe);
+    const latestCapture = scoped[0] ?? null;
+    let candleCount = 0;
+    if (latestCapture) {
+      const candleResult = await queryPostgres(
+        'SELECT COUNT(*)::int AS count FROM reconstructed_candles WHERE chart_capture_id = $1',
+        [latestCapture.id],
+      );
+      candleCount = Number(candleResult.rows[0]?.count ?? 0);
+    }
+
+    const latestJob = await queryPostgres(`
+      SELECT j.id
+      FROM visual_anomaly_jobs j
+      WHERE upper(j.symbol) = $1 AND upper(j.timeframe) = $2 AND j.status = 'completed'
+      ORDER BY j.created_at DESC
+      LIMIT 1
+    `, [normalizedSymbol, timeframe]);
+    const jobId = latestJob.rows[0]?.id ? String(latestJob.rows[0].id) : null;
+
+    let latestSeverity: AnomalySeverity | null = null;
+    let openAnomalyCount = 0;
+    if (jobId) {
+      const [severityResult, openResult] = await Promise.all([
+        queryPostgres('SELECT overall_severity FROM anomaly_severity_scores WHERE anomaly_job_id = $1 ORDER BY created_at DESC LIMIT 1', [jobId]),
+        queryPostgres('SELECT COUNT(*)::int AS count FROM visual_anomalies WHERE anomaly_job_id = $1 AND resolved = false', [jobId]),
+      ]);
+      latestSeverity = severityResult.rows[0]?.overall_severity
+        ? String(severityResult.rows[0].overall_severity) as AnomalySeverity
+        : null;
+      openAnomalyCount = Number(openResult.rows[0]?.count ?? 0);
+    }
+
+    const scanMeta = scansByTf.get(timeframe);
+    readiness.push({
+      timeframe,
+      captureId: latestCapture?.id ?? null,
+      capturedAt: latestCapture?.capturedAt ?? null,
+      candleCount,
+      hasCapture: Boolean(latestCapture),
+      scanCount: scanMeta?.scanCount ?? 0,
+      latestScanAt: scanMeta?.latestScanAt ?? null,
+      latestSeverity,
+      openAnomalyCount,
+      readyForScan: candleCount >= 5,
+    });
+  }
+  return readiness;
+}
+
+async function shouldRefreshVisualAnomaly(captureId: string): Promise<boolean> {
+  const [captureResult, jobResult] = await Promise.all([
+    queryPostgres('SELECT captured_at FROM chart_captures WHERE id = $1 LIMIT 1', [captureId]),
+    queryPostgres(`
+      SELECT created_at
+      FROM visual_anomaly_jobs
+      WHERE chart_capture_id = $1 AND status = 'completed'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [captureId]),
+  ]);
+  if (!captureResult.rows[0]) return false;
+  if (!jobResult.rows[0]) return true;
+  const captureAt = new Date(String(captureResult.rows[0].captured_at)).getTime();
+  const jobAt = new Date(String(jobResult.rows[0].created_at)).getTime();
+  return captureAt > jobAt;
+}
+
+/** Idempotent autonomous entry — only scans when the capture is new or updated. */
+export async function ensureVisualAnomalyForCapture(input: {
+  captureId: string;
+  symbol: string;
+  timeframe: string;
+}): Promise<StoredVisualAnomalyReport | null> {
+  await ensureVisualAnomalySchema();
+  if (!(await shouldRefreshVisualAnomaly(input.captureId))) {
+    return getVisualAnomalyByCapture(input.captureId);
+  }
+  return analyzeVisualAnomaly(input);
+}
+
+export async function analyzeTopDownVisualAnomalies(symbol: string): Promise<StoredVisualAnomalyReport[]> {
+  const readiness = await getAnomalyReadiness(symbol);
+  const reports: StoredVisualAnomalyReport[] = [];
+  for (const item of readiness.filter((entry) => entry.readyForScan && entry.captureId)) {
+    try {
+      const report = await ensureVisualAnomalyForCapture({
+        captureId: item.captureId!,
+        symbol,
+        timeframe: item.timeframe,
+      });
+      if (report) reports.push(report);
+    } catch {
+      // Continue scanning remaining timeframes.
+    }
+  }
+  return reports;
+}
+
 export async function analyzeVisualAnomaly(input: { captureId?: string; symbol?: string; timeframe?: string }): Promise<StoredVisualAnomalyReport> {
   await ensureVisualAnomalySchema();
   const capture = input.captureId ? await loadCapture(input.captureId) : await findLatestCapture(input.symbol, input.timeframe);
   if (!capture) throw new Error('No chart capture found for visual anomaly detection.');
   const candles = await loadCandles(capture.id);
+  if (candles.length < 5) {
+    throw new Error(
+      `Insufficient candle data for ${capture.symbol} ${capture.timeframe} (${candles.length} reconstructed candles). Sync chart captures first.`,
+    );
+  }
   const jobId = randomUUID();
   const started = Date.now();
 
@@ -257,6 +398,15 @@ async function updateJob(id: string, status: string, progress: number, error: st
 }
 
 async function persistResult(jobId: string, capture: ChartCaptureRecord, result: VisualAnomalyAnalysisResult) {
+  await queryPostgres(`
+    UPDATE visual_anomalies
+    SET resolved = true, resolved_at = now()
+    WHERE upper(symbol) = $1
+      AND upper(affected_timeframe) = $2
+      AND resolved = false
+      AND anomaly_job_id <> $3
+  `, [capture.symbol.toUpperCase(), capture.timeframe.toUpperCase(), jobId]);
+
   for (const anomaly of result.anomalies) {
     await queryPostgres(`
       INSERT INTO visual_anomalies (

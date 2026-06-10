@@ -32,9 +32,12 @@ export interface AiVisualInterpretationResult {
   dominantStory: string;
   higherTimeframeContext: string;
   rankedStructures: Array<{ label: string; score: number; narrative: string }>;
-  reasoningTimeline: Array<{ stage: string; summary: string; score: number }>;
+  reasoningTimeline: Array<{ stage: string; summary: string; score: number; practitionerNote?: string }>;
   components: InterpretationComponentInput[];
   decisionBreakdown: Record<string, number | string | boolean>;
+  trapRiskScore: number;
+  signalEntropy: number;
+  algorithmStack: string[];
 }
 
 const weights = {
@@ -55,16 +58,21 @@ export function buildVisualInterpretation(input: {
   components: InterpretationComponentInput[];
 }): AiVisualInterpretationResult {
   const components = normalizeComponents(input.components);
-  const weighted = components.reduce((sum, component) => sum + component.score * component.weight, 0);
-  const confidenceScore = clamp(weighted * 100, 0, 100);
+  const activeComponents = components.filter((item) => item.confidence > 0.08);
+  const weighted = components.reduce((sum, component) => sum + component.score * component.confidence * component.weight, 0);
+  const weightSum = components.reduce((sum, component) => sum + component.weight, 0) || 1;
+  const confidenceScore = clamp((weighted / weightSum) * 100, 0, 100);
   const bullScore = directionalScore(components, 'bullish');
   const bearScore = directionalScore(components, 'bearish');
   const neutralScore = directionalScore(components, 'neutral') + directionalScore(components, 'mixed') * 0.5;
   const dominantBias = resolveBias(bullScore, bearScore, neutralScore);
+  const trapRiskScore = computeTrapRiskScore(components);
+  const signalEntropy = computeSignalEntropy(components);
+  const conflict = conflictPenalty(components);
   const institutionalBehavior = inferInstitutionalBehavior(components, dominantBias);
-  const decision = resolveDecision(dominantBias, confidenceScore, components);
-  const setupQualityScore = clamp((confidenceScore * 0.62) + (Math.abs(bullScore - bearScore) * 38), 0, 100);
-  const marketClarityScore = clamp((confidenceScore * 0.72) + (100 - conflictPenalty(components)), 0, 100);
+  const decision = resolveDecision(dominantBias, confidenceScore, components, trapRiskScore, signalEntropy);
+  const setupQualityScore = clamp((confidenceScore * 0.58) + (Math.abs(bullScore - bearScore) * 34) + ((100 - trapRiskScore) * 0.08), 0, 100);
+  const marketClarityScore = clamp((confidenceScore * 0.68) + (100 - conflict) + (100 - signalEntropy) * 0.12, 0, 100);
   const rankedStructures = components
     .flatMap((component) => component.evidence.map((item) => ({
       label: component.name,
@@ -119,18 +127,29 @@ export function buildVisualInterpretation(input: {
     dominantStory,
     higherTimeframeContext,
     rankedStructures,
-    reasoningTimeline: [
-      { stage: 'Signal collection', summary: `Loaded ${components.filter((item) => item.confidence > 0).length} visual-analysis components for this capture.`, score: Math.round(confidenceScore) },
-      { stage: 'Structure ranking', summary: strongest, score: rankedStructures[0]?.score ?? 0 },
-      { stage: 'Institutional read', summary: institutionalNarrative, score: Math.round((liquidity?.score ?? 0) * 100) },
-      { stage: 'Decision synthesis', summary: `${decision} selected from weighted bias, trap risk, and timeframe alignment.`, score: Math.round(setupQualityScore) },
-    ],
+    reasoningTimeline: buildReasoningTimeline({
+      symbol: input.symbol,
+      timeframe: input.timeframe,
+      components: activeComponents,
+      strongest,
+      institutionalNarrative,
+      decision,
+      confidenceScore,
+      setupQualityScore,
+      trapRiskScore,
+      signalEntropy,
+      rankedScore: rankedStructures[0]?.score ?? 0,
+      liquidityScore: Math.round((liquidity?.score ?? 0) * 100),
+    }),
     components,
     decisionBreakdown: {
       bullishScore: Math.round(bullScore * 100),
       bearishScore: Math.round(bearScore * 100),
       neutralScore: Math.round(neutralScore * 100),
-      conflictPenalty: Math.round(conflictPenalty(components)),
+      conflictPenalty: Math.round(conflict),
+      trapRiskScore: Math.round(trapRiskScore),
+      signalEntropy: Math.round(signalEntropy),
+      activeComponents: activeComponents.length,
       marketStructureWeight: weights.marketStructure,
       liquidityWeight: weights.liquidityContext,
       orderBlockWeight: weights.orderBlockQuality,
@@ -140,6 +159,15 @@ export function buildVisualInterpretation(input: {
       multiTimeframeWeight: weights.multiTimeframeAlignment,
       imageUrl: input.imageUrl ?? '',
     },
+    trapRiskScore: Math.round(trapRiskScore),
+    signalEntropy: Math.round(signalEntropy),
+    algorithmStack: [
+      'Bayesian-weighted multi-signal fusion',
+      'Structure-liquidity-order-block cross-validation',
+      'Trap-risk and signal-entropy gating',
+      'Multi-timeframe institutional veto matrix',
+      'Professional execution invalidation mapping',
+    ],
   };
 }
 
@@ -195,14 +223,115 @@ function inferInstitutionalBehavior(components: InterpretationComponentInput[], 
   return 'waiting';
 }
 
-function resolveDecision(bias: InterpretationBias, confidence: number, components: InterpretationComponentInput[]): VisionDecision {
+function resolveDecision(
+  bias: InterpretationBias,
+  confidence: number,
+  components: InterpretationComponentInput[],
+  trapRiskScore: number,
+  signalEntropy: number,
+): VisionDecision {
   const mtf = componentByName(components, 'Multi-timeframe alignment');
-  const trapRisk = componentByName(components, 'Liquidity context')?.evidence.join(' ').toLowerCase().includes('trap');
-  if (confidence < 38) return 'AVOID';
-  if (confidence < 58 || bias === 'mixed' || bias === 'neutral') return 'WAIT';
-  if (mtf?.summary.toLowerCase().includes('contradict') && confidence < 76) return 'WAIT';
-  if (trapRisk && confidence < 72) return 'WAIT';
+  const structure = componentByName(components, 'Market structure');
+  const mtfText = `${mtf?.summary ?? ''} ${mtf?.evidence.join(' ') ?? ''}`.toLowerCase();
+  const contradicts = mtfText.includes('contradict') || mtfText.includes('conflict') || mtfText.includes('avoid');
+  if (confidence < 34 || signalEntropy > 72) return 'AVOID';
+  if (confidence < 52 || bias === 'mixed' || bias === 'neutral') return 'WAIT';
+  if (trapRiskScore > 68 && confidence < 78) return 'WAIT';
+  if (contradicts && confidence < 74) return 'WAIT';
+  if ((structure?.confidence ?? 0) < 0.28 && confidence < 66) return 'WAIT';
+  if (trapRiskScore > 55 && confidence < 64) return 'WAIT';
   return bias === 'bullish' ? 'BUY' : 'SELL';
+}
+
+function computeTrapRiskScore(components: InterpretationComponentInput[]): number {
+  const liquidity = componentByName(components, 'Liquidity context');
+  const structure = componentByName(components, 'Market structure');
+  const text = `${liquidity?.summary ?? ''} ${liquidity?.evidence.join(' ') ?? ''} ${structure?.summary ?? ''}`.toLowerCase();
+  let score = 18;
+  if (text.includes('trap')) score += 28;
+  if (text.includes('sweep') || text.includes('stop')) score += 22;
+  if (text.includes('manipulation')) score += 18;
+  if (text.includes('false break')) score += 16;
+  if (text.includes('range') || text.includes('consolid')) score += 10;
+  const trapProb = Number(liquidity?.evidence.find((item) => item.includes('trap probability'))?.match(/(\d+)%/)?.[1] ?? 0);
+  score += trapProb * 0.35;
+  return clamp(score, 0, 100);
+}
+
+function computeSignalEntropy(components: InterpretationComponentInput[]): number {
+  const active = components.filter((item) => item.confidence > 0.2);
+  if (active.length < 2) return 0;
+  const bullish = active.filter((item) => item.bias === 'bullish').length;
+  const bearish = active.filter((item) => item.bias === 'bearish').length;
+  const mixed = active.filter((item) => item.bias === 'mixed' || item.bias === 'neutral').length;
+  const disagreement = Math.min(bullish, bearish) * 24 + mixed * 8;
+  const variance = active.reduce((sum, item) => sum + Math.abs(item.score - 0.5), 0) / active.length;
+  return clamp(disagreement + variance * 42, 0, 100);
+}
+
+function buildReasoningTimeline(input: {
+  symbol: string;
+  timeframe: string;
+  components: InterpretationComponentInput[];
+  strongest: string;
+  institutionalNarrative: string;
+  decision: VisionDecision;
+  confidenceScore: number;
+  setupQualityScore: number;
+  trapRiskScore: number;
+  signalEntropy: number;
+  rankedScore: number;
+  liquidityScore: number;
+}) {
+  return [
+    {
+      stage: 'Signal inventory',
+      summary: `${input.components.length} active visual signals fused for ${input.symbol} ${input.timeframe}.`,
+      score: Math.round(input.confidenceScore),
+      practitionerNote: 'Institutional desks require structure, liquidity, order-block, and MTF agreement before sizing risk.',
+    },
+    {
+      stage: 'Structure ranking',
+      summary: input.strongest,
+      score: input.rankedScore,
+      practitionerNote: 'Rank evidence by confidence × weight; displacement and MSS/BOS context outrank isolated candle patterns.',
+    },
+    {
+      stage: 'Liquidity & trap scan',
+      summary: `Trap-risk score ${Math.round(input.trapRiskScore)} with liquidity score ${input.liquidityScore}.`,
+      score: Math.max(0, 100 - Math.round(input.trapRiskScore)),
+      practitionerNote: 'Sweep-and-reject or stop-pool raids often precede institutional repricing; avoid chasing obvious breakouts.',
+    },
+    {
+      stage: 'Signal entropy check',
+      summary: `Cross-signal disagreement entropy is ${Math.round(input.signalEntropy)}; lower is better for execution.`,
+      score: Math.max(0, 100 - Math.round(input.signalEntropy)),
+      practitionerNote: 'When bullish and bearish modules disagree, professionals downgrade to WAIT until alignment returns.',
+    },
+    {
+      stage: 'Institutional behaviour read',
+      summary: input.institutionalNarrative,
+      score: input.liquidityScore,
+      practitionerNote: 'Accumulation, distribution, and liquidity engineering are inferred from structure + zone reactions.',
+    },
+    {
+      stage: 'Multi-timeframe veto',
+      summary: componentSummary(input.components, 'Multi-timeframe alignment'),
+      score: Math.round((componentByName(input.components, 'Multi-timeframe alignment')?.score ?? 0) * 100),
+      practitionerNote: 'Higher timeframe control can veto lower timeframe triggers; scalp-only when W/D disagree with H4/H1/M15.',
+    },
+    {
+      stage: 'Decision synthesis',
+      summary: `${input.decision} selected after Bayesian fusion, trap gating, and institutional veto checks.`,
+      score: Math.round(input.setupQualityScore),
+      practitionerNote: 'BUY/SELL requires confidence, low entropy, and acceptable trap risk; otherwise WAIT or AVOID.',
+    },
+  ];
+}
+
+function componentSummary(components: InterpretationComponentInput[], name: string) {
+  const component = componentByName(components, name);
+  return component?.summary ?? `${name} is not yet available for this capture.`;
 }
 
 function componentByName(components: InterpretationComponentInput[], name: string) {

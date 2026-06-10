@@ -16,6 +16,7 @@ export type LiveTerminalView = {
   heartbeatAgeMs: number;
   lastTickTime: string | null;
   receivedAt: string | null;
+  enableExecution: boolean;
 };
 
 export type LiveTerminalFeed = {
@@ -106,6 +107,7 @@ function normalizeLiveTerminal(terminal: Record<string, unknown>): LiveTerminalV
     heartbeatAgeMs,
     lastTickTime: terminal.lastTickTime ? String(terminal.lastTickTime) : null,
     receivedAt: terminal.receivedAt ? String(terminal.receivedAt) : null,
+    enableExecution: terminal.enableExecution == null ? true : Boolean(terminal.enableExecution),
   };
 }
 

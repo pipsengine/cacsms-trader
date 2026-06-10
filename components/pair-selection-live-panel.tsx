@@ -37,6 +37,8 @@ type FeedPayload = {
     openPositionSymbols: string[];
     scanSummary: string;
     dailyLimitReached: boolean;
+    continuousTradingEnabled?: boolean;
+    dailyLimitReason?: 'daily_drawdown' | 'daily_trades' | null;
     selectedAt: string;
     session: string;
     source: string;
@@ -233,7 +235,11 @@ export function PairSelectionLivePanel({ compact = false }: { compact?: boolean 
             <ArrowRight className="ml-1 h-3.5 w-3.5" />
           </Link>
           {latest?.dailyLimitReached ? (
-            <span className={cn('text-[11px] font-medium', toneBody('rose'))}>Daily trade limit reached</span>
+            <span className={cn('text-[11px] font-medium', toneBody('rose'))}>
+              {latest.dailyLimitReason === 'daily_drawdown' || latest.continuousTradingEnabled
+                ? 'Daily drawdown limit reached'
+                : 'Daily trade limit reached'}
+            </span>
           ) : null}
         </div>
       </CardContent>

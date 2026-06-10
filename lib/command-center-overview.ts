@@ -3,6 +3,8 @@ import { getBridgeExecutionMetrics } from './autonomous-pipeline-risk-execution'
 import { getAutonomyStatus } from './autonomy-store';
 import { getExecutionKillSwitchStatus } from './execution-kill-switch';
 import { getCommandCenterTick } from './command-center-tick';
+import { getContinuousTradingSessionStatus } from './continuous-trading-session';
+import { getLastInstitutionalMaintenanceSnapshot } from './institutional-position-maintenance';
 import { getExecutionRiskSettings } from './execution-risk-settings';
 import type { PropFirmComplianceView } from './prop-firm-profiles';
 import { checkPostgresConnection } from './postgres';
@@ -50,7 +52,25 @@ export interface CommandCenterOverview {
       profitLoss: number;
     }>;
   };
+  continuousTrading: {
+    active: boolean;
+    startedAt: string | null;
+    stoppedAt: string | null;
+    minOpenPositions: number;
+    maxEntriesPerCycle: number;
+    targetDescription: string;
+    lastMaintenance: {
+      at: string | null;
+      trigger: string | null;
+      targets: string[];
+      dispatchesAttempted: number;
+      openCount: number | null;
+    } | null;
+  };
   risk: {
+    continuousTradingEnabled: boolean;
+    remainingDailyLossAmount: number;
+    propFirmSizingEquity: number;
     dailyTradeLimitEnabled: boolean;
     maxTradesPerDay: number;
     tradesPerSymbolPerDay: number;
@@ -232,6 +252,7 @@ function deriveSystemHealth(input: {
   recentFailures: number;
   pipelineProgress: number;
   connectedTerminals: number;
+  terminalExecutionEnabled: boolean;
 }): { level: SystemHealthLevel; summary: string; checks: CommandCenterOverview['systemHealth']['checks'] } {
   const checks: CommandCenterOverview['systemHealth']['checks'] = [
     {
@@ -276,6 +297,16 @@ function deriveSystemHealth(input: {
       status: input.pipelineProgress >= 80 ? 'ok' : input.pipelineProgress > 0 ? 'warn' : 'warn',
       detail: `${input.pipelineProgress}% overall progress`,
     },
+    {
+      id: 'terminal-execution',
+      label: 'EA execution',
+      status: input.connectedTerminals === 0 ? 'warn' : input.terminalExecutionEnabled ? 'ok' : 'error',
+      detail: input.terminalExecutionEnabled
+        ? 'EnableExecution=true on connected terminal'
+        : input.connectedTerminals > 0
+          ? 'EnableExecution=false — set EnableExecution=true in MT5 EA inputs and re-attach'
+          : 'No terminal to verify execution flag',
+    },
   ];
 
   const hasError = checks.some((check) => check.status === 'error');
@@ -315,6 +346,8 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
     tick,
     riskSettings,
     killSwitch,
+    continuousTrading,
+    lastMaintenance,
     autonomy,
     databaseResult,
     captureSummary,
@@ -326,6 +359,8 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
     getCommandCenterTick({ syncHeartbeats: true, includePositionDetails: true }),
     getExecutionRiskSettings(),
     getExecutionKillSwitchStatus(),
+    getContinuousTradingSessionStatus(),
+    getLastInstitutionalMaintenanceSnapshot(),
     getAutonomyStatus(),
     checkPostgresConnection().then((value) => ({ ok: true, value })).catch(() => ({ ok: false, value: null })),
     getCaptureSummary(activeSymbol),
@@ -338,6 +373,10 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
   const bridgeOnline = tick.bridge.online || pipeline.bridgeOnline;
   const connectedTerminals = Math.max(tick.bridge.connected, pipeline.connectedTerminals);
 
+  const terminalExecutionEnabled = tick.trading.terminals.some(
+    (terminal) => terminal.status === 'connected' && terminal.enableExecution,
+  );
+
   const systemHealth = deriveSystemHealth({
     databaseOk: databaseResult.ok,
     bridgeOnline,
@@ -346,6 +385,7 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
     recentFailures: autonomy.summary.recentFailures,
     pipelineProgress: pipeline.overallProgress,
     connectedTerminals,
+    terminalExecutionEnabled,
   });
 
   const recentActivity: CommandCenterOverview['recentActivity'] = [
@@ -405,7 +445,21 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
       })),
       openPositionDetails: tick.trading.openPositionDetails,
     },
+    continuousTrading: {
+      active: continuousTrading.active,
+      startedAt: continuousTrading.startedAt,
+      stoppedAt: continuousTrading.stoppedAt,
+      minOpenPositions: Number(process.env.CACSMS_MIN_OPEN_POSITIONS ?? 1),
+      maxEntriesPerCycle: Number(process.env.CACSMS_MAX_ENTRIES_PER_CYCLE ?? 3),
+      targetDescription: continuousTrading.active
+        ? 'Institutional refill active — maintains uncorrelated open exposure until daily drawdown limit.'
+        : 'Stopped — press Start on the command center to resume autonomous trading.',
+      lastMaintenance,
+    },
     risk: {
+      continuousTradingEnabled: riskSettings.continuousTradingEnabled,
+      remainingDailyLossAmount: riskSettings.remainingDailyLossAmount,
+      propFirmSizingEquity: riskSettings.propFirmSizingEquity,
       dailyTradeLimitEnabled: riskSettings.dailyTradeLimitEnabled,
       maxTradesPerDay: riskSettings.maxTradesPerDay,
       tradesPerSymbolPerDay: riskSettings.tradesPerSymbolPerDay,

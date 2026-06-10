@@ -1,11 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
 import {
   Activity,
   Menu,
   PlayCircle,
   RefreshCw,
+  ScanSearch,
+  Square,
   Workflow,
 } from 'lucide-react';
 
@@ -33,6 +36,7 @@ interface PipelineStatusPayload {
     selectedAt: string | null;
     source: string;
     session: string;
+    openPositionSymbols?: string[];
     candidates: Array<{ symbol: string; compositeScore: number; tradable: boolean; rank: number }>;
   } | null;
   bridgeOnline: boolean;
@@ -58,6 +62,24 @@ interface PipelineStatusPayload {
     createdAt: string;
   }>;
   generatedAt: string;
+  continuousSession?: {
+    active: boolean;
+    startedAt: string | null;
+    stoppedAt: string | null;
+  };
+  symbolUniverse?: {
+    mode: 'full_universe' | 'selection' | 'single';
+    symbols: string[];
+    scannedCount: number;
+    tradableCount: number;
+  };
+  maintenance?: {
+    at: string | null;
+    trigger: string | null;
+    targets: string[];
+    dispatchesAttempted: number;
+    openCount: number | null;
+  } | null;
 }
 
 interface BridgeTerminal {
@@ -72,6 +94,7 @@ export default function AutonomousPipelinePage() {
   const [terminals, setTerminals] = useState<BridgeTerminal[]>([]);
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const advanceInFlight = useRef(false);
 
@@ -143,6 +166,26 @@ export default function AutonomousPipelinePage() {
     return () => window.clearInterval(interval);
   }, [symbol, loadStatus]);
 
+  const resetPipeline = async () => {
+    setResetting(true);
+    setError(null);
+    try {
+      const response = await fetch('/api/autonomous-pipeline/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol }),
+      });
+      const payload = await response.json();
+      if (!payload.ok) throw new Error(payload.error ?? 'Unable to reset pipeline.');
+      setStatus(payload.status);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to reset pipeline.');
+    } finally {
+      setResetting(false);
+      await loadStatus();
+    }
+  };
+
   const startSession = async () => {
     const connected = terminals.find((terminal) => terminal.status === 'connected');
     if (!connected) {
@@ -203,9 +246,12 @@ export default function AutonomousPipelinePage() {
                   </option>
                 ))}
               </select>
-              <Button variant="outline" onClick={loadStatus} disabled={loading}>
-                <RefreshCw className={cn('mr-2 h-4 w-4', loading && 'animate-spin')} />
+              <Button variant="outline" onClick={loadStatus} disabled={loading || resetting}>
+                <RefreshCw className={cn('mr-2 h-4 w-4', (loading || resetting) && 'animate-spin')} />
                 Refresh
+              </Button>
+              <Button variant="outline" onClick={resetPipeline} disabled={resetting || loading}>
+                {resetting ? 'Resetting…' : 'Reset pipeline'}
               </Button>
               <Button onClick={startSession} disabled={starting}>
                 <PlayCircle className="mr-2 h-4 w-4" />
@@ -219,6 +265,28 @@ export default function AutonomousPipelinePage() {
           {error ? (
             <Card className="border-rose-200 bg-rose-50">
               <CardContent className="py-4 text-sm text-rose-700">{error}</CardContent>
+            </Card>
+          ) : null}
+
+          {status && !status.continuousSession?.active ? (
+            <Card className="border-amber-200 bg-amber-50 shadow-sm">
+              <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-amber-950">Continuous trading session is stopped</p>
+                  <p className="mt-1 text-xs text-amber-800">
+                    Pipeline scans and new entries are paused until you start the session from the command center home page.
+                  </p>
+                </div>
+                <Link
+                  href="/"
+                  className={cn(
+                    'inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700',
+                  )}
+                >
+                  <PlayCircle className="h-4 w-4" />
+                  Start on home page
+                </Link>
+              </CardContent>
             </Card>
           ) : null}
 
@@ -295,6 +363,73 @@ export default function AutonomousPipelinePage() {
           </div>
 
           <PairSelectionLivePanel />
+
+          {status?.symbolUniverse ? (
+            <Card className="border-slate-200 bg-white shadow-sm">
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <ScanSearch className="h-4 w-4 text-blue-600" />
+                  Symbol universe scan
+                  <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
+                    {status.symbolUniverse.mode === 'full_universe' ? '16-symbol institutional' : status.symbolUniverse.mode}
+                  </span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <p className="text-xs text-slate-600">
+                  {status.symbolUniverse.scannedCount} ranked
+                  {' · '}
+                  {status.symbolUniverse.tradableCount} tradable
+                  {' · '}
+                  {status.symbolUniverse.symbols.length} advancing through pipeline this cycle
+                  {status.maintenance?.at
+                    ? ` · last refill ${status.maintenance.dispatchesAttempted} dispatch(es)`
+                    : ''}
+                </p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8">
+                  {SYSTEM_FOCUS_SYMBOLS.map((focusSymbol) => {
+                    const candidate = status.pairSelection?.candidates.find((item) => item.symbol === focusSymbol);
+                    const inUniverse = status.symbolUniverse?.symbols.includes(focusSymbol);
+                    const isSelected = status.pairSelection?.selectedSymbol === focusSymbol;
+                    const isOpen = status.pairSelection?.openPositionSymbols?.includes(focusSymbol);
+                    return (
+                      <div
+                        key={focusSymbol}
+                        className={cn(
+                          'rounded-md border px-2 py-2 text-center',
+                          isSelected
+                            ? 'border-emerald-300 bg-emerald-50'
+                            : isOpen
+                              ? 'border-blue-200 bg-blue-50'
+                              : candidate?.tradable
+                                ? 'border-violet-200 bg-violet-50'
+                                : inUniverse
+                                  ? 'border-slate-200 bg-slate-50'
+                                  : 'border-slate-100 bg-white opacity-60',
+                        )}
+                      >
+                        <p className="font-mono text-xs font-semibold text-slate-900">{focusSymbol}</p>
+                        <p className="mt-1 text-[10px] text-slate-500">
+                          {isSelected ? 'Selected' : isOpen ? 'Open' : candidate?.tradable ? `Score ${candidate.compositeScore}` : candidate ? 'Filtered' : inUniverse ? 'Queued' : '—'}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+                {status.continuousSession?.active ? (
+                  <p className="flex items-center gap-1.5 text-[11px] font-medium text-emerald-700">
+                    <Activity className="h-3 w-3 animate-pulse" />
+                    Session live — scheduler refills uncorrelated positions every ~60s until daily drawdown limit.
+                  </p>
+                ) : (
+                  <p className="flex items-center gap-1.5 text-[11px] font-medium text-amber-700">
+                    <Square className="h-3 w-3" />
+                    Session stopped — scans visible but new entries blocked.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
 
           <ExecutionRiskSettingsPanel />
 

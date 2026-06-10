@@ -1,3 +1,4 @@
+import { getRemainingDailyLossAmount } from '@/packages/risk-core';
 import type { PropFirmRiskRules, RiskState } from '@/packages/shared-types';
 
 import { getOpenPositionMetrics } from './execution-open-positions';
@@ -39,6 +40,27 @@ function envBool(name: string, fallback = false): boolean {
   return raw === 'true' || raw === '1' || raw === 'yes' || raw === 'y';
 }
 
+/** Trade continuously until daily drawdown is exhausted (skip overall DD / consecutive-loss / trade-count stops). */
+export function isContinuousTradingEnabled(): boolean {
+  return envBool('RISK_CONTINUOUS_TRADING_ENABLED', true);
+}
+
+/**
+ * Prop-firm account size used for drawdown envelopes (e.g. $100k challenge).
+ * Falls back to peak equity when unset.
+ */
+export function resolvePropFirmReferenceEquity(state: RiskState): number {
+  const configured = envNumber('RISK_PROP_FIRM_REFERENCE_EQUITY', 0);
+  if (configured > 0) return configured;
+  return Math.max(state.peakEquityAllTime, state.startingEquityToday, state.currentEquity, 1);
+}
+
+/** Lot-sizing equity = reference × max overall drawdown % (prop-firm loss envelope). */
+export function resolvePropFirmSizingEquity(state: RiskState, rules: PropFirmRiskRules): number {
+  const reference = resolvePropFirmReferenceEquity(state);
+  return reference * (rules.maxDrawdownPercent / 100);
+}
+
 /** Share of the daily drawdown budget allocated to concurrent open exposure (default 50%). */
 export function getOpenExposureDrawdownFraction(): number {
   const value = envNumber('RISK_OPEN_EXPOSURE_DRAWDOWN_FRACTION', 0.5);
@@ -58,16 +80,16 @@ export function isSymbolBasedTradeLimitEnabled(): boolean {
  * Example: 4% daily DD on $6k = $240 → $120 open budget ÷ $30/trade (0.5%) = 4 slots.
  */
 export function computeMaxOpenPositions(rules: PropFirmRiskRules, state: RiskState): number {
-  const equity = Math.max(state.currentEquity, state.startingEquityToday, 1);
-  const dailyLossBudget = equity * (rules.dailyDrawdownPercent / 100);
+  const sizingEquity = resolvePropFirmSizingEquity(state, rules);
+  const dailyLossBudget = state.startingEquityToday * (rules.dailyDrawdownPercent / 100);
   const openExposureBudget = dailyLossBudget * getOpenExposureDrawdownFraction();
-  const riskPerPosition = equity * (rules.riskPerTradePercent / 100);
+  const riskPerPosition = sizingEquity * (rules.riskPerTradePercent / 100);
   const envCap = envNumber('RISK_MAX_OPEN_TRADES', 0);
   const computed = riskPerPosition > 0
     ? Math.floor(openExposureBudget / riskPerPosition)
     : 1;
   const resolved = Math.max(1, Math.min(50, computed));
-  if (envCap > 0) return Math.min(resolved, envCap);
+  if (envCap > 0 && !isContinuousTradingEnabled()) return Math.min(resolved, envCap);
   return resolved;
 }
 
@@ -191,6 +213,10 @@ export interface ResolvedExecutionRiskLimits {
   dailyDrawdownBudgetUsd: number;
   openExposureBudgetUsd: number;
   riskPerPositionUsd: number;
+  propFirmReferenceEquity: number;
+  propFirmSizingEquity: number;
+  remainingDailyLossAmount: number;
+  continuousTradingEnabled: boolean;
 }
 
 export async function resolveExecutionRiskLimits(
@@ -200,10 +226,11 @@ export async function resolveExecutionRiskLimits(
   const symbolUniverse = await resolveActiveTradingSymbolCount();
   const tradesPerSymbolPerDay = getTradesPerSymbolPerDay();
   const symbolBasedTradeLimit = isSymbolBasedTradeLimitEnabled();
-  const equity = Math.max(state.currentEquity, state.startingEquityToday, 1);
-  const dailyDrawdownBudgetUsd = equity * (rules.dailyDrawdownPercent / 100);
+  const referenceEquity = resolvePropFirmReferenceEquity(state);
+  const sizingEquity = resolvePropFirmSizingEquity(state, rules);
+  const dailyDrawdownBudgetUsd = state.startingEquityToday * (rules.dailyDrawdownPercent / 100);
   const openExposureBudgetUsd = dailyDrawdownBudgetUsd * getOpenExposureDrawdownFraction();
-  const riskPerPositionUsd = equity * (rules.riskPerTradePercent / 100);
+  const riskPerPositionUsd = sizingEquity * (rules.riskPerTradePercent / 100);
   const maxOpenPositions = computeMaxOpenPositions(rules, state);
   const openPositions = await resolveLiveOpenPositionCount();
   const maxTradesPerDay = symbolBasedTradeLimit
@@ -224,5 +251,9 @@ export async function resolveExecutionRiskLimits(
     dailyDrawdownBudgetUsd: Number(dailyDrawdownBudgetUsd.toFixed(2)),
     openExposureBudgetUsd: Number(openExposureBudgetUsd.toFixed(2)),
     riskPerPositionUsd: Number(riskPerPositionUsd.toFixed(2)),
+    propFirmReferenceEquity: Number(referenceEquity.toFixed(2)),
+    propFirmSizingEquity: Number(sizingEquity.toFixed(2)),
+    remainingDailyLossAmount: getRemainingDailyLossAmount(rules, state),
+    continuousTradingEnabled: isContinuousTradingEnabled(),
   };
 }

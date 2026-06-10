@@ -39,6 +39,8 @@ export type RiskDecisionCode =
   | "consecutive_loss_limit"
   | "news_blackout"
   | "reward_risk_too_low"
+  | "stop_loss_required"
+  | "invalid_stop_loss"
   | "lot_size_too_high"
   | "max_open_exposure"
   | "correlation_protection"

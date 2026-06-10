@@ -1,5 +1,6 @@
 import {
   computeMaxTradesPerDayFromSymbols,
+  isContinuousTradingEnabled,
   isSymbolBasedTradeLimitEnabled,
   loadPropFirmRiskRulesFromEnv,
   resolveActiveTradingSymbolCount,
@@ -30,6 +31,10 @@ export type ExecutionRiskSettings = {
   dailyDrawdownBudgetUsd: number;
   openExposureBudgetUsd: number;
   riskPerPositionUsd: number;
+  propFirmReferenceEquity: number;
+  propFirmSizingEquity: number;
+  remainingDailyLossAmount: number;
+  continuousTradingEnabled: boolean;
   updatedAt: string | null;
   source: {
     dailyTradeLimitEnabled: 'database' | 'environment';
@@ -153,6 +158,14 @@ async function loadApproximateRiskState() {
   };
 }
 
+async function ensureContinuousRiskSettingsAligned(
+  enabledSetting: { value: string },
+): Promise<void> {
+  if (!isContinuousTradingEnabled()) return;
+  if (enabledSetting.value !== 'true') return;
+  await writeSetting(EXECUTION_RISK_DAILY_TRADE_LIMIT_ENABLED_KEY, 'false');
+}
+
 export async function getExecutionRiskSettings(): Promise<ExecutionRiskSettings> {
   const [enabledSetting, maxSetting, perSymbolSetting, tradesOpenedToday, symbolUniverse] = await Promise.all([
     readSetting(EXECUTION_RISK_DAILY_TRADE_LIMIT_ENABLED_KEY),
@@ -161,6 +174,8 @@ export async function getExecutionRiskSettings(): Promise<ExecutionRiskSettings>
     countTradesOpenedToday(),
     resolveActiveTradingSymbolCount(),
   ]);
+
+  await ensureContinuousRiskSettingsAligned(enabledSetting);
 
   const envDailyTradeLimitEnabled = envBool('RISK_DAILY_TRADE_LIMIT_ENABLED', false);
   const envMaxTradesPerDay = clampMaxTrades(envNumber('RISK_MAX_TRADES_PER_DAY', 5));
@@ -171,7 +186,9 @@ export async function getExecutionRiskSettings(): Promise<ExecutionRiskSettings>
   const hasDbMax = maxSetting.value !== '';
   const hasDbPerSymbol = perSymbolSetting.value !== '';
 
-  const dailyTradeLimitEnabled = hasDbEnabled ? enabledSetting.value === 'true' : envDailyTradeLimitEnabled;
+  const storedDailyTradeLimitEnabled = hasDbEnabled ? enabledSetting.value === 'true' : envDailyTradeLimitEnabled;
+  const continuousTradingEnabled = isContinuousTradingEnabled();
+  const dailyTradeLimitEnabled = continuousTradingEnabled ? false : storedDailyTradeLimitEnabled;
   const tradesPerSymbolPerDay = hasDbPerSymbol
     ? Math.max(1, Math.round(Number(perSymbolSetting.value)))
     : envTradesPerSymbol;
@@ -207,6 +224,10 @@ export async function getExecutionRiskSettings(): Promise<ExecutionRiskSettings>
     dailyDrawdownBudgetUsd: limits.dailyDrawdownBudgetUsd,
     openExposureBudgetUsd: limits.openExposureBudgetUsd,
     riskPerPositionUsd: limits.riskPerPositionUsd,
+    propFirmReferenceEquity: limits.propFirmReferenceEquity,
+    propFirmSizingEquity: limits.propFirmSizingEquity,
+    remainingDailyLossAmount: limits.remainingDailyLossAmount,
+    continuousTradingEnabled: limits.continuousTradingEnabled || continuousTradingEnabled,
     updatedAt: perSymbolSetting.updatedAt ?? maxSetting.updatedAt ?? enabledSetting.updatedAt,
     source: {
       dailyTradeLimitEnabled: hasDbEnabled ? 'database' : 'environment',
