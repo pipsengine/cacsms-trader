@@ -3,12 +3,11 @@ import { randomUUID } from 'crypto';
 import { MarketIntelligenceEngine } from '@/services/market-intelligence-engine';
 import type { TickSnapshot, TradingSession } from '@/packages/shared-types';
 import { isSystemFocusSymbol, SYSTEM_FOCUS_SYMBOLS, SYSTEM_FOCUS_SYMBOL_COUNT } from './focus-symbols';
-import { isContinuousTradingEnabled } from './execution-risk-limits';
-import { countTradesOpenedTodayForSymbol } from './execution-risk-limits';
+import { countTradesOpenedTodayBySymbol, isContinuousTradingEnabled } from './execution-risk-limits';
 import { getExecutionRiskSettings } from './execution-risk-settings';
 import { extractSymbolTelemetry, symbolTelemetryMap, type Mt5SymbolTelemetrySnapshot } from './mt5-symbol-telemetry';
 import { getOpenPositionSymbols } from './open-position-symbols';
-import { logPairSelectionEvent } from './pair-selection-audit';
+import { logPairSelectionEventsBatch, type PairSelectionEventInput } from './pair-selection-audit';
 import { clampScore, parsePairCurrencies } from './pair-selector-utils';
 import { findCorrelatedOpenSymbol } from './symbol-correlation';
 import { queryPostgres } from './postgres';
@@ -104,6 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_autonomous_pair_selections_created ON autonomous_
 let schemaReady: Promise<void> | null = null;
 
 const engine = new MarketIntelligenceEngine();
+let pairSelectionInFlight: Promise<PairSelectionResult> | null = null;
 
 export async function ensurePairSelectionSchema() {
   if (!schemaReady) {
@@ -125,6 +125,16 @@ export async function maybeRefreshPairSelection(
 }
 
 export async function runAutonomousPairSelection(
+  config: Partial<PairSelectionConfig> = {},
+): Promise<PairSelectionResult> {
+  if (pairSelectionInFlight) return pairSelectionInFlight;
+  pairSelectionInFlight = executeAutonomousPairSelection(config).finally(() => {
+    pairSelectionInFlight = null;
+  });
+  return pairSelectionInFlight;
+}
+
+async function executeAutonomousPairSelection(
   config: Partial<PairSelectionConfig> = {},
 ): Promise<PairSelectionResult> {
   await ensurePairSelectionSchema();
@@ -160,8 +170,13 @@ export async function runAutonomousPairSelection(
   const terminalConnected = Boolean(terminal?.terminalId);
   const continuousMode = riskSettings.continuousTradingEnabled || isContinuousTradingEnabled();
   const selectionId = randomUUID();
+  const auditEvents: PairSelectionEventInput[] = [];
+  const verboseAudit = !continuousMode;
+  const tradesTodayBySymbol = riskSettings.continuousTradingEnabled || !riskSettings.symbolBasedTradeLimit
+    ? {}
+    : await countTradesOpenedTodayBySymbol();
 
-  await logPairSelectionEvent({
+  auditEvents.push({
     eventType: 'scan_started',
     message: `Pair scan started — ${watchlist.length} symbols on watchlist`,
     reasons: [
@@ -247,7 +262,7 @@ export async function runAutonomousPairSelection(
 
   for (const candidate of candidates) {
     if (!candidate.tradable) {
-      await logPairSelectionEvent({
+      auditEvents.push({
         eventType: 'symbol_filtered',
         symbol: candidate.symbol,
         selected: false,
@@ -262,15 +277,17 @@ export async function runAutonomousPairSelection(
     if (openPositionSymbols.includes(candidate.symbol)) {
       candidate.eligibleForNewEntry = false;
       candidate.reasons.push('Open position already active — monitoring only, not a new entry target');
-      await logPairSelectionEvent({
-        eventType: 'symbol_rejected',
-        symbol: candidate.symbol,
-        selected: false,
-        message: `${candidate.symbol} skipped for new entry — position already open`,
-        reasons: candidate.reasons.slice(-3),
-        metadata: { compositeScore: candidate.compositeScore },
-        selectionId,
-      });
+      if (verboseAudit) {
+        auditEvents.push({
+          eventType: 'symbol_rejected',
+          symbol: candidate.symbol,
+          selected: false,
+          message: `${candidate.symbol} skipped for new entry — position already open`,
+          reasons: candidate.reasons.slice(-3),
+          metadata: { compositeScore: candidate.compositeScore },
+          selectionId,
+        });
+      }
       continue;
     }
 
@@ -288,7 +305,7 @@ export async function runAutonomousPairSelection(
       if (!continuousMode) {
         candidate.blocked = true;
         candidate.blockReason = `Correlated with open ${correlatedWith}`;
-        await logPairSelectionEvent({
+        auditEvents.push({
           eventType: 'symbol_blocked_correlation',
           symbol: candidate.symbol,
           selected: false,
@@ -299,18 +316,20 @@ export async function runAutonomousPairSelection(
         });
         continue;
       }
-      await logPairSelectionEvent({
-        eventType: 'symbol_deferred_correlation',
-        symbol: candidate.symbol,
-        selected: false,
-        message: `${candidate.symbol} deferred for entry — correlated with open ${correlatedWith}`,
-        reasons: candidate.reasons.slice(-3),
-        metadata: { correlatedWith, compositeScore: candidate.compositeScore },
-        selectionId,
-      });
+      if (verboseAudit) {
+        auditEvents.push({
+          eventType: 'symbol_deferred_correlation',
+          symbol: candidate.symbol,
+          selected: false,
+          message: `${candidate.symbol} deferred for entry — correlated with open ${correlatedWith}`,
+          reasons: candidate.reasons.slice(-3),
+          metadata: { correlatedWith, compositeScore: candidate.compositeScore },
+          selectionId,
+        });
+      }
     }
 
-    const symbolTradesToday = await countTradesOpenedTodayForSymbol(candidate.symbol);
+    const symbolTradesToday = tradesTodayBySymbol[candidate.symbol] ?? 0;
     if (
       !riskSettings.continuousTradingEnabled
       && riskSettings.dailyTradeLimitEnabled
@@ -321,7 +340,7 @@ export async function runAutonomousPairSelection(
       candidate.blockReason = `Symbol daily trade limit reached (${symbolTradesToday}/${riskSettings.tradesPerSymbolPerDay})`;
       candidate.eligibleForNewEntry = false;
       candidate.reasons.push(`Blocked: ${candidate.symbol} already traded ${symbolTradesToday} time(s) today`);
-      await logPairSelectionEvent({
+      auditEvents.push({
         eventType: 'symbol_blocked_limit',
         symbol: candidate.symbol,
         selected: false,
@@ -344,7 +363,7 @@ export async function runAutonomousPairSelection(
           ? 'Blocked: daily drawdown budget exhausted'
           : `Blocked: daily trade limit reached (${riskSettings.tradesOpenedToday}/${riskSettings.maxTradesPerDay})`,
       );
-      await logPairSelectionEvent({
+      auditEvents.push({
         eventType: 'symbol_blocked_limit',
         symbol: candidate.symbol,
         selected: false,
@@ -384,7 +403,7 @@ export async function runAutonomousPairSelection(
           candidate.blockReason = `Correlated with ${correlatedWith}`;
           candidate.eligibleForNewEntry = false;
           candidate.reasons.push(`Blocked: shares currency exposure with ${correlatedWith}`);
-          await logPairSelectionEvent({
+          auditEvents.push({
             eventType: 'symbol_blocked_correlation',
             symbol: candidate.symbol,
             selected: false,
@@ -422,16 +441,18 @@ export async function runAutonomousPairSelection(
     ?? candidates.find((item) => item.tradable)?.symbol
     ?? fallback;
 
-  for (const candidate of candidates.filter((item) => qualifiedSymbolsList.includes(item.symbol))) {
-    await logPairSelectionEvent({
-      eventType: 'symbol_selected',
-      symbol: candidate.symbol,
-      selected: true,
-      message: `${candidate.symbol} selected — score ${candidate.compositeScore} (${candidate.session} session)`,
-      reasons: candidate.reasons.slice(-4),
-      metadata: { compositeScore: candidate.compositeScore, rank: candidate.rank },
-      selectionId,
-    });
+  if (verboseAudit) {
+    for (const candidate of candidates.filter((item) => qualifiedSymbolsList.includes(item.symbol))) {
+      auditEvents.push({
+        eventType: 'symbol_selected',
+        symbol: candidate.symbol,
+        selected: true,
+        message: `${candidate.symbol} selected — score ${candidate.compositeScore} (${candidate.session} session)`,
+        reasons: candidate.reasons.slice(-4),
+        metadata: { compositeScore: candidate.compositeScore, rank: candidate.rank },
+        selectionId,
+      });
+    }
   }
 
   const scanSummary = qualifiedSymbolsList.length > 0
@@ -466,7 +487,7 @@ export async function runAutonomousPairSelection(
     source: qualifiedSymbolsList.length > 0 ? 'autonomous_scan' : openPositionSymbols.length > 0 ? 'autonomous_scan' : 'config_fallback',
   };
 
-  await logPairSelectionEvent({
+  auditEvents.push({
     eventType: 'scan_completed',
     symbol: selectedSymbol,
     selected: qualifiedSymbolsList.length > 0,
@@ -485,6 +506,7 @@ export async function runAutonomousPairSelection(
   });
 
   await persistPairSelection(result);
+  void logPairSelectionEventsBatch(auditEvents).catch(() => null);
   return result;
 }
 

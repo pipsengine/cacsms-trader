@@ -1,7 +1,7 @@
 import { generateAutonomousSignal } from '@/lib/autonomy-store';
 import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
 import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
-import { runAutonomousPairSelection } from '@/lib/pair-selector';
+import { getLatestPairSelection, runAutonomousPairSelection, shouldRefreshPairSelection } from '@/lib/pair-selector';
 import { queryPostgres } from '@/lib/postgres';
 
 const SIGNAL_TIMEFRAME = 'M15';
@@ -112,7 +112,10 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
     };
   }
 
-  const selection = await runAutonomousPairSelection();
+  const cachedSelection = await getLatestPairSelection();
+  const selection = cachedSelection && !shouldRefreshPairSelection(cachedSelection)
+    ? cachedSelection
+    : await runAutonomousPairSelection();
   const openSymbols = await getOpenPositionSymbols();
 
   const ranked = selection.candidates

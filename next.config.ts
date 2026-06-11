@@ -2,6 +2,15 @@ import type {NextConfig} from 'next';
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  async redirects() {
+    return [
+      {
+        source: '/favicon.ico',
+        destination: '/icon',
+        permanent: false,
+      },
+    ];
+  },
   eslint: {
     ignoreDuringBuilds: true,
   },

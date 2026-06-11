@@ -96,8 +96,18 @@ export interface AutonomousPipelineStatusOptions {
   runPairSelectionIfMissing?: boolean;
 }
 
+let pipelineAdvanceInFlight: Promise<{ symbols: string[]; sessionActive?: boolean }> | null = null;
+
 /** Heavy pipeline work: pair refresh, trade monitor, capture sync, and analysis per symbol. */
 export async function advanceAutonomousPipeline(symbol = 'AUTO'): Promise<{ symbols: string[]; sessionActive?: boolean }> {
+  if (pipelineAdvanceInFlight) return pipelineAdvanceInFlight;
+  pipelineAdvanceInFlight = executeAutonomousPipelineAdvance(symbol).finally(() => {
+    pipelineAdvanceInFlight = null;
+  });
+  return pipelineAdvanceInFlight;
+}
+
+async function executeAutonomousPipelineAdvance(symbol = 'AUTO'): Promise<{ symbols: string[]; sessionActive?: boolean }> {
   const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
   if (!(await isContinuousTradingSessionActive())) {
     return { symbols: [], sessionActive: false };
@@ -143,8 +153,41 @@ export async function advanceAutonomousPipeline(symbol = 'AUTO'): Promise<{ symb
     ...eligiblePriority,
     ...pipelineSymbols.filter((item) => !eligiblePriority.includes(item)),
   ];
+  const maxSymbolsPerCycle = Math.max(
+    1,
+    Math.min(8, Number(process.env.CACSMS_PIPELINE_SYMBOLS_PER_CYCLE ?? 4)),
+  );
+  const advanceCursorKey = 'autonomous_pipeline_advance_cursor';
+  let cursor = 0;
+  try {
+    const cursorResult = await queryPostgres(
+      `SELECT value FROM mt5_bridge_settings WHERE key = $1 LIMIT 1`,
+      [advanceCursorKey],
+    );
+    cursor = Math.max(0, Number(String(cursorResult.rows[0]?.value ?? '0')) || 0);
+  } catch {
+    cursor = 0;
+  }
+  const rotatedSymbols = orderedPipelineSymbols.length > 0
+    ? [
+      ...orderedPipelineSymbols.slice(cursor),
+      ...orderedPipelineSymbols.slice(0, cursor),
+    ]
+    : [];
+  const symbolsThisCycle = rotatedSymbols.slice(0, maxSymbolsPerCycle);
+  if (orderedPipelineSymbols.length > 0) {
+    const nextCursor = (cursor + symbolsThisCycle.length) % orderedPipelineSymbols.length;
+    await queryPostgres(
+      `
+        INSERT INTO mt5_bridge_settings (key, value, updated_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+      `,
+      [advanceCursorKey, String(nextCursor)],
+    ).catch(() => null);
+  }
 
-  for (const pipelineSymbol of orderedPipelineSymbols) {
+  for (const pipelineSymbol of symbolsThisCycle) {
     try {
       await syncMt5CaptureAcks({ symbol: pipelineSymbol, limit: 12 });
     } catch {

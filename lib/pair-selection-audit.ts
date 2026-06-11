@@ -49,7 +49,7 @@ export async function ensurePairSelectionAuditSchema() {
   return schemaReady;
 }
 
-export async function logPairSelectionEvent(input: {
+export type PairSelectionEventInput = {
   eventType: PairSelectionEventType;
   symbol?: string | null;
   selected?: boolean;
@@ -57,14 +57,22 @@ export async function logPairSelectionEvent(input: {
   reasons?: string[];
   metadata?: Record<string, unknown>;
   selectionId?: string | null;
-}) {
+};
+
+export async function logPairSelectionEvent(input: PairSelectionEventInput) {
+  const [id] = await logPairSelectionEventsBatch([input]);
+  return id;
+}
+
+export async function logPairSelectionEventsBatch(inputs: PairSelectionEventInput[]) {
+  if (inputs.length === 0) return [] as string[];
   await ensurePairSelectionAuditSchema();
-  const id = randomUUID();
-  await queryPostgres(
-    `INSERT INTO pair_selection_events (id, event_type, symbol, selected, message, reasons_json, metadata_json, selection_id)
-     VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8)`,
-    [
-      id,
+  const ids = inputs.map(() => randomUUID());
+  const values: Array<string | boolean | null> = [];
+  const placeholders = inputs.map((input, index) => {
+    const offset = index * 8;
+    values.push(
+      ids[index],
       input.eventType,
       input.symbol ?? null,
       Boolean(input.selected),
@@ -72,9 +80,15 @@ export async function logPairSelectionEvent(input: {
       JSON.stringify(input.reasons ?? []),
       JSON.stringify(input.metadata ?? {}),
       input.selectionId ?? null,
-    ],
+    );
+    return `($${offset + 1},$${offset + 2},$${offset + 3},$${offset + 4},$${offset + 5},$${offset + 6}::jsonb,$${offset + 7}::jsonb,$${offset + 8})`;
+  });
+  await queryPostgres(
+    `INSERT INTO pair_selection_events (id, event_type, symbol, selected, message, reasons_json, metadata_json, selection_id)
+     VALUES ${placeholders.join(',')}`,
+    values,
   );
-  return id;
+  return ids;
 }
 
 export async function listPairSelectionEvents(limit = 30): Promise<PairSelectionEvent[]> {
