@@ -1,4 +1,5 @@
 import { getContinuousRefillDecisionThresholds, getDecisionThresholds } from './autonomy-account-profiles';
+import { shouldBypassNewsBlackout } from './trading-session-policy';
 import type { AutonomousDecisionInput, AutonomousDecisionOutput, AutonomyDecision } from './autonomy-types';
 
 export function buildAutonomousDecision(input: AutonomousDecisionInput): AutonomousDecisionOutput {
@@ -53,7 +54,13 @@ function collectBlockers(input: { confidenceScore: number; setupReadinessScore: 
   if (input.setupReadinessScore < readinessThreshold) blockers.push('Setup readiness is not mature.');
   if (input.riskScore >= 70) blockers.push('Risk score is too high for autonomous escalation.');
   if (text.includes('critical') || text.includes('unclear')) blockers.push('Visual anomaly or liquidity clarity blocks execution.');
-  if (input.input.macro?.warning?.toLowerCase().includes('high-impact')) blockers.push('High-impact macro risk is active.');
+  if (
+    !shouldBypassNewsBlackout()
+    && !input.input.refillMode
+    && input.input.macro?.warning?.toLowerCase().includes('high-impact')
+  ) {
+    blockers.push('High-impact macro risk is active.');
+  }
   return blockers;
 }
 
@@ -63,7 +70,11 @@ function downgradeDecision(
   blockers: string[],
   refillMode = false,
 ): AutonomyDecision {
-  const hardBlock = blockers.some((item) => item.includes('Risk score') || item.includes('High-impact') || item.includes('critical'));
+  const hardBlock = blockers.some((item) =>
+    item.includes('Risk score')
+    || (!shouldBypassNewsBlackout() && item.includes('High-impact'))
+    || item.includes('critical'),
+  );
   if (refillMode && (decision === 'BUY' || decision === 'SELL') && !hardBlock) {
     return decision;
   }

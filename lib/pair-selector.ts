@@ -11,6 +11,11 @@ import { logPairSelectionEventsBatch, type PairSelectionEventInput } from './pai
 import { clampScore, parsePairCurrencies } from './pair-selector-utils';
 import { findCorrelatedOpenSymbol } from './symbol-correlation';
 import { queryPostgres } from './postgres';
+import {
+  is24HourTradingEnabled,
+  isTradingSessionTradable,
+  sessionRankingBoost,
+} from './trading-session-policy';
 
 export const PAIR_SELECTION_REFRESH_MS = Number(process.env.PAIR_SELECTION_REFRESH_MS ?? 5 * 60 * 1000);
 
@@ -197,7 +202,13 @@ async function executeAutonomousPairSelection(
   const scanSymbols = continuousMode
     ? watchlist
     : (eligibleSymbols.length > 0 ? eligibleSymbols : watchlist);
-  const marketScans = engine.scan({ symbols: scanSymbols, ticks, candlesBySymbol: {}, now });
+  const marketScans = engine.scan({
+    symbols: scanSymbols,
+    ticks,
+    candlesBySymbol: {},
+    now,
+    allow24HourTrading: continuousMode || is24HourTradingEnabled(),
+  });
   const telemetry = symbolTelemetryMap(terminal);
 
   const candidates: PairSelectionCandidate[] = marketScans
@@ -214,7 +225,7 @@ async function executeAutonomousPairSelection(
       });
       const macroScore = macroScores[scan.symbol] ?? 50;
       const macroPenalty = macroScore < 35 ? -15 : macroScore > 65 ? 8 : 0;
-      const sessionBoost = session === 'overlap' ? 12 : session === 'london' || session === 'new_york' ? 8 : session === 'closed' ? 0 : 5;
+      const sessionBoost = sessionRankingBoost(scan.session, continuousMode);
       const liquidityInstitutionalBoost = scan.liquidityScore >= 75 ? 5 : scan.liquidityScore >= 60 ? 2 : 0;
       const compositeScore = clampScore(
         scan.setupScore * 0.42
@@ -224,9 +235,14 @@ async function executeAutonomousPairSelection(
         + liquidityInstitutionalBoost
         + macroPenalty,
       );
-      const liquidityQualified = scan.liquidityScore >= 45 && tradableTelemetry && scan.session !== 'closed';
+      const sessionTradable = isTradingSessionTradable(scan.session, {
+        symbol: scan.symbol,
+        now,
+        continuousMode: continuousMode || is24HourTradingEnabled(),
+      });
+      const liquidityQualified = scan.liquidityScore >= 45 && tradableTelemetry && sessionTradable;
       const tradable = tradableTelemetry
-        && scan.session !== 'closed'
+        && sessionTradable
         && (continuousMode || (scan.condition !== 'illiquid' && (scan.tradable || liquidityQualified)));
       const reasons = [
         ...scan.reasons,
@@ -636,10 +652,13 @@ function resolveTradableTelemetry(input: {
 }): boolean {
   const { symbol, telemetryRow, spreadOk, terminalConnected, continuousMode } = input;
   if (telemetryRow) {
+    const sessionOpenOk = continuousMode && is24HourTradingEnabled()
+      ? telemetryRow.available
+      : telemetryRow.sessionOpen;
     return Boolean(
       telemetryRow.available
       && telemetryRow.tradable
-      && telemetryRow.sessionOpen
+      && sessionOpenOk
       && !telemetryRow.stale
       && spreadOk,
     );

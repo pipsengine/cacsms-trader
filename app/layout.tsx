@@ -6,8 +6,8 @@ export const metadata: Metadata = {
   title: 'Cacsms Trader - Autonomous Forex System',
   description: 'Self-driving forex trading platform with MT5 execution.',
   icons: {
-    icon: [{ url: '/icon', type: 'image/png' }],
-    shortcut: ['/icon'],
+    icon: [{ url: '/icon.svg', type: 'image/svg+xml' }],
+    shortcut: ['/icon.svg'],
   },
 };
 

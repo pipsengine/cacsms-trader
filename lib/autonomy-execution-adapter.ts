@@ -12,6 +12,7 @@ import type { AutonomousDecisionOutput, AutonomyConfig, AutonomyMode } from '@/l
 import { dispatchExecutionCommand, ExecutionPolicyBlockedError, ExecutionRiskBlockedError } from '@/lib/execution-dispatch';
 import { liveExecutionBlockReason, resolveExecutionAccountContext } from '@/lib/execution-account-context';
 import { isContinuousTradingEnabled } from '@/lib/execution-risk-limits';
+import { shouldBypassNewsBlackout } from '@/lib/trading-session-policy';
 import { getExecutionKillSwitchStatus } from '@/lib/execution-kill-switch';
 import { getExecutionPolicyStatus, isExecutionEnabled } from '@/lib/execution-policy';
 import { listTerminalSnapshots } from '@/lib/mt5-heartbeat-store';
@@ -165,20 +166,22 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     if (liveBlock) blockers.push(liveBlock);
   }
 
-  const highImpact = await queryPostgres(
-    `
-      SELECT COUNT(*)::int AS count
-      FROM economic_events
-      WHERE impact = 'High'
-        AND event_time BETWEEN now() - interval '30 minutes' AND now() + interval '30 minutes'
-    `,
-  ).catch(() => ({ rows: [{ count: 0 }] }));
-  if (Number(highImpact.rows[0]?.count ?? 0) > 0) {
-    blockers.push('High-impact economic event blackout window is active.');
-  }
+  if (!shouldBypassNewsBlackout()) {
+    const highImpact = await queryPostgres(
+      `
+        SELECT COUNT(*)::int AS count
+        FROM economic_events
+        WHERE impact = 'High'
+          AND event_time BETWEEN now() - interval '30 minutes' AND now() + interval '30 minutes'
+      `,
+    ).catch(() => ({ rows: [{ count: 0 }] }));
+    if (Number(highImpact.rows[0]?.count ?? 0) > 0) {
+      blockers.push('High-impact economic event blackout window is active.');
+    }
 
-  if (input.decision.macroRiskWarning && /blackout|blocked|avoid/i.test(input.decision.macroRiskWarning)) {
-    blockers.push(input.decision.macroRiskWarning);
+    if (input.decision.macroRiskWarning && /blackout|blocked|avoid/i.test(input.decision.macroRiskWarning)) {
+      blockers.push(input.decision.macroRiskWarning);
+    }
   }
 
   if (isStopLossRequired() && ['BUY', 'SELL'].includes(input.decision.decision)) {

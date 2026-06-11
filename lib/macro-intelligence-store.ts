@@ -401,23 +401,25 @@ export async function getLatestMacroFusion(symbol: string): Promise<MacroIntelli
 }
 
 export async function getMacroContextForSymbol(symbol: string) {
+  const { shouldBypassNewsBlackout } = await import('./trading-session-policy');
+  const softenNewsRisk = shouldBypassNewsBlackout();
   const latest = await getLatestMacroFusion(symbol);
   if (latest) {
     return {
-      economicRiskScore: latest.economicRiskScore,
+      economicRiskScore: softenNewsRisk ? Math.min(latest.economicRiskScore, 55) : latest.economicRiskScore,
       interestRateBias: latest.interestRateBias,
       cotBias: latest.cotBias,
       sentimentBias: latest.sentimentBias,
-      warning: latest.warning,
+      warning: softenNewsRisk ? null : latest.warning,
     };
   }
   const fusion = await fuseMacroIntelligence(symbol);
   return {
-    economicRiskScore: fusion.economicRiskScore,
+    economicRiskScore: softenNewsRisk ? Math.min(fusion.economicRiskScore, 55) : fusion.economicRiskScore,
     interestRateBias: fusion.interestRateBias,
     cotBias: fusion.cotBias,
     sentimentBias: fusion.sentimentBias,
-    warning: fusion.warning,
+    warning: softenNewsRisk ? null : fusion.warning,
   };
 }
 

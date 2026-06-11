@@ -3,6 +3,7 @@ import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
 import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
 import { getLatestPairSelection, runAutonomousPairSelection, shouldRefreshPairSelection } from '@/lib/pair-selector';
 import { queryPostgres } from '@/lib/postgres';
+import { is24HourTradingEnabled } from '@/lib/trading-session-policy';
 
 const SIGNAL_TIMEFRAME = 'M15';
 
@@ -26,7 +27,7 @@ function institutionalRankBoost(symbol: string, macroScore: number, liquiditySco
   if (macroScore >= 60) boost += 6;
   if (macroScore <= 35) boost -= 8;
   if (liquidityScore >= 75) boost += 5;
-  if (session === 'london' || session === 'new_york' || session === 'overlap') boost += 4;
+  if (is24HourTradingEnabled() || session !== 'closed') boost += 4;
   if (symbol.includes('XAU')) boost += 2;
   return boost;
 }

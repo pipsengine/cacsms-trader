@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { strategyPageHref, strategyPageIdFromPath } from "@/lib/strategy-routes";
 import { cn } from "@/lib/utils";
 
 type NodeKind = "workspace" | "metric" | "engine" | "control" | "integration" | "report";
@@ -1029,7 +1030,8 @@ function hrefForPageId(pageId: string): string | null {
   if (pageId === "vps-management") return "/mt5-infrastructure/terminal-operations/vps-management";
   if (pageId === "ea-deployment") return "/mt5-infrastructure/terminal-operations/ea-deployment";
   if (pageId === "ea-deployment-link-manager") return "/mt5-infrastructure/terminal-operations/ea-deployment-link";
-  return null;
+  if (pageId === "strategy-intelligence-overview") return "/institutional-strategy-intelligence";
+  return strategyPageHref(pageId);
 }
 
 function pageIdForPathname(pathname: string): string | null {
@@ -1070,5 +1072,6 @@ function pageIdForPathname(pathname: string): string | null {
   if (match?.[1]) {
     return match[1];
   }
-  return null;
+  if (pathname === "/institutional-strategy-intelligence") return "strategy-intelligence-overview";
+  return strategyPageIdFromPath(pathname);
 }

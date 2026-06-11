@@ -1,10 +1,16 @@
 import type { Candle, MarketCondition, MarketScanResult, TickSnapshot, TradingSession } from "../../../packages/shared-types";
+import {
+  detectTradingSession,
+  is24HourTradingEnabled,
+  isTradingSessionTradable,
+} from "../../../lib/trading-session-policy";
 
 export interface MarketIntelligenceInput {
   symbols: string[];
   ticks: TickSnapshot[];
   candlesBySymbol: Record<string, Candle[]>;
   now?: Date;
+  allow24HourTrading?: boolean;
 }
 
 export class MarketIntelligenceEngine {
@@ -15,18 +21,8 @@ export class MarketIntelligenceEngine {
     });
   }
 
-  detectSession(now = new Date()): TradingSession {
-    const hour = Number(new Intl.DateTimeFormat("en-US", {
-      timeZone: "Africa/Lagos",
-      hour: "2-digit",
-      hour12: false,
-    }).format(now));
-
-    if (hour >= 8 && hour < 13) return "london";
-    if (hour >= 13 && hour < 17) return "overlap";
-    if (hour >= 17 && hour < 22) return "new_york";
-    if (hour >= 0 && hour < 8) return "asian";
-    return "closed";
+  detectSession(now = new Date(), symbol?: string): TradingSession {
+    return detectTradingSession(now, symbol);
   }
 
   detectVolatility(candles: Candle[]): number {
@@ -54,16 +50,23 @@ export class MarketIntelligenceEngine {
     return move / range > 0.55 ? "trending" : "ranging";
   }
 
-  scoreMarketCondition(symbol: string, tick: TickSnapshot | undefined, candles: Candle[], now = new Date()): MarketScanResult {
-    const session = this.detectSession(now);
+  scoreMarketCondition(
+    symbol: string,
+    tick: TickSnapshot | undefined,
+    candles: Candle[],
+    now = new Date(),
+    allow24HourTrading = is24HourTradingEnabled(),
+  ): MarketScanResult {
+    const session = this.detectSession(now, symbol);
+    const sessionTradable = isTradingSessionTradable(session, { symbol, now, continuousMode: allow24HourTrading });
     const volatilityScore = this.detectVolatility(candles);
     const liquidityScore = this.scanLiquidity(tick);
     const condition = liquidityScore < 30 ? "illiquid" : volatilityScore > 75 ? "volatile" : this.classifyTrendOrRange(candles);
-    const setupScore = Math.round((volatilityScore * 0.35) + (liquidityScore * 0.4) + (session === "closed" ? 0 : 20));
+    const setupScore = Math.round((volatilityScore * 0.35) + (liquidityScore * 0.4) + (sessionTradable ? 20 : 0));
     const hasCandleContext = candles.length >= 10;
     const tradable = hasCandleContext
-      ? setupScore >= 55 && condition !== "illiquid" && session !== "closed"
-      : liquidityScore >= 45 && condition !== "illiquid" && session !== "closed";
+      ? setupScore >= 55 && condition !== "illiquid" && sessionTradable
+      : liquidityScore >= 45 && condition !== "illiquid" && sessionTradable;
 
     return {
       symbol,
@@ -80,11 +83,13 @@ export class MarketIntelligenceEngine {
 
   scan(input: MarketIntelligenceInput): MarketScanResult[] {
     const now = input.now ?? new Date();
+    const allow24HourTrading = input.allow24HourTrading ?? is24HourTradingEnabled();
     return input.symbols.map((symbol) => this.scoreMarketCondition(
       symbol,
       input.ticks.find((tick) => tick.symbol === symbol),
       input.candlesBySymbol[symbol] ?? [],
       now,
+      allow24HourTrading,
     ));
   }
 }
