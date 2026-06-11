@@ -41,9 +41,21 @@ export const MT5_SYMBOL_ALIAS_CANDIDATES: Record<SystemFocusSymbol, string[]> = 
   AUDUSD: ['AUDUSD', 'AUDUSDm'],
   NZDUSD: ['NZDUSD', 'NZDUSDm'],
   AUDJPY: ['AUDJPY', 'AUDJPYm'],
+  EURAUD: ['EURAUD', 'EURAUDm'],
+  EURCAD: ['EURCAD', 'EURCADm'],
+  EURCHF: ['EURCHF', 'EURCHFm'],
+  EURNZD: ['EURNZD', 'EURNZDm'],
+  GBPAUD: ['GBPAUD', 'GBPAUDm'],
+  GBPCAD: ['GBPCAD', 'GBPCADm'],
+  AUDNZD: ['AUDNZD', 'AUDNZDm'],
+  CADJPY: ['CADJPY', 'CADJPYm'],
+  CHFJPY: ['CHFJPY', 'CHFJPYm'],
+  NZDJPY: ['NZDJPY', 'NZDJPYm'],
   XAUUSD: ['XAUUSD', 'XAUUSDm', 'GOLD'],
+  XAGUSD: ['XAGUSD', 'XAGUSDm', 'SILVER'],
   BTCUSD: ['BTCUSD', 'BTCUSDm'],
   US30: ['US30', 'DJ30', 'US30Cash', 'DowJones30'],
+  UK100: ['UK100', 'FTSE100', 'UK100Cash'],
   NASDAQ100: ['NASDAQ100', 'NAS100', 'USTEC', 'US100'],
   SP500: ['SP500', 'SPX500', 'US500', 'SP500m'],
 };
@@ -103,7 +115,8 @@ export function classifySector(symbol: string): string {
   const normalized = symbol.toUpperCase();
   if (normalized.startsWith('XAU')) return 'metals';
   if (normalized.startsWith('BTC')) return 'crypto';
-  if (['US30', 'NASDAQ100', 'NAS100', 'SP500', 'SPX500', 'US500'].includes(normalized)) return 'indices';
+  if (['US30', 'NASDAQ100', 'NAS100', 'SP500', 'SPX500', 'US500', 'UK100', 'FTSE100'].includes(normalized)) return 'indices';
+  if (normalized.startsWith('XAG')) return 'metals';
   return 'forex';
 }
 

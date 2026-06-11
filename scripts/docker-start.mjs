@@ -35,6 +35,8 @@ async function main() {
   });
   children.push(app);
 
+  startChartCaptureCleanupScheduler(appPort);
+
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 }
@@ -112,6 +114,34 @@ function waitForHttp(url, maxAttempts) {
 
     tryOnce();
   });
+}
+
+function chartCaptureCleanupIntervalMs() {
+  const minutes = Number(process.env.CACSMS_CAPTURE_CLEANUP_INTERVAL_MINUTES ?? 60);
+  const safeMinutes = Number.isFinite(minutes) && minutes >= 15 ? minutes : 60;
+  return safeMinutes * 60_000;
+}
+
+function startChartCaptureCleanupScheduler(appPort) {
+  const triggerCleanup = async (force = false) => {
+    const suffix = force ? '?force=true' : '';
+    const url = `http://127.0.0.1:${appPort}/api/system/chart-capture-cleanup${suffix}`;
+    try {
+      await waitForHttp(`http://127.0.0.1:${appPort}`, 60);
+      const response = await fetch(url, { method: 'POST' });
+      const body = await response.json().catch(() => ({}));
+      console.log(`[capture-cleanup] ${response.status} ${JSON.stringify(body)}`);
+    } catch (error) {
+      console.warn('[capture-cleanup] skipped:', error instanceof Error ? error.message : error);
+    }
+  };
+
+  setTimeout(() => {
+    void triggerCleanup(true);
+  }, 45_000);
+  setInterval(() => {
+    void triggerCleanup(false);
+  }, chartCaptureCleanupIntervalMs());
 }
 
 function hydrateBridgeSecretFromRuntimeFile() {

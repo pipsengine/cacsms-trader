@@ -2,7 +2,6 @@ import { generateAutonomousSignal } from '@/lib/autonomy-store';
 import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
 import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
 import { runAutonomousPairSelection } from '@/lib/pair-selector';
-import { findCorrelatedOpenSymbol } from '@/lib/symbol-correlation';
 import { queryPostgres } from '@/lib/postgres';
 
 const SIGNAL_TIMEFRAME = 'M15';
@@ -94,8 +93,8 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
     };
   }
 
-  const minOpen = envNumber('CACSMS_MIN_OPEN_POSITIONS', 1);
-  const perCycleCap = envNumber('CACSMS_MAX_ENTRIES_PER_CYCLE', 3);
+  const minOpen = envNumber('CACSMS_MIN_OPEN_POSITIONS', 3);
+  const perCycleCap = envNumber('CACSMS_MAX_ENTRIES_PER_CYCLE', 5);
   const openCount = await countOpenPositions();
   const slotsToFill = Math.max(0, risk.remainingOpenPositions);
   const deficit = Math.max(0, minOpen - openCount);
@@ -115,10 +114,9 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
 
   const selection = await runAutonomousPairSelection();
   const openSymbols = await getOpenPositionSymbols();
-  const exposureSymbols = [...openSymbols];
 
   const ranked = selection.candidates
-    .filter((candidate) => candidate.tradable && !candidate.blocked)
+    .filter((candidate) => candidate.tradable)
     .map((candidate) => ({
       ...candidate,
       institutionalScore: candidate.compositeScore + institutionalRankBoost(
@@ -130,14 +128,24 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
     }))
     .sort((a, b) => b.institutionalScore - a.institutionalScore);
 
+  const poolSize = Math.max(targetEntries * 4, selection.eligibleSymbols.length, 28);
   const targets: string[] = [];
+  const seedSymbols = [
+    ...selection.eligibleSymbols,
+    ...selection.qualifiedSymbols,
+    ...ranked.map((candidate) => candidate.symbol),
+  ].map((symbol) => symbol.toUpperCase());
+
+  for (const symbol of [...new Set(seedSymbols)]) {
+    if (targets.length >= poolSize) break;
+    if (openSymbols.includes(symbol)) continue;
+    targets.push(symbol);
+  }
+
   for (const candidate of ranked) {
-    if (targets.length >= targetEntries) break;
-    if (openSymbols.includes(candidate.symbol)) continue;
-    const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, exposureSymbols, { excludeSameSymbol: true });
-    if (correlatedWith) continue;
+    if (targets.length >= poolSize) break;
+    if (targets.includes(candidate.symbol) || openSymbols.includes(candidate.symbol)) continue;
     targets.push(candidate.symbol);
-    exposureSymbols.push(candidate.symbol);
   }
 
   if (targets.length === 0) {
@@ -151,10 +159,22 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
   }
 
   let dispatchesAttempted = 0;
+  let actionableDispatches = 0;
+  const processedSymbols: string[] = [];
   for (const symbol of targets) {
+    if (actionableDispatches >= targetEntries) break;
     try {
-      await generateAutonomousSignal(symbol, SIGNAL_TIMEFRAME);
+      const { recoverPendingPipelineCaptures, syncMt5CaptureAcks } = await import('./mt5-capture-ingest');
+      const { analyzeVisualMarketInterpretation } = await import('./visual-market-interpretation-store');
+      await recoverPendingPipelineCaptures(symbol).catch(() => 0);
+      await syncMt5CaptureAcks({ symbol, limit: 12 }).catch(() => null);
+      await analyzeVisualMarketInterpretation({ symbol, timeframe: SIGNAL_TIMEFRAME }).catch(() => null);
+      const signal = await generateAutonomousSignal(symbol, SIGNAL_TIMEFRAME, { refillMode: true });
       dispatchesAttempted += 1;
+      processedSymbols.push(symbol);
+      if (!['BUY', 'SELL'].includes(signal.decision)) continue;
+      actionableDispatches += 1;
+      if (signal.executionDispatch?.status === 'dispatched') continue;
     } catch {
       // try next symbol in the batch
     }
@@ -166,16 +186,25 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
       VALUES ('institutional_position_maintenance_last_run', $1, now())
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
     `,
-    [JSON.stringify({ trigger, targets, dispatchesAttempted, openCount, at: new Date().toISOString() })],
+    [JSON.stringify({
+      trigger,
+      targets: processedSymbols,
+      dispatchesAttempted,
+      actionableDispatches,
+      openCount,
+      at: new Date().toISOString(),
+    })],
   ).catch(() => null);
 
   return {
-    status: dispatchesAttempted > 0 ? 'refilled' : 'skipped',
+    status: actionableDispatches > 0 ? 'refilled' : dispatchesAttempted > 0 ? 'skipped' : 'skipped',
     slotsTargeted: targetEntries,
-    symbolsProcessed: targets,
+    symbolsProcessed: processedSymbols,
     dispatchesAttempted,
-    detail: dispatchesAttempted > 0
-      ? `Institutional refill cycle processed ${dispatchesAttempted} symbol(s): ${targets.join(', ')}.`
-      : `Candidates found (${targets.join(', ')}) but no actionable dispatches this cycle.`,
+    detail: actionableDispatches > 0
+      ? `Institutional refill placed ${actionableDispatches} actionable signal(s) across ${processedSymbols.join(', ')}.`
+      : dispatchesAttempted > 0
+        ? `Scanned ${dispatchesAttempted} symbol(s) (${processedSymbols.join(', ')}) — no BUY/SELL dispatch yet; retrying next cycle.`
+        : `Candidates found (${targets.join(', ')}) but no actionable dispatches this cycle.`,
   };
 }

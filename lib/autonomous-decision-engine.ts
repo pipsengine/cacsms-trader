@@ -1,4 +1,4 @@
-import { getDecisionThresholds } from './autonomy-account-profiles';
+import { getContinuousRefillDecisionThresholds, getDecisionThresholds } from './autonomy-account-profiles';
 import type { AutonomousDecisionInput, AutonomousDecisionOutput, AutonomyDecision } from './autonomy-types';
 
 export function buildAutonomousDecision(input: AutonomousDecisionInput): AutonomousDecisionOutput {
@@ -15,7 +15,7 @@ export function buildAutonomousDecision(input: AutonomousDecisionInput): Autonom
   const finalBias = normalizeBias(visual.finalMarketBias);
   const baseDecision = normalizeDecision(visual.finalDecision);
   const blockers = collectBlockers({ confidenceScore, setupReadinessScore, riskScore, input });
-  const decision = downgradeDecision(baseDecision, finalBias, blockers);
+  const decision = downgradeDecision(baseDecision, finalBias, blockers, Boolean(input.refillMode));
   const setupType = inferSetupType(String(visual.marketPhase ?? ''), String(visual.liquidityObjective ?? ''));
 
   return {
@@ -44,7 +44,9 @@ export function buildAutonomousDecision(input: AutonomousDecisionInput): Autonom
 function collectBlockers(input: { confidenceScore: number; setupReadinessScore: number; riskScore: number; input: AutonomousDecisionInput }) {
   const blockers: string[] = [];
   const text = `${input.input.visual?.riskWarning ?? ''} ${input.input.visual?.liquidityObjective ?? ''}`.toLowerCase();
-  const thresholds = getDecisionThresholds(input.input.accountClass ?? 'demo');
+  const thresholds = input.input.refillMode
+    ? getContinuousRefillDecisionThresholds(input.input.accountClass ?? 'demo')
+    : getDecisionThresholds(input.input.accountClass ?? 'demo');
   const confidenceThreshold = thresholds.confidence;
   const readinessThreshold = thresholds.readiness;
   if (input.confidenceScore < confidenceThreshold) blockers.push('Confidence is below autonomous signal threshold.');
@@ -55,11 +57,20 @@ function collectBlockers(input: { confidenceScore: number; setupReadinessScore: 
   return blockers;
 }
 
-function downgradeDecision(decision: AutonomyDecision, bias: string, blockers: string[]): AutonomyDecision {
-  if (blockers.some((item) => item.includes('Risk score') || item.includes('High-impact'))) return 'AVOID';
+function downgradeDecision(
+  decision: AutonomyDecision,
+  bias: string,
+  blockers: string[],
+  refillMode = false,
+): AutonomyDecision {
+  const hardBlock = blockers.some((item) => item.includes('Risk score') || item.includes('High-impact') || item.includes('critical'));
+  if (refillMode && (decision === 'BUY' || decision === 'SELL') && !hardBlock) {
+    return decision;
+  }
+  if (hardBlock) return 'AVOID';
   if (blockers.length) return 'MONITOR';
-  if (decision === 'BUY' && bias === 'bullish') return 'BUY';
-  if (decision === 'SELL' && bias === 'bearish') return 'SELL';
+  if (decision === 'BUY' && (bias === 'bullish' || (refillMode && bias === 'mixed'))) return 'BUY';
+  if (decision === 'SELL' && (bias === 'bearish' || (refillMode && bias === 'mixed'))) return 'SELL';
   if (decision === 'WAIT' || decision === 'AVOID' || decision === 'MONITOR') return decision;
   return 'WAIT';
 }

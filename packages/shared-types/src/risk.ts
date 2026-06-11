@@ -44,6 +44,7 @@ export type RiskDecisionCode =
   | "lot_size_too_high"
   | "max_open_exposure"
   | "correlation_protection"
+  | "signal_not_actionable"
   | "allowed";
 
 export interface RiskDecision {

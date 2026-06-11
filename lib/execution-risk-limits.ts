@@ -72,6 +72,7 @@ export function getTradesPerSymbolPerDay(): number {
 }
 
 export function isSymbolBasedTradeLimitEnabled(): boolean {
+  if (isContinuousTradingEnabled()) return false;
   return envBool('RISK_SYMBOL_BASED_TRADE_LIMIT', true);
 }
 

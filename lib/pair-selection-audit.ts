@@ -8,6 +8,7 @@ export type PairSelectionEventType =
   | 'symbol_selected'
   | 'symbol_rejected'
   | 'symbol_blocked_correlation'
+  | 'symbol_deferred_correlation'
   | 'symbol_blocked_limit'
   | 'symbol_filtered';
 

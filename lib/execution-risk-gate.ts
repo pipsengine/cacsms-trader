@@ -261,24 +261,35 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
     rewardRiskRatio,
     symbol: symbol || undefined,
     tradesOpenedTodayForSymbol,
-    tradesPerSymbolPerDay: isSymbolBasedTradeLimitEnabled() ? limits.tradesPerSymbolPerDay : undefined,
+    tradesPerSymbolPerDay: isSymbolBasedTradeLimitEnabled() && !limits.continuousTradingEnabled
+      ? limits.tradesPerSymbolPerDay
+      : undefined,
     maxOpenTradesOverride: limits.maxOpenPositions,
     maxTradesPerDayOverride: limits.maxTradesPerDay,
     continuousTradingEnabled: limits.continuousTradingEnabled,
   });
 
-  let decision: RiskDecision;
+  const isExecutableSide = side === 'BUY' || side === 'SELL';
+  let decision: RiskDecision | undefined;
   if (symbol) {
+    if (!isExecutableSide) {
+      decision = {
+        allowed: true,
+        code: 'signal_not_actionable',
+        message: `No trade required for ${side || 'non-executable'} signal; risk gate cleared.`,
+        remainingDailyLossAmount: limits.remainingDailyLossAmount,
+      };
+    }
     const openSymbols = await getOpenPositionSymbols();
     const correlatedWith = findCorrelatedOpenSymbol(symbol, openSymbols, { excludeSameSymbol: true });
-    if (correlatedWith) {
+    if (!decision && correlatedWith) {
       decision = {
         allowed: false,
         code: 'correlation_protection',
         message: `${symbol} blocked — shares currency exposure with open ${correlatedWith}`,
         remainingDailyLossAmount: 0,
       };
-    } else if (isStopLossRequired() && stopLoss <= 0) {
+    } else if (!decision && isStopLossRequired() && isExecutableSide && stopLoss <= 0) {
       decision = {
         allowed: false,
         code: 'stop_loss_required',
@@ -286,6 +297,8 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
         remainingDailyLossAmount: 0,
       };
     } else if (
+      !decision
+      &&
       isStopLossRequired()
       && (side === 'BUY' || side === 'SELL')
       && entryPrice > 0
@@ -297,10 +310,13 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
         message: `${symbol} blocked — stop loss / take profit are invalid for ${side}.`,
         remainingDailyLossAmount: 0,
       };
-    } else {
+    } else if (!decision) {
       decision = evaluateBaseRisk();
     }
   } else {
+    decision = evaluateBaseRisk();
+  }
+  if (!decision) {
     decision = evaluateBaseRisk();
   }
 

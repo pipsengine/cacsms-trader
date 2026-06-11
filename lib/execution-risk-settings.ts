@@ -162,8 +162,13 @@ async function ensureContinuousRiskSettingsAligned(
   enabledSetting: { value: string },
 ): Promise<void> {
   if (!isContinuousTradingEnabled()) return;
-  if (enabledSetting.value !== 'true') return;
-  await writeSetting(EXECUTION_RISK_DAILY_TRADE_LIMIT_ENABLED_KEY, 'false');
+  if (enabledSetting.value === 'true') {
+    await writeSetting(EXECUTION_RISK_DAILY_TRADE_LIMIT_ENABLED_KEY, 'false');
+  }
+  const perSymbol = await readSetting(EXECUTION_RISK_TRADES_PER_SYMBOL_KEY);
+  if (perSymbol.value !== '99') {
+    await writeSetting(EXECUTION_RISK_TRADES_PER_SYMBOL_KEY, '99');
+  }
 }
 
 export async function getExecutionRiskSettings(): Promise<ExecutionRiskSettings> {

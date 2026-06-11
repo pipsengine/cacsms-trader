@@ -1,8 +1,33 @@
 import type { TradingAccountClass } from '@/lib/execution-account-context';
 import { getAutonomyThresholdProfile } from '@/lib/autonomy-account-profiles';
+import { isContinuousTradingEnabled, resolveLiveOpenPositionCount } from '@/lib/execution-risk-limits';
+import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
 import { queryPostgres } from '@/lib/postgres';
 
+function envNumber(name: string, fallback: number): number {
+  const raw = String(process.env[name] ?? '').trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+/** Continuous session with open slots below the institutional floor — relax cooldowns and daily caps. */
+export async function shouldRelaxContinuousTradingLimits(): Promise<boolean> {
+  if (!isContinuousTradingEnabled()) return false;
+  const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
+  if (!(await isContinuousTradingSessionActive())) return false;
+  const openCount = await resolveLiveOpenPositionCount();
+  const minOpen = envNumber('CACSMS_MIN_OPEN_POSITIONS', 3);
+  return openCount < minOpen;
+}
+
+function continuousDispatchCooldownMs(): number {
+  const minutes = envNumber('CACSMS_CONTINUOUS_DISPATCH_COOLDOWN_MINUTES', 3);
+  return Math.max(1, minutes) * 60_000;
+}
+
 export async function shouldRefreshPipelineMtf(symbol: string, accountClass: TradingAccountClass): Promise<boolean> {
+  if (await shouldRelaxContinuousTradingLimits()) return true;
   const cooldownMinutes = getAutonomyThresholdProfile(accountClass).mtfRefreshCooldownMinutes;
   const result = await queryPostgres(
     `SELECT
@@ -18,6 +43,7 @@ export async function shouldRefreshPipelineMtf(symbol: string, accountClass: Tra
 }
 
 export async function shouldRefreshPipelineInterpretation(symbol: string, timeframe: string, accountClass: TradingAccountClass): Promise<boolean> {
+  if (await shouldRelaxContinuousTradingLimits()) return true;
   const cooldownMinutes = getAutonomyThresholdProfile(accountClass).signalCooldownMinutes;
   const result = await queryPostgres(
     `SELECT created_at FROM visual_market_interpretations
@@ -31,6 +57,7 @@ export async function shouldRefreshPipelineInterpretation(symbol: string, timefr
 }
 
 export async function shouldGeneratePipelineSignal(symbol: string, accountClass: TradingAccountClass): Promise<boolean> {
+  if (await shouldRelaxContinuousTradingLimits()) return true;
   const profile = getAutonomyThresholdProfile(accountClass);
   const result = await queryPostgres(
     `SELECT
@@ -70,7 +97,6 @@ export async function shouldDispatchPipelineExecution(
   accountClass: TradingAccountClass,
   symbol?: string,
 ): Promise<boolean> {
-  const profile = getAutonomyThresholdProfile(accountClass);
   const existing = await queryPostgres(
     `SELECT status, created_at
      FROM autonomy_execution_dispatches
@@ -82,6 +108,29 @@ export async function shouldDispatchPipelineExecution(
   if (existing.rows[0]) return false;
 
   const normalizedSymbol = symbol?.toUpperCase() ?? null;
+  const relaxed = await shouldRelaxContinuousTradingLimits();
+
+  if (relaxed && normalizedSymbol) {
+    const openSymbols = await getOpenPositionSymbols();
+    if (!openSymbols.includes(normalizedSymbol)) {
+      const recent = await queryPostgres(
+        `SELECT created_at
+         FROM autonomy_execution_dispatches
+         WHERE status IN ('dispatched', 'queued', 'failed')
+           AND upper(symbol) = $1
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [normalizedSymbol],
+      );
+      if (!recent.rows[0]) return true;
+      const lastDispatchAt = new Date(String(recent.rows[0].created_at)).getTime();
+      return Date.now() - lastDispatchAt > continuousDispatchCooldownMs();
+    }
+  }
+
+  if (relaxed) return true;
+
+  const profile = getAutonomyThresholdProfile(accountClass);
   const recent = normalizedSymbol
     ? await queryPostgres(
         `SELECT created_at

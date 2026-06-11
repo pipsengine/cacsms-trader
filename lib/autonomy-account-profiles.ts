@@ -138,3 +138,14 @@ export function getDecisionThresholds(accountClass: TradingAccountClass = 'demo'
     visualReadiness: profile.visualReadinessThreshold,
   };
 }
+
+export function getContinuousRefillDecisionThresholds(accountClass: TradingAccountClass = 'demo') {
+  const base = getDecisionThresholds(accountClass);
+  const floorConfidence = envNumber('CACSMS_CONTINUOUS_REFILL_CONFIDENCE', 35);
+  const floorReadiness = envNumber('CACSMS_CONTINUOUS_REFILL_READINESS', 30);
+  return {
+    confidence: Math.min(base.confidence, floorConfidence),
+    readiness: Math.min(base.readiness, floorReadiness),
+    visualReadiness: Math.min(base.visualReadiness, floorReadiness + 8),
+  };
+}

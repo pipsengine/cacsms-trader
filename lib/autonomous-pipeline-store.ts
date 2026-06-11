@@ -122,7 +122,7 @@ export async function advanceAutonomousPipeline(symbol = 'AUTO'): Promise<{ symb
       await ensureContinuousChartNavigation({
         latestSelection,
         connectedTerminals: bridge.connected,
-        maxSessionsPerCycle: 1,
+        maxSessionsPerCycle: Math.max(1, Math.min(5, Math.round(Number(process.env.CACSMS_PIPELINE_SESSIONS_PER_CYCLE ?? 3)))),
       });
     } catch {
       // navigation retries on next advance tick

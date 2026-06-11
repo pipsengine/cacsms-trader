@@ -135,21 +135,23 @@ void OnTimer()
    }
 }
 
-const int FOCUS_SYMBOL_COUNT = 16;
+const int FOCUS_SYMBOL_COUNT = 28;
 const int TELEMETRY_STALE_SECONDS = 120;
 
-string g_telemetrySymbols[16];
-bool g_telemetryAvailable[16];
-int g_telemetrySpreads[16];
+string g_telemetrySymbols[28];
+bool g_telemetryAvailable[28];
+int g_telemetrySpreads[28];
 int g_telemetryCount = 0;
 
-string FocusSymbolKeys[16] =
+string FocusSymbolKeys[28] =
 {
    "EURUSD", "GBPUSD", "EURGBP", "EURJPY", "GBPJPY", "USDJPY", "USDCAD", "USDCHF",
-   "AUDUSD", "NZDUSD", "AUDJPY", "XAUUSD", "BTCUSD", "US30", "NASDAQ100", "SP500"
+   "AUDUSD", "NZDUSD", "AUDJPY", "EURAUD", "EURCAD", "EURCHF", "EURNZD", "GBPAUD",
+   "GBPCAD", "AUDNZD", "CADJPY", "CHFJPY", "NZDJPY", "XAUUSD", "XAGUSD", "BTCUSD",
+   "US30", "UK100", "NASDAQ100", "SP500"
 };
 
-string FocusSymbolAliases[16] =
+string FocusSymbolAliases[28] =
 {
    "EURUSD|EURUSDm",
    "GBPUSD|GBPUSDm",
@@ -162,18 +164,30 @@ string FocusSymbolAliases[16] =
    "AUDUSD|AUDUSDm",
    "NZDUSD|NZDUSDm",
    "AUDJPY|AUDJPYm",
+   "EURAUD|EURAUDm",
+   "EURCAD|EURCADm",
+   "EURCHF|EURCHFm",
+   "EURNZD|EURNZDm",
+   "GBPAUD|GBPAUDm",
+   "GBPCAD|GBPCADm",
+   "AUDNZD|AUDNZDm",
+   "CADJPY|CADJPYm",
+   "CHFJPY|CHFJPYm",
+   "NZDJPY|NZDJPYm",
    "XAUUSD|XAUUSDm|GOLD",
+   "XAGUSD|XAGUSDm|SILVER",
    "BTCUSD|BTCUSDm",
    "US30|DJ30|US30Cash",
+   "UK100|FTSE100|UK100Cash",
    "NASDAQ100|NAS100|USTEC|US100",
    "SP500|SPX500|US500|SP500m"
 };
 
 string ClassifySymbolSector(string focusSymbol)
 {
-   if (StringFind(focusSymbol, "XAU") == 0) return "metals";
+   if (StringFind(focusSymbol, "XAU") == 0 || StringFind(focusSymbol, "XAG") == 0) return "metals";
    if (StringFind(focusSymbol, "BTC") == 0) return "crypto";
-   if (focusSymbol == "US30" || focusSymbol == "NASDAQ100" || focusSymbol == "SP500") return "indices";
+   if (focusSymbol == "US30" || focusSymbol == "NASDAQ100" || focusSymbol == "SP500" || focusSymbol == "UK100") return "indices";
    return "forex";
 }
 

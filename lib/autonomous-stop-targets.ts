@@ -1,5 +1,4 @@
-import { resolveConnectedTerminalId } from '@/lib/autonomy-execution-adapter';
-import { loadPropFirmRiskRulesFromEnv } from '@/lib/execution-risk-gate';
+import { loadPropFirmRiskRulesFromEnv } from '@/lib/execution-risk-limits';
 import { resolveLatestCaptureId } from '@/lib/capture-analysis-bootstrap';
 import { telemetryForSymbol } from '@/lib/mt5-symbol-telemetry';
 import { getSwingDetections } from '@/lib/swing-point-store';
@@ -121,8 +120,6 @@ async function loadRecentCandles(symbol: string, timeframe: string, limit = 60):
 }
 
 async function resolveLiveEntryPrice(symbol: string, side: AutonomousTradeSide): Promise<number | null> {
-  const terminalId = await resolveConnectedTerminalId();
-  if (!terminalId) return null;
   try {
     const response = await fetch(`${process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787'}/terminals`, {
       cache: 'no-store',
@@ -130,17 +127,52 @@ async function resolveLiveEntryPrice(symbol: string, side: AutonomousTradeSide):
     if (!response.ok) return null;
     const payload = await response.json();
     const terminals = Array.isArray(payload.terminals) ? payload.terminals : [];
-    const terminal = terminals.find((row: { terminalId?: string }) => String(row?.terminalId ?? '') === terminalId);
-    if (!terminal) return null;
-    const row = telemetryForSymbol(terminal, symbol);
-    if (!row) return null;
-    const price = side === 'BUY' ? row.ask : row.bid;
-    if (price > 0) return price;
-    const mid = row.bid > 0 && row.ask > 0 ? (row.bid + row.ask) / 2 : 0;
-    return mid > 0 ? mid : null;
+    const connected = terminals.filter((row: { status?: string }) => String(row?.status ?? '').toLowerCase() === 'connected');
+    for (const terminal of connected) {
+      const row = telemetryForSymbol(terminal, symbol);
+      if (!row) continue;
+      const price = side === 'BUY' ? row.ask : row.bid;
+      if (price > 0) return price;
+      const mid = row.bid > 0 && row.ask > 0 ? (row.bid + row.ask) / 2 : 0;
+      if (mid > 0) return mid;
+    }
+    return null;
   } catch {
     return null;
   }
+}
+
+function buildGuaranteedPipStopTargets(input: {
+  symbol: string;
+  side: AutonomousTradeSide;
+  entryPrice: number;
+  timeframe: string;
+  rewardRiskRatio: number;
+}): AutonomousStopTargetResult {
+  const pipSize = pipSizeForSymbol(input.symbol);
+  const minStopDistance = defaultStopPips(input.symbol, input.timeframe) * pipSize;
+  const roundedEntry = roundPrice(input.symbol, input.entryPrice);
+  const roundedStop = roundPrice(
+    input.symbol,
+    input.side === 'BUY' ? roundedEntry - minStopDistance : roundedEntry + minStopDistance,
+  );
+  const roundedTp = roundPrice(
+    input.symbol,
+    input.side === 'BUY'
+      ? roundedEntry + minStopDistance * input.rewardRiskRatio
+      : roundedEntry - minStopDistance * input.rewardRiskRatio,
+  );
+  const stopPips = stopPipsFromDistance(input.symbol, roundedEntry, roundedStop);
+  return {
+    entryPrice: roundedEntry,
+    stopLoss: roundedStop,
+    takeProfit: roundedTp,
+    takeProfitLevels: [roundedTp],
+    invalidationLevel: roundedStop,
+    stopPips,
+    rewardRiskRatio: input.rewardRiskRatio,
+    method: 'pip_default',
+  };
 }
 
 function structureStopLevel(input: {
@@ -321,8 +353,13 @@ export async function resolveAutonomousStopTargets(input: {
       minRewardRiskRatio: rules.minRewardRiskRatio,
       minStopDistance,
     });
-    if (validationError) return null;
-    method = 'pip_default';
+    return buildGuaranteedPipStopTargets({
+      symbol,
+      side: input.side,
+      entryPrice: roundedEntry,
+      timeframe,
+      rewardRiskRatio: rules.minRewardRiskRatio,
+    });
   }
 
   stopDistance = Math.abs(roundedEntry - roundedStop);

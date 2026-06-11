@@ -65,6 +65,8 @@ export interface AutonomousDecisionInput {
   symbol: string;
   timeframe: string;
   accountClass?: 'demo' | 'prop_firm' | 'live' | 'large_equity';
+  /** Lower decision thresholds while refilling open slots in continuous mode. */
+  refillMode?: boolean;
   dominantTimeframe?: string | null;
   visual?: {
     finalMarketBias?: string | null;

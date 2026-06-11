@@ -2,10 +2,11 @@ import { randomUUID } from 'crypto';
 
 import { MarketIntelligenceEngine } from '@/services/market-intelligence-engine';
 import type { TickSnapshot, TradingSession } from '@/packages/shared-types';
-import { SYSTEM_FOCUS_SYMBOLS, SYSTEM_FOCUS_SYMBOL_COUNT } from './focus-symbols';
+import { isSystemFocusSymbol, SYSTEM_FOCUS_SYMBOLS, SYSTEM_FOCUS_SYMBOL_COUNT } from './focus-symbols';
+import { isContinuousTradingEnabled } from './execution-risk-limits';
 import { countTradesOpenedTodayForSymbol } from './execution-risk-limits';
 import { getExecutionRiskSettings } from './execution-risk-settings';
-import { extractSymbolTelemetry, symbolTelemetryMap } from './mt5-symbol-telemetry';
+import { extractSymbolTelemetry, symbolTelemetryMap, type Mt5SymbolTelemetrySnapshot } from './mt5-symbol-telemetry';
 import { getOpenPositionSymbols } from './open-position-symbols';
 import { logPairSelectionEvent } from './pair-selection-audit';
 import { clampScore, parsePairCurrencies } from './pair-selector-utils';
@@ -23,9 +24,16 @@ export interface PairSelectionConfig {
   maxSelectedSymbols: number;
 }
 
+function defaultMaxSpreadPoints(): number {
+  const raw = String(process.env.CACSMS_PAIR_SELECTION_MAX_SPREAD_POINTS ?? '').trim();
+  const configured = Number(raw);
+  if (Number.isFinite(configured) && configured > 0) return configured;
+  return isContinuousTradingEnabled() ? 80 : 35;
+}
+
 export const DEFAULT_PAIR_SELECTION_CONFIG: PairSelectionConfig = {
   watchlistSymbols: [...DEFAULT_WATCHLIST],
-  maxSpreadPoints: 35,
+  maxSpreadPoints: defaultMaxSpreadPoints(),
   pairSelectionEnabled: true,
   maxSelectedSymbols: SYSTEM_FOCUS_SYMBOL_COUNT,
 };
@@ -149,6 +157,8 @@ export async function runAutonomousPairSelection(
   const macroScores = await loadPairMacroScores(watchlist);
   const now = new Date();
   const session = engine.detectSession(now);
+  const terminalConnected = Boolean(terminal?.terminalId);
+  const continuousMode = riskSettings.continuousTradingEnabled || isContinuousTradingEnabled();
   const selectionId = randomUUID();
 
   await logPairSelectionEvent({
@@ -166,8 +176,13 @@ export async function runAutonomousPairSelection(
     selectionId,
   });
 
-  const eligibleSymbols = engine.selectPairs({ symbols: watchlist, ticks, candlesBySymbol: {}, now });
-  const marketScans = engine.scan({ symbols: eligibleSymbols.length > 0 ? eligibleSymbols : watchlist, ticks, candlesBySymbol: {}, now });
+  const eligibleSymbols = continuousMode
+    ? watchlist
+    : engine.selectPairs({ symbols: watchlist, ticks, candlesBySymbol: {}, now });
+  const scanSymbols = continuousMode
+    ? watchlist
+    : (eligibleSymbols.length > 0 ? eligibleSymbols : watchlist);
+  const marketScans = engine.scan({ symbols: scanSymbols, ticks, candlesBySymbol: {}, now });
   const telemetry = symbolTelemetryMap(terminal);
 
   const candidates: PairSelectionCandidate[] = marketScans
@@ -175,13 +190,13 @@ export async function runAutonomousPairSelection(
       const tick = ticks.find((item) => item.symbol === scan.symbol);
       const telemetryRow = telemetry.get(scan.symbol);
       const spreadOk = tick ? tick.spreadPoints <= resolved.maxSpreadPoints : false;
-      const tradableTelemetry = Boolean(
-        telemetryRow?.available
-        && telemetryRow.tradable
-        && telemetryRow.sessionOpen
-        && !telemetryRow.stale
-        && spreadOk,
-      );
+      const tradableTelemetry = resolveTradableTelemetry({
+        symbol: scan.symbol,
+        telemetryRow,
+        spreadOk,
+        terminalConnected,
+        continuousMode,
+      });
       const macroScore = macroScores[scan.symbol] ?? 50;
       const macroPenalty = macroScore < 35 ? -15 : macroScore > 65 ? 8 : 0;
       const sessionBoost = session === 'overlap' ? 12 : session === 'london' || session === 'new_york' ? 8 : session === 'closed' ? 0 : 5;
@@ -195,7 +210,9 @@ export async function runAutonomousPairSelection(
         + macroPenalty,
       );
       const liquidityQualified = scan.liquidityScore >= 45 && tradableTelemetry && scan.session !== 'closed';
-      const tradable = (scan.tradable || liquidityQualified) && tradableTelemetry && scan.condition !== 'illiquid';
+      const tradable = tradableTelemetry
+        && scan.session !== 'closed'
+        && (continuousMode || (scan.condition !== 'illiquid' && (scan.tradable || liquidityQualified)));
       const reasons = [
         ...scan.reasons,
         telemetryRow
@@ -257,26 +274,40 @@ export async function runAutonomousPairSelection(
       continue;
     }
 
-    const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, openPositionSymbols, { excludeSameSymbol: true });
+    const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, openPositionSymbols, {
+      excludeSameSymbol: true,
+      continuousMode: !continuousMode,
+    });
     if (correlatedWith) {
-      candidate.blocked = true;
-      candidate.blockReason = `Correlated with open ${correlatedWith}`;
       candidate.eligibleForNewEntry = false;
       candidate.reasons.push(
-        riskSettings.continuousTradingEnabled
-          ? `Blocked: same institutional cluster as open ${correlatedWith}`
+        continuousMode
+          ? `Deferred for new entry: shares currency exposure with open ${correlatedWith} (still scanned in continuous mode)`
           : `Blocked: shares currency exposure with open ${correlatedWith}`,
       );
+      if (!continuousMode) {
+        candidate.blocked = true;
+        candidate.blockReason = `Correlated with open ${correlatedWith}`;
+        await logPairSelectionEvent({
+          eventType: 'symbol_blocked_correlation',
+          symbol: candidate.symbol,
+          selected: false,
+          message: `${candidate.symbol} blocked — correlated with open ${correlatedWith}`,
+          reasons: candidate.reasons.slice(-3),
+          metadata: { correlatedWith, compositeScore: candidate.compositeScore },
+          selectionId,
+        });
+        continue;
+      }
       await logPairSelectionEvent({
-        eventType: 'symbol_blocked_correlation',
+        eventType: 'symbol_deferred_correlation',
         symbol: candidate.symbol,
         selected: false,
-        message: `${candidate.symbol} blocked — correlated with open ${correlatedWith}`,
+        message: `${candidate.symbol} deferred for entry — correlated with open ${correlatedWith}`,
         reasons: candidate.reasons.slice(-3),
         metadata: { correlatedWith, compositeScore: candidate.compositeScore },
         selectionId,
       });
-      continue;
     }
 
     const symbolTradesToday = await countTradesOpenedTodayForSymbol(candidate.symbol);
@@ -330,12 +361,14 @@ export async function runAutonomousPairSelection(
     }
   }
 
-  const exposureSymbols = [...openPositionSymbols];
   const qualifiedSymbolsList: string[] = [];
   const newOrderTargets: PairSelectionCandidate[] = [];
-  const rankedTradable = candidates
-    .filter((candidate) => candidate.tradable && !candidate.blocked)
+  const allTradableCandidates = candidates
+    .filter((candidate) => candidate.tradable)
     .sort((a, b) => a.rank - b.rank);
+  const rankedTradable = continuousMode
+    ? allTradableCandidates
+    : allTradableCandidates.filter((candidate) => !candidate.blocked);
 
   for (const candidate of rankedTradable) {
     if (openPositionSymbols.includes(candidate.symbol)) {
@@ -343,34 +376,45 @@ export async function runAutonomousPairSelection(
       continue;
     }
 
-    const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, exposureSymbols, { excludeSameSymbol: true });
-    if (correlatedWith) {
-      if (candidate.eligibleForNewEntry) {
-        candidate.blocked = true;
-        candidate.blockReason = `Correlated with ${correlatedWith}`;
-        candidate.eligibleForNewEntry = false;
-        candidate.reasons.push(`Blocked: shares currency exposure with ${correlatedWith}`);
-        await logPairSelectionEvent({
-          eventType: 'symbol_blocked_correlation',
-          symbol: candidate.symbol,
-          selected: false,
-          message: `${candidate.symbol} blocked — correlated with ${correlatedWith}`,
-          reasons: candidate.reasons.slice(-3),
-          metadata: { correlatedWith, compositeScore: candidate.compositeScore, batch: true },
-          selectionId,
-        });
+    if (!continuousMode) {
+      const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, qualifiedSymbolsList, { excludeSameSymbol: true });
+      if (correlatedWith) {
+        if (candidate.eligibleForNewEntry) {
+          candidate.blocked = true;
+          candidate.blockReason = `Correlated with ${correlatedWith}`;
+          candidate.eligibleForNewEntry = false;
+          candidate.reasons.push(`Blocked: shares currency exposure with ${correlatedWith}`);
+          await logPairSelectionEvent({
+            eventType: 'symbol_blocked_correlation',
+            symbol: candidate.symbol,
+            selected: false,
+            message: `${candidate.symbol} blocked — correlated with ${correlatedWith}`,
+            reasons: candidate.reasons.slice(-3),
+            metadata: { correlatedWith, compositeScore: candidate.compositeScore, batch: true },
+            selectionId,
+          });
+        }
+        continue;
       }
-      continue;
     }
 
     qualifiedSymbolsList.push(candidate.symbol);
-    exposureSymbols.push(candidate.symbol);
-    if (candidate.eligibleForNewEntry && newOrderTargets.length < maxNewEntries) {
+    const entryCorrelatedWith = findCorrelatedOpenSymbol(candidate.symbol, openPositionSymbols, {
+      excludeSameSymbol: true,
+      continuousMode: false,
+    });
+    if (
+      candidate.eligibleForNewEntry
+      && !entryCorrelatedWith
+      && newOrderTargets.length < maxNewEntries
+    ) {
       newOrderTargets.push(candidate);
     }
   }
   const fallback = watchlist[0] ?? 'XAUUSD';
-  const eligibleSymbolsList = newOrderTargets.map((item) => item.symbol);
+  const eligibleSymbolsList = continuousMode
+    ? allTradableCandidates.map((candidate) => candidate.symbol)
+    : newOrderTargets.map((item) => item.symbol);
   const selectedSymbols = [...new Set([...qualifiedSymbolsList, ...openPositionSymbols])];
   const selectedSymbol = newOrderTargets[0]?.symbol
     ?? qualifiedSymbolsList[0]
@@ -561,23 +605,51 @@ async function fetchBestConnectedTerminal(): Promise<BridgeTerminal | null> {
   }
 }
 
+function resolveTradableTelemetry(input: {
+  symbol: string;
+  telemetryRow: Mt5SymbolTelemetrySnapshot | undefined;
+  spreadOk: boolean;
+  terminalConnected: boolean;
+  continuousMode: boolean;
+}): boolean {
+  const { symbol, telemetryRow, spreadOk, terminalConnected, continuousMode } = input;
+  if (telemetryRow) {
+    return Boolean(
+      telemetryRow.available
+      && telemetryRow.tradable
+      && telemetryRow.sessionOpen
+      && !telemetryRow.stale
+      && spreadOk,
+    );
+  }
+  if (continuousMode && terminalConnected && isSystemFocusSymbol(symbol)) {
+    return true;
+  }
+  return false;
+}
+
 function buildTickSnapshots(watchlist: string[], terminal: BridgeTerminal | null, maxSpreadPoints: number): TickSnapshot[] {
   const now = new Date().toISOString();
   const telemetryRows = extractSymbolTelemetry(terminal);
   const telemetry = new Map(telemetryRows.map((row) => [row.symbol, row]));
   return watchlist.map((symbol) => {
     const row = telemetry.get(symbol);
-    const available = row?.available ?? false;
-    const tradable = row ? row.tradable && row.sessionOpen && !row.stale : false;
+    const fallbackQuote = isSystemFocusSymbol(symbol) && !row;
+    const available = row?.available ?? fallbackQuote;
+    const tradable = row
+      ? row.tradable && row.sessionOpen && !row.stale
+      : fallbackQuote;
     const spreadPoints = Number.isFinite(Number(row?.spreadPoints))
       ? Number(row?.spreadPoints)
-      : available
-        ? maxSpreadPoints
-        : maxSpreadPoints + 50;
+      : fallbackQuote
+        ? 18
+        : available
+          ? maxSpreadPoints
+          : maxSpreadPoints + 50;
     return {
       symbol,
-      bid: row?.bid ?? 0,
-      ask: row?.ask ?? 0,
+      bid: row?.bid ?? (fallbackQuote ? 1 : 0),
+      ask: row?.ask ?? (fallbackQuote ? 1.0002 : 0),
       spreadPoints: tradable ? spreadPoints : maxSpreadPoints + 25,
       serverTime: now,
       receivedAt: row?.receivedAt ?? now,

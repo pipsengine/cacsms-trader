@@ -115,14 +115,24 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     blockers.push(`Decision ${input.decision.decision} is not executable.`);
   }
 
-  if (input.decision.confidenceScore < input.config.confidenceThreshold) {
-    blockers.push(`Confidence ${input.decision.confidenceScore}% is below threshold ${input.config.confidenceThreshold}%.`);
+  const account = await resolveExecutionAccountContext();
+  const { shouldRelaxContinuousTradingLimits } = await import('@/lib/autonomy-pipeline-throttle');
+  const { getContinuousRefillDecisionThresholds } = await import('@/lib/autonomy-account-profiles');
+  const relaxed = await shouldRelaxContinuousTradingLimits().catch(() => false);
+  const refillThresholds = getContinuousRefillDecisionThresholds(account?.accountClass ?? 'demo');
+  const confidenceThreshold = relaxed
+    ? Math.min(input.config.confidenceThreshold, refillThresholds.confidence)
+    : input.config.confidenceThreshold;
+  const readinessThreshold = relaxed
+    ? Math.min(getAutonomyThresholdProfile(account?.accountClass ?? 'demo').decisionReadinessThreshold, refillThresholds.readiness)
+    : getAutonomyThresholdProfile(account?.accountClass ?? 'demo').decisionReadinessThreshold;
+
+  if (input.decision.confidenceScore < confidenceThreshold) {
+    blockers.push(`Confidence ${input.decision.confidenceScore}% is below threshold ${confidenceThreshold}%.`);
   }
 
-  const account = await resolveExecutionAccountContext();
-  const profile = getAutonomyThresholdProfile(account?.accountClass ?? 'demo');
-  if (input.decision.setupReadinessScore < profile.decisionReadinessThreshold) {
-    blockers.push(`Setup readiness ${input.decision.setupReadinessScore}% is below minimum ${profile.decisionReadinessThreshold}%.`);
+  if (input.decision.setupReadinessScore < readinessThreshold) {
+    blockers.push(`Setup readiness ${input.decision.setupReadinessScore}% is below minimum ${readinessThreshold}%.`);
   }
 
   if (input.decision.riskScore > input.config.riskThreshold) {
@@ -171,16 +181,16 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     blockers.push(input.decision.macroRiskWarning);
   }
 
-  if (
-    isStopLossRequired()
-    && ['BUY', 'SELL'].includes(input.decision.decision)
-    && !hasValidStopTargets({
+  if (isStopLossRequired() && ['BUY', 'SELL'].includes(input.decision.decision)) {
+    const takeProfit = input.decision.takeProfitLevels?.[0] ?? null;
+    const valid = hasValidStopTargets({
       side: input.decision.decision,
       stopLoss: input.decision.stopLoss,
-      takeProfit: input.decision.takeProfitLevels?.[0] ?? null,
-    })
-  ) {
-    blockers.push('Stop loss and take profit must be resolved before execution dispatch.');
+      takeProfit,
+    });
+    if (!valid) {
+      blockers.push('Stop loss and take profit must be resolved before execution dispatch.');
+    }
   }
 
   return {
@@ -314,7 +324,22 @@ export async function dispatchAutonomyDecision(input: {
     };
   }
 
-  const { decision: executableDecision, stopTargets } = await resolveExecutableAutonomyDecision(input.decision);
+  let { decision: executableDecision, stopTargets } = await resolveExecutableAutonomyDecision(input.decision);
+  if (!stopTargets && ['BUY', 'SELL'].includes(input.decision.decision)) {
+    stopTargets = await resolveAutonomousStopTargets({
+      symbol: input.decision.symbol,
+      timeframe: input.decision.timeframe,
+      side: input.decision.decision as AutonomousTradeSide,
+    });
+    if (stopTargets) {
+      executableDecision = {
+        ...executableDecision,
+        stopLoss: stopTargets.stopLoss,
+        takeProfitLevels: stopTargets.takeProfitLevels,
+        invalidationLevel: stopTargets.invalidationLevel,
+      };
+    }
+  }
   const checklist = await evaluateAutonomyExecutionChecklist({
     decision: executableDecision,
     config: input.config,

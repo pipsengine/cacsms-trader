@@ -118,7 +118,16 @@ export async function advancePipelineRiskGate(
     const row = existing.rows[0];
     const allowed = Boolean(row?.allowed);
     const code = String(row?.code ?? '');
-    if (!allowed && (code === 'consecutive_loss_limit' || code === 'stop_loss_required' || code === 'invalid_stop_loss')) {
+    const actionable = decision.decision === 'BUY' || decision.decision === 'SELL';
+    if (
+      !allowed
+      && (
+        code === 'consecutive_loss_limit'
+        || code === 'stop_loss_required'
+        || code === 'invalid_stop_loss'
+        || (!actionable && code !== 'signal_not_actionable')
+      )
+    ) {
       await queryPostgres('DELETE FROM risk_decisions WHERE intent_id = $1', [decision.decisionLogId]);
     } else {
       return {
@@ -184,12 +193,12 @@ export async function advancePipelineRiskGate(
   });
 
   const actionable = decision.decision === 'BUY' || decision.decision === 'SELL';
-  const status = evaluation.decision.allowed
-    ? (actionable ? 'completed' : 'completed')
-    : 'blocked';
+  const status = evaluation.decision.allowed ? 'completed' : 'blocked';
   const detail = actionable
     ? evaluation.decision.message
-    : `${evaluation.decision.message} Signal is ${decision.decision}; execution remains gated until BUY/SELL.`;
+    : evaluation.decision.code === 'signal_not_actionable'
+      ? evaluation.decision.message
+      : `${evaluation.decision.message} Signal is ${decision.decision}; execution remains gated until BUY/SELL.`;
 
   if (sessionId && evaluation.decision.allowed) {
     await completePipelineStage(sessionId, 'risk-gate', 100, {
@@ -246,14 +255,45 @@ export async function advancePipelineExecution(
     );
     const row = existing.rows[0];
     const dispatchStatus = String(row?.status ?? 'blocked');
+    const blockers = Array.isArray(row?.blockers_json) ? row.blockers_json.map(String) : [];
+    const stopLossBlocker = blockers.some((item) => /stop loss/i.test(item));
+    if (dispatchStatus === 'blocked' && stopLossBlocker) {
+      await queryPostgres(
+        'DELETE FROM autonomy_execution_dispatches WHERE decision_log_id = $1 AND status = $2',
+        [decision.decisionLogId, 'blocked'],
+      ).catch(() => null);
+    } else if (dispatchStatus === 'dispatched' || dispatchStatus === 'queued') {
+      return {
+        status: 'dispatched',
+        detail: `Execution dispatch already recorded (${dispatchStatus}).`,
+        metrics: {
+          decisionLogId: decision.decisionLogId,
+          commandId: row?.command_id ? String(row.command_id) : null,
+          blockers,
+        },
+      };
+    } else if (dispatchStatus === 'blocked') {
+      return {
+        status: 'blocked',
+        detail: `Execution blocked: ${blockers.join(' ') || dispatchStatus}`,
+        metrics: {
+          decisionLogId: decision.decisionLogId,
+          commandId: row?.command_id ? String(row.command_id) : null,
+          blockers,
+        },
+      };
+    }
+  }
+
+  const riskApproval = await queryPostgres(
+    'SELECT allowed FROM risk_decisions WHERE intent_id = $1 ORDER BY created_at DESC LIMIT 1',
+    [decision.decisionLogId],
+  );
+  if (!Boolean(riskApproval.rows[0]?.allowed)) {
     return {
-      status: dispatchStatus === 'dispatched' || dispatchStatus === 'queued' ? 'dispatched' : 'blocked',
-      detail: `Execution dispatch already recorded (${dispatchStatus}).`,
-      metrics: {
-        decisionLogId: decision.decisionLogId,
-        commandId: row?.command_id ? String(row.command_id) : null,
-        blockers: Array.isArray(row?.blockers_json) ? row.blockers_json : [],
-      },
+      status: 'blocked',
+      detail: 'Execution waiting for risk gate approval.',
+      metrics: { decisionLogId: decision.decisionLogId },
     };
   }
 
@@ -326,12 +366,14 @@ export async function advancePipelineRiskAndExecution(
     summary.errors.push(error instanceof Error ? error.message : 'Risk gate evaluation failed.');
   }
 
-  try {
-    const execution = await advancePipelineExecution(symbol, decision, sessionId);
-    summary.execution = execution.status;
-  } catch (error) {
-    summary.execution = 'failed';
-    summary.errors.push(error instanceof Error ? error.message : 'Execution dispatch failed.');
+  if (summary.riskGate === 'completed') {
+    try {
+      const execution = await advancePipelineExecution(symbol, decision, sessionId);
+      summary.execution = execution.status;
+    } catch (error) {
+      summary.execution = 'failed';
+      summary.errors.push(error instanceof Error ? error.message : 'Execution dispatch failed.');
+    }
   }
 
   return summary;
@@ -359,10 +401,14 @@ export async function getPipelineRiskStatus(symbol: string) {
   const row = result.rows[0];
   const allowed = Boolean(row.allowed);
   const actionable = decision.decision === 'BUY' || decision.decision === 'SELL';
+  const code = String(row.code ?? '');
+  const cleared = allowed && code === 'signal_not_actionable';
   return {
     status: allowed ? 'completed' as const : 'in_progress' as const,
-    detail: `${allowed ? 'Risk approved' : 'Risk blocked'} for ${decision.decision}: ${String(row.message)}`,
-    progress: allowed ? (actionable ? 100 : 85) : 55,
+    detail: cleared
+      ? String(row.message)
+      : `${allowed ? 'Risk approved' : 'Risk blocked'} for ${decision.decision}: ${String(row.message)}`,
+    progress: allowed ? (actionable ? 100 : 90) : 55,
     metrics: {
       decision: decision.decision,
       decisionLogId: decision.decisionLogId,

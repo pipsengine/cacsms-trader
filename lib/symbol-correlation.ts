@@ -15,7 +15,7 @@ export function getInstitutionalCorrelationCluster(symbol: string): string {
   if (normalized.startsWith('NZD')) return 'nzd_pack';
   if (normalized.startsWith('XAU') || normalized.startsWith('XAG')) return 'commodity_metal';
   if (normalized.startsWith('BTC') || normalized.startsWith('ETH')) return 'crypto';
-  if (['US30', 'NASDAQ100', 'NAS100', 'SP500', 'SPX500', 'US500'].includes(normalized)) return 'us_index';
+  if (['US30', 'NASDAQ100', 'NAS100', 'SP500', 'SPX500', 'US500', 'UK100', 'FTSE100'].includes(normalized)) return 'us_index';
   if (normalized.startsWith('USD')) return 'usd_quote';
   return `other_${normalized}`;
 }

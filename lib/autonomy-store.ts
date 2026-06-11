@@ -554,13 +554,23 @@ async function runWorker(workerName: AutonomyWorkerName, symbol: string | null, 
   throw new Error(`Worker ${workerName} is not registered.`);
 }
 
-export async function generateAutonomousSignal(symbol: string, timeframe: string) {
+export async function generateAutonomousSignal(
+  symbol: string,
+  timeframe: string,
+  options: { refillMode?: boolean } = {},
+) {
   const account = await resolveExecutionAccountContext();
   const visual = await getLatestVisualMarketInterpretation(symbol, timeframe) ?? await analyzeVisualMarketInterpretation({ symbol, timeframe });
+  let refillMode = options.refillMode === true;
+  if (!refillMode) {
+    const { shouldRelaxContinuousTradingLimits } = await import('@/lib/autonomy-pipeline-throttle');
+    refillMode = await shouldRelaxContinuousTradingLimits();
+  }
   let decision = buildAutonomousDecision({
     symbol,
     timeframe,
     accountClass: account?.accountClass ?? 'demo',
+    refillMode,
     dominantTimeframe: visual.dominantTimeframe,
     visual,
     macro: await loadMacroContext(symbol),
@@ -797,7 +807,7 @@ export async function ensureFocusSymbolsConfigured() {
     watchlistSymbols: [...SYSTEM_FOCUS_SYMBOLS],
     activeSymbols: [...SYSTEM_FOCUS_SYMBOLS],
     maxSelectedSymbols: SYSTEM_FOCUS_SYMBOLS.length,
-    workerConcurrency: Math.max(config.workerConcurrency, 8),
+    workerConcurrency: Math.max(config.workerConcurrency, 12),
   };
   await saveAutonomyConfig(nextConfig);
   await syncAutonomySymbolSchedules(nextConfig);
