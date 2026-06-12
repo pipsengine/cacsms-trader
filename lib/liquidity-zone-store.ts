@@ -89,7 +89,14 @@ CREATE INDEX IF NOT EXISTS idx_liquidity_feedback_zone ON liquidity_detection_fe
 let schemaReady: Promise<void> | null = null;
 
 export async function ensureLiquiditySchema() {
-  if (!schemaReady) schemaReady = queryPostgres(schemaSql).then(() => undefined);
+  if (!schemaReady) {
+    schemaReady = queryPostgres(schemaSql)
+      .then(() => undefined)
+      .catch((error) => {
+        schemaReady = null;
+        throw error;
+      });
+  }
   return schemaReady;
 }
 
@@ -123,6 +130,20 @@ export async function getLiquidityAnalysis(captureId: string): Promise<Liquidity
     getLiquidityVoids(captureId),
   ]);
   return { captureId, liquidityZones, sweeps, voids, summary: summarize(liquidityZones) };
+}
+
+export async function getLiquidityCoverageMap(): Promise<Record<string, number>> {
+  await ensureLiquiditySchema();
+  const result = await queryPostgres(`
+    SELECT chart_capture_id, COUNT(*)::int AS zone_count
+    FROM liquidity_zone_detections
+    GROUP BY chart_capture_id
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.chart_capture_id)] = Number(row.zone_count);
+  }
+  return coverage;
 }
 
 export async function getLiquidityZones(captureId: string): Promise<LiquidityZoneDetection[]> {

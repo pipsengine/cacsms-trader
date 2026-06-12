@@ -17,6 +17,8 @@ interface BridgeCaptureCommand {
   type: string;
   payload: {
     symbol?: string;
+    canonicalSymbol?: string;
+    brokerSymbol?: string;
     timeframe?: string;
     sessionId?: string;
     barCount?: number;
@@ -127,7 +129,8 @@ async function fetchBridgeCaptureCommands(symbol?: string, status?: string): Pro
     .filter((command) => {
       if (!symbol) return true;
       const commandSymbol = String(command.payload?.symbol ?? '').toUpperCase();
-      return commandSymbol === symbol.toUpperCase();
+      const canonicalSymbol = String(command.payload?.canonicalSymbol ?? '').toUpperCase();
+      return commandSymbol === symbol.toUpperCase() || canonicalSymbol === symbol.toUpperCase();
     })
     .sort((left, right) => Date.parse(left.lastAckAt ?? left.createdAt ?? '') - Date.parse(right.lastAckAt ?? right.createdAt ?? ''));
 }
@@ -208,7 +211,7 @@ async function ingestCaptureCommand(command: BridgeCaptureCommand): Promise<stri
   }
 
   const result = await createCaptureAndRunAnalysis({
-    symbol: parsed.symbol,
+    symbol: String(command.payload.canonicalSymbol ?? parsed.symbol).toUpperCase(),
     timeframe: parsed.timeframe,
     sourcePlatform: 'mt5',
     captureType: 'broker_snapshot',
@@ -217,6 +220,7 @@ async function ingestCaptureCommand(command: BridgeCaptureCommand): Promise<stri
       mt5CommandId: command.commandId,
       terminalId: command.terminalId,
       sessionId: command.payload.sessionId ?? null,
+      brokerSymbol: command.payload.brokerSymbol ?? parsed.symbol,
       bridgeTimeframe: command.payload.timeframe ?? null,
       barCount: parsed.bars.length,
       ingestionSource: 'mt5_capture_ack',

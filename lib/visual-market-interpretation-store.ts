@@ -337,15 +337,15 @@ async function persistInterpretation(jobId: string, symbol: string, timeframe: s
       liquidity_objective, market_phase, setup_readiness_score, final_decision, confidence_score,
       entry_readiness, invalidation_condition, risk_warning, full_ai_market_narrative,
       previous_interpretation_json, metadata_json, updated_at
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now())
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18::jsonb,now())
   `, [
     id, jobId, symbol, timeframe, fused.dominantTimeframe, fused.finalMarketBias, fused.institutionalInterpretation,
     fused.liquidityObjective, fused.marketPhase, fused.setupReadinessScore, fused.finalDecision,
     fused.confidenceScore, fused.entryReadiness, fused.invalidationCondition, fused.riskWarning,
-    fused.fullNarrative, previous ? { id: previous.id, decision: previous.finalDecision, confidence: previous.confidenceScore, createdAt: previous.createdAt } : {},
-    { rawSignals: raw, signals: fused.signals },
+    fused.fullNarrative, JSON.stringify(previous ? { id: previous.id, decision: previous.finalDecision, confidence: previous.confidenceScore, createdAt: previous.createdAt } : {}),
+    JSON.stringify({ rawSignals: raw, signals: fused.signals }),
   ]);
-  await queryPostgres('INSERT INTO final_decision_scores (id, market_interpretation_id, scores_json, weights_json) VALUES ($1,$2,$3,$4)', [randomUUID(), id, fused.decisionScores, marketInterpretationWeights]);
+  await queryPostgres('INSERT INTO final_decision_scores (id, market_interpretation_id, scores_json, weights_json) VALUES ($1,$2,$3::jsonb,$4::jsonb)', [randomUUID(), id, JSON.stringify(fused.decisionScores), JSON.stringify(marketInterpretationWeights)]);
   for (const state of fused.timeframeStates) {
     await queryPostgres('INSERT INTO timeframe_control_states (id, market_interpretation_id, timeframe, bias, control_score, confirms_entry, narrative_text) VALUES ($1,$2,$3,$4,$5,$6,$7)', [randomUUID(), id, state.timeframe, state.bias, state.controlScore, state.confirmsEntry, state.narrative]);
   }
@@ -406,8 +406,8 @@ async function hydrate(row: Row): Promise<StoredVisualMarketInterpretation> {
 async function createJob(jobId: string, symbol: string, timeframe: string) {
   await queryPostgres(`
     INSERT INTO visual_market_interpretation_jobs (id, symbol, timeframe, status, stage, metadata_json)
-    VALUES ($1,$2,$3,$4,$5,$6)
-  `, [jobId, symbol, timeframe, 'queued', 'created', {}]);
+    VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+  `, [jobId, symbol, timeframe, 'queued', 'created', JSON.stringify({})]);
 }
 
 async function updateJob(jobId: string, status: string, stage: string, metadata: Record<string, unknown> = {}) {
@@ -419,7 +419,7 @@ async function updateJob(jobId: string, status: string, stage: string, metadata:
         metadata_json = metadata_json || $5::jsonb,
         completed_at = CASE WHEN $2 IN ('completed', 'failed') THEN now() ELSE completed_at END
     WHERE id = $1
-  `, [jobId, status, stage, typeof metadata.error === 'string' ? metadata.error : null, metadata]);
+  `, [jobId, status, stage, typeof metadata.error === 'string' ? metadata.error : null, JSON.stringify(metadata)]);
 }
 
 function signal(name: string, weight: number, bias: MarketBias, confidence: number, confirmsEntry: boolean, narrative?: string | null): FusionSignal {
@@ -435,13 +435,27 @@ function mtfDecisionBias(finalDecision?: string | null, finalBias?: string | nul
 
 function mtfLowerConfirms(lowerTimeframeConfirmation?: string | null): boolean {
   const text = String(lowerTimeframeConfirmation ?? '').toLowerCase();
-  return text.includes('confirm') || text.includes('reclaim') || text.includes('completion') || text.includes('aligns');
+  return text.includes('confirm')
+    || text.includes('reclaim')
+    || text.includes('reject')
+    || text.includes('rejection')
+    || text.includes('breakdown')
+    || text.includes('breakout')
+    || text.includes('displacement')
+    || text.includes('completion')
+    || text.includes('aligns')
+    || text.includes('bearish')
+    || text.includes('bullish');
 }
 
 function biasFromText(value?: string | null): MarketBias {
   const text = String(value ?? '').toLowerCase();
-  if (text.includes('buy') || text.includes('bull') || text.includes('long') || text.includes('demand') || text.includes('accumulation')) return 'bullish';
-  if (text.includes('sell') || text.includes('bear') || text.includes('short') || text.includes('supply') || text.includes('distribution')) return 'bearish';
+  if (/\bbuy[_\s-]?side[_\s-]?(sweep|liquidity|stop|pool)/.test(text)) return 'bearish';
+  if (/\bsell[_\s-]?side[_\s-]?(sweep|liquidity|stop|pool)/.test(text)) return 'bullish';
+  if (text.includes('broken_support_now_resistance') || text.includes('support break') || text.includes('broken support') || text.includes('resistance rejection')) return 'bearish';
+  if (text.includes('broken_resistance_now_support') || text.includes('resistance break') || text.includes('broken resistance') || text.includes('support rejection')) return 'bullish';
+  if (/\b(buy|bull|long|demand|accumulation)\b/.test(text)) return 'bullish';
+  if (/\b(sell|bear|short|supply|distribution)\b/.test(text)) return 'bearish';
   if (text.includes('mixed') || text.includes('wait') || text.includes('conflict')) return 'mixed';
   return 'neutral';
 }

@@ -112,6 +112,11 @@ export async function markPositionClosed(input: {
   ).catch(() => null);
 }
 
+export type OpenPositionFilter = {
+  terminalId?: string;
+  accountNumber?: string;
+};
+
 export type OpenPositionMetrics = {
   trackedOpen: number;
   terminalOpen: number;
@@ -119,10 +124,35 @@ export type OpenPositionMetrics = {
   positions: ExecutionOpenPosition[];
 };
 
-async function countTrackedOpenPositions(): Promise<number> {
+function appendPositionFilter(
+  params: Array<string | number>,
+  conditions: string[],
+  filter?: OpenPositionFilter,
+  alias = 'p',
+) {
+  if (filter?.terminalId) {
+    params.push(filter.terminalId);
+    conditions.push(`${alias}.terminal_id = $${params.length}`);
+  }
+  if (filter?.accountNumber) {
+    params.push(filter.accountNumber);
+    conditions.push(`EXISTS (
+      SELECT 1
+      FROM mt5_terminals t
+      WHERE t.terminal_id = ${alias}.terminal_id
+        AND t.account_number = $${params.length}
+    )`);
+  }
+}
+
+async function countTrackedOpenPositions(filter?: OpenPositionFilter): Promise<number> {
   try {
+    const params: Array<string | number> = [];
+    const conditions = [`p.status IN ('open', 'partial')`];
+    appendPositionFilter(params, conditions, filter, 'p');
     const result = await queryPostgres(
-      `SELECT COUNT(*)::int AS count FROM execution_open_positions WHERE status IN ('open', 'partial')`,
+      `SELECT COUNT(*)::int AS count FROM execution_open_positions p WHERE ${conditions.join(' AND ')}`,
+      params,
     );
     return Number((result.rows[0] as { count?: number })?.count ?? 0);
   } catch {
@@ -130,8 +160,11 @@ async function countTrackedOpenPositions(): Promise<number> {
   }
 }
 
-export async function alignTrackedPositionsWithTerminal(terminalOpen: number): Promise<number> {
+export async function alignTrackedPositionsWithTerminal(terminalOpen: number, filter?: OpenPositionFilter): Promise<number> {
   try {
+    const params: Array<string | number> = [];
+    const conditions = [`p.status IN ('open', 'partial')`];
+    appendPositionFilter(params, conditions, filter, 'p');
     if (terminalOpen <= 0) {
       const result = await queryPostgres(
         `
@@ -139,20 +172,26 @@ export async function alignTrackedPositionsWithTerminal(terminalOpen: number): P
           SET status = 'closed',
               closed_at = now(),
               updated_at = now()
-          WHERE status IN ('open', 'partial')
+          WHERE id IN (
+            SELECT p.id
+            FROM execution_open_positions p
+            WHERE ${conditions.join(' AND ')}
+          )
           RETURNING id
         `,
+        params,
       );
       return result.rows.length;
     }
 
+    params.push(terminalOpen);
     const result = await queryPostgres(
       `
         WITH ranked AS (
           SELECT id,
                  ROW_NUMBER() OVER (ORDER BY opened_at DESC, id DESC) AS row_number
-          FROM execution_open_positions
-          WHERE status IN ('open', 'partial')
+          FROM execution_open_positions p
+          WHERE ${conditions.join(' AND ')}
         )
         UPDATE execution_open_positions p
         SET status = 'closed',
@@ -160,10 +199,10 @@ export async function alignTrackedPositionsWithTerminal(terminalOpen: number): P
             updated_at = now()
         FROM ranked r
         WHERE p.id = r.id
-          AND r.row_number > $1
+          AND r.row_number > $${params.length}
         RETURNING p.id
       `,
-      [terminalOpen],
+      params,
     );
     return result.rows.length;
   } catch {
@@ -171,11 +210,34 @@ export async function alignTrackedPositionsWithTerminal(terminalOpen: number): P
   }
 }
 
-export async function reconcileOpenPositionsFromExecutedCommands(terminalOpen: number): Promise<number> {
+export async function reconcileOpenPositionsFromExecutedCommands(terminalOpen: number, filter?: OpenPositionFilter): Promise<number> {
   try {
-    const trackedOpen = await countTrackedOpenPositions();
+    const trackedOpen = await countTrackedOpenPositions(filter);
     const slotsRemaining = Math.max(0, terminalOpen - trackedOpen);
     if (slotsRemaining <= 0) return 0;
+
+    const params: Array<string | number> = [];
+    const conditions = [
+      `upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')`,
+      `c.lifecycle_state IN ('EXECUTED', 'ACKNOWLEDGED')`,
+      `c.ticket IS NOT NULL`,
+      `btrim(c.ticket) <> ''`,
+      `c.created_at >= now() - interval '7 days'`,
+    ];
+    if (filter?.terminalId) {
+      params.push(filter.terminalId);
+      conditions.push(`c.terminal_id = $${params.length}`);
+    }
+    if (filter?.accountNumber) {
+      params.push(filter.accountNumber);
+      conditions.push(`EXISTS (
+        SELECT 1
+        FROM mt5_terminals t
+        WHERE t.terminal_id = c.terminal_id
+          AND t.account_number = $${params.length}
+      )`);
+    }
+    params.push(slotsRemaining);
 
     const result = await queryPostgres(
       `
@@ -189,11 +251,7 @@ export async function reconcileOpenPositionsFromExecutedCommands(terminalOpen: n
           c.executed_price,
           c.payload
         FROM execution_commands c
-        WHERE upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
-          AND c.lifecycle_state IN ('EXECUTED', 'ACKNOWLEDGED')
-          AND c.ticket IS NOT NULL
-          AND btrim(c.ticket) <> ''
-          AND c.created_at >= now() - interval '7 days'
+        WHERE ${conditions.join(' AND ')}
           AND NOT EXISTS (
             SELECT 1
             FROM execution_open_positions p
@@ -202,9 +260,9 @@ export async function reconcileOpenPositionsFromExecutedCommands(terminalOpen: n
               AND p.status IN ('open', 'partial')
           )
         ORDER BY c.created_at DESC
-        LIMIT $1
+        LIMIT $${params.length}
       `,
-      [slotsRemaining],
+      params,
     );
 
     let inserted = 0;
@@ -231,8 +289,18 @@ export async function reconcileOpenPositionsFromExecutedCommands(terminalOpen: n
   }
 }
 
-async function getTerminalOpenOrderCount(): Promise<number> {
+async function getTerminalOpenOrderCount(filter?: OpenPositionFilter): Promise<number> {
   try {
+    const params: string[] = [];
+    const conditions = [`t.connection_status IN ('connected', 'degraded')`];
+    if (filter?.terminalId) {
+      params.push(filter.terminalId);
+      conditions.push(`t.terminal_id = $${params.length}`);
+    }
+    if (filter?.accountNumber) {
+      params.push(filter.accountNumber);
+      conditions.push(`t.account_number = $${params.length}`);
+    }
     const result = await queryPostgres(
       `
         SELECT
@@ -246,8 +314,9 @@ async function getTerminalOpenOrderCount(): Promise<number> {
           ), 0)::int AS resolved_total
         FROM mt5_terminals t
         JOIN trading_accounts a ON a.account_number = t.account_number
-        WHERE t.connection_status IN ('connected', 'degraded')
+        WHERE ${conditions.join(' AND ')}
       `,
+      params,
     );
     const row = result.rows[0] as { tracked_total?: number; resolved_total?: number } | undefined;
     return Math.max(Number(row?.tracked_total ?? 0), Number(row?.resolved_total ?? 0));
@@ -256,11 +325,11 @@ async function getTerminalOpenOrderCount(): Promise<number> {
   }
 }
 
-export async function getOpenPositionMetrics(filter?: { terminalId?: string }): Promise<OpenPositionMetrics> {
-  const terminalOpen = await getTerminalOpenOrderCount();
-  await alignTrackedPositionsWithTerminal(terminalOpen);
-  await reconcileOpenPositionsFromExecutedCommands(terminalOpen);
-  const positions = await listOpenPositions({ terminalId: filter?.terminalId, limit: 100 });
+export async function getOpenPositionMetrics(filter?: OpenPositionFilter): Promise<OpenPositionMetrics> {
+  const terminalOpen = await getTerminalOpenOrderCount(filter);
+  await alignTrackedPositionsWithTerminal(terminalOpen, filter);
+  await reconcileOpenPositionsFromExecutedCommands(terminalOpen, filter);
+  const positions = await listOpenPositions({ ...filter, limit: 100 });
   const trackedOpen = positions.length;
   return {
     trackedOpen,
@@ -270,21 +339,18 @@ export async function getOpenPositionMetrics(filter?: { terminalId?: string }): 
   };
 }
 
-export async function listOpenPositions(filter?: { terminalId?: string; limit?: number }): Promise<ExecutionOpenPosition[]> {
+export async function listOpenPositions(filter?: OpenPositionFilter & { limit?: number }): Promise<ExecutionOpenPosition[]> {
   const params: Array<string | number> = [];
-  const conditions = [`status IN ('open', 'partial')`];
-  if (filter?.terminalId) {
-    params.push(filter.terminalId);
-    conditions.push(`terminal_id = $${params.length}`);
-  }
+  const conditions = [`p.status IN ('open', 'partial')`];
+  appendPositionFilter(params, conditions, filter, 'p');
   params.push(Math.min(200, Math.max(1, Number(filter?.limit ?? 100))));
   try {
     const result = await queryPostgres(
       `
-        SELECT *
-        FROM execution_open_positions
+        SELECT p.*
+        FROM execution_open_positions p
         WHERE ${conditions.join(' AND ')}
-        ORDER BY opened_at DESC
+        ORDER BY p.opened_at DESC
         LIMIT $${params.length}
       `,
       params,
@@ -292,6 +358,42 @@ export async function listOpenPositions(filter?: { terminalId?: string; limit?: 
     return result.rows.map((row) => mapRow(row as Record<string, unknown>));
   } catch {
     return [];
+  }
+}
+
+export async function getOpenPositionExposureForSymbol(
+  symbol: string,
+  filter?: OpenPositionFilter,
+): Promise<{ count: number; volumeLots: number }> {
+  const normalized = symbol.toUpperCase().trim();
+  if (!normalized) return { count: 0, volumeLots: 0 };
+  const positions = await listOpenPositions({ ...filter, limit: 200 });
+  const matching = positions.filter((position) => position.symbol?.toUpperCase() === normalized);
+  return {
+    count: matching.length,
+    volumeLots: Number(matching.reduce((sum, position) => sum + Number(position.volumeLots ?? 0), 0).toFixed(4)),
+  };
+}
+
+export async function countUnprotectedOpenPositions(filter?: OpenPositionFilter): Promise<number> {
+  const params: Array<string | number> = [];
+  const conditions = [
+    `p.status IN ('open', 'partial')`,
+    `(p.stop_loss IS NULL OR p.stop_loss <= 0 OR p.take_profit IS NULL OR p.take_profit <= 0)`,
+  ];
+  appendPositionFilter(params, conditions, filter, 'p');
+  try {
+    const result = await queryPostgres(
+      `
+        SELECT COUNT(*)::int AS count
+        FROM execution_open_positions p
+        WHERE ${conditions.join(' AND ')}
+      `,
+      params,
+    );
+    return Number((result.rows[0] as { count?: number })?.count ?? 0);
+  } catch {
+    return 0;
   }
 }
 

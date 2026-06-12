@@ -23,13 +23,13 @@ function symbolsFromSnapshots(raw: unknown): string[] {
 }
 
 /** Distinct symbols with live open exposure (registry synced to terminal, then EA snapshots). */
-export async function getOpenPositionSymbols(): Promise<string[]> {
-  await getOpenPositionMetrics().catch(() => null);
+export async function getOpenPositionSymbols(filter?: { terminalId?: string; accountNumber?: string }): Promise<string[]> {
+  await getOpenPositionMetrics(filter).catch(() => null);
 
   const symbols = new Set<string>();
 
   try {
-    const positions = await listOpenPositions({ limit: 100 });
+      const positions = await listOpenPositions({ ...filter, limit: 100 });
     for (const position of positions) {
       if (position.symbol) symbols.add(position.symbol.toUpperCase());
     }

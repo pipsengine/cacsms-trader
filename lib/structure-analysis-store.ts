@@ -81,7 +81,14 @@ CREATE INDEX IF NOT EXISTS idx_structure_feedback_output ON structure_feedback(s
 let schemaReady: Promise<void> | null = null;
 
 export async function ensureStructureSchema() {
-  if (!schemaReady) schemaReady = queryPostgres(schemaSql).then(() => undefined);
+  if (!schemaReady) {
+    schemaReady = queryPostgres(schemaSql)
+      .then(() => undefined)
+      .catch((error) => {
+        schemaReady = null;
+        throw error;
+      });
+  }
   return schemaReady;
 }
 
@@ -156,6 +163,20 @@ export async function getStructureChoch(captureId: string): Promise<StructureEve
 export async function getStructureFinalBias(captureId: string) {
   const analysis = await getStructureAnalysis(captureId);
   return analysis.finalBias;
+}
+
+export async function getStructureCoverageMap(): Promise<Record<string, number>> {
+  await ensureStructureSchema();
+  const result = await queryPostgres(`
+    SELECT chart_capture_id, COUNT(*)::int AS event_count
+    FROM structure_events
+    GROUP BY chart_capture_id
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.chart_capture_id)] = Number(row.event_count);
+  }
+  return coverage;
 }
 
 export async function createStructureFeedback(input: {

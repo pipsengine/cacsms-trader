@@ -290,7 +290,7 @@ async function executeAutonomousPairSelection(
       continue;
     }
 
-    if (openPositionSymbols.includes(candidate.symbol)) {
+    if (!continuousMode && openPositionSymbols.includes(candidate.symbol)) {
       candidate.eligibleForNewEntry = false;
       candidate.reasons.push('Open position already active — monitoring only, not a new entry target');
       if (verboseAudit) {
@@ -305,6 +305,11 @@ async function executeAutonomousPairSelection(
         });
       }
       continue;
+    }
+
+    if (continuousMode && openPositionSymbols.includes(candidate.symbol)) {
+      candidate.eligibleForNewEntry = true;
+      candidate.reasons.push('Open exposure already active - continuous mode allows a fresh entry only if risk and same-symbol exposure caps pass');
     }
 
     const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, openPositionSymbols, {
@@ -406,7 +411,7 @@ async function executeAutonomousPairSelection(
     : allTradableCandidates.filter((candidate) => !candidate.blocked);
 
   for (const candidate of rankedTradable) {
-    if (openPositionSymbols.includes(candidate.symbol)) {
+    if (!continuousMode && openPositionSymbols.includes(candidate.symbol)) {
       qualifiedSymbolsList.push(candidate.symbol);
       continue;
     }
@@ -438,9 +443,10 @@ async function executeAutonomousPairSelection(
       excludeSameSymbol: true,
       continuousMode: false,
     });
+    const sameSymbolRefresh = continuousMode && openPositionSymbols.includes(candidate.symbol);
     if (
       candidate.eligibleForNewEntry
-      && !entryCorrelatedWith
+      && (!entryCorrelatedWith || sameSymbolRefresh)
       && newOrderTargets.length < maxNewEntries
     ) {
       newOrderTargets.push(candidate);

@@ -32,6 +32,20 @@ string pendingOrderTerminalIds[32];
 string pendingOrderTypes[32];
 int pendingOrderCount = 0;
 
+bool virtualEntryActive[32];
+string virtualEntryCommandIds[32];
+string virtualEntryTerminalIds[32];
+string virtualEntrySymbols[32];
+string virtualEntrySides[32];
+ENUM_TIMEFRAMES virtualEntryTimeframes[32];
+double virtualEntryVolumes[32];
+double virtualEntryPrices[32];
+double virtualEntryStopLosses[32];
+double virtualEntryTakeProfits[32];
+double virtualEntryCancelPrices[32];
+string virtualEntryComments[32];
+int virtualEntryCount = 0;
+
 string BoolToString(bool value)
 {
    return value ? "true" : "false";
@@ -87,6 +101,55 @@ void RemovePendingAt(int index)
    pendingOrderCount--;
 }
 
+void RemoveVirtualEntryAt(int index)
+{
+   if (index < 0 || index >= virtualEntryCount) return;
+   int last = virtualEntryCount - 1;
+   virtualEntryActive[index] = virtualEntryActive[last];
+   virtualEntryCommandIds[index] = virtualEntryCommandIds[last];
+   virtualEntryTerminalIds[index] = virtualEntryTerminalIds[last];
+   virtualEntrySymbols[index] = virtualEntrySymbols[last];
+   virtualEntrySides[index] = virtualEntrySides[last];
+   virtualEntryTimeframes[index] = virtualEntryTimeframes[last];
+   virtualEntryVolumes[index] = virtualEntryVolumes[last];
+   virtualEntryPrices[index] = virtualEntryPrices[last];
+   virtualEntryStopLosses[index] = virtualEntryStopLosses[last];
+   virtualEntryTakeProfits[index] = virtualEntryTakeProfits[last];
+   virtualEntryCancelPrices[index] = virtualEntryCancelPrices[last];
+   virtualEntryComments[index] = virtualEntryComments[last];
+   virtualEntryActive[last] = false;
+   virtualEntryCommandIds[last] = "";
+   virtualEntryTerminalIds[last] = "";
+   virtualEntrySymbols[last] = "";
+   virtualEntrySides[last] = "";
+   virtualEntryVolumes[last] = 0.0;
+   virtualEntryPrices[last] = 0.0;
+   virtualEntryStopLosses[last] = 0.0;
+   virtualEntryTakeProfits[last] = 0.0;
+   virtualEntryCancelPrices[last] = 0.0;
+   virtualEntryComments[last] = "";
+   virtualEntryCount--;
+}
+
+bool AddVirtualEntry(string commandId, string terminalId, string symbol, string side, ENUM_TIMEFRAMES timeframe, double volume, double entryPrice, double stopLoss, double takeProfit, double cancelPrice, string comment)
+{
+   if (virtualEntryCount >= 32 || commandId == "" || symbol == "" || entryPrice <= 0.0 || volume <= 0.0) return false;
+   virtualEntryActive[virtualEntryCount] = true;
+   virtualEntryCommandIds[virtualEntryCount] = commandId;
+   virtualEntryTerminalIds[virtualEntryCount] = terminalId;
+   virtualEntrySymbols[virtualEntryCount] = symbol;
+   virtualEntrySides[virtualEntryCount] = side;
+   virtualEntryTimeframes[virtualEntryCount] = timeframe;
+   virtualEntryVolumes[virtualEntryCount] = volume;
+   virtualEntryPrices[virtualEntryCount] = entryPrice;
+   virtualEntryStopLosses[virtualEntryCount] = stopLoss;
+   virtualEntryTakeProfits[virtualEntryCount] = takeProfit;
+   virtualEntryCancelPrices[virtualEntryCount] = cancelPrice;
+   virtualEntryComments[virtualEntryCount] = comment;
+   virtualEntryCount++;
+   return true;
+}
+
 int OnInit()
 {
    eaStartedAt = TimeLocal();
@@ -103,7 +166,7 @@ void OnDeinit(const int reason)
 
 void OnTick()
 {
-   // Execution remains disabled until command polling and risk acknowledgments exist.
+   ProcessVirtualEntries();
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
@@ -133,6 +196,7 @@ void OnTimer()
       lastCommandPoll = now;
       PollNextCommand();
    }
+   ProcessVirtualEntries();
 }
 
 const int FOCUS_SYMBOL_COUNT = 28;
@@ -206,6 +270,26 @@ bool ResolveFocusBrokerSymbol(string aliasCsv, string &brokerSymbolOut)
          brokerSymbolOut = candidate;
          return true;
       }
+   }
+   brokerSymbolOut = "";
+   return false;
+}
+
+bool ResolveCommandBrokerSymbol(string requestedSymbol, string &brokerSymbolOut)
+{
+   string normalized = requestedSymbol;
+   StringToUpper(normalized);
+   for (int i = 0; i < FOCUS_SYMBOL_COUNT; i++)
+   {
+      if (FocusSymbolKeys[i] == normalized)
+      {
+         return ResolveFocusBrokerSymbol(FocusSymbolAliases[i], brokerSymbolOut);
+      }
+   }
+   if (SymbolSelect(requestedSymbol, true))
+   {
+      brokerSymbolOut = requestedSymbol;
+      return true;
    }
    brokerSymbolOut = "";
    return false;
@@ -764,19 +848,20 @@ void ExecuteCommand(string commandType, string payloadJson, string &ackStatus, s
 void ExecuteOpenChart(string payloadJson, string &ackStatus, string &brokerMessage)
 {
    string symbol;
+   string brokerSymbol;
    if (!ExtractJsonString(payloadJson, "symbol", symbol))
    {
       ackStatus = "failed";
       brokerMessage = "missing_symbol";
       return;
    }
-   if (!SymbolSelect(symbol, true))
+   if (!ResolveCommandBrokerSymbol(symbol, brokerSymbol))
    {
       ackStatus = "failed";
       brokerMessage = "symbol_not_available";
       return;
    }
-   long chartId = ChartOpen(symbol, PERIOD_H1);
+   long chartId = ChartOpen(brokerSymbol, PERIOD_H1);
    if (chartId <= 0)
    {
       ackStatus = "failed";
@@ -784,12 +869,13 @@ void ExecuteOpenChart(string payloadJson, string &ackStatus, string &brokerMessa
       return;
    }
    ackStatus = "accepted";
-   brokerMessage = StringFormat("{\"status\":\"OK\",\"chartId\":%I64d,\"symbol\":\"%s\"}", chartId, EscapeJson(symbol));
+   brokerMessage = StringFormat("{\"status\":\"OK\",\"chartId\":%I64d,\"symbol\":\"%s\",\"brokerSymbol\":\"%s\"}", chartId, EscapeJson(symbol), EscapeJson(brokerSymbol));
 }
 
 void ExecuteSetTimeframe(string payloadJson, string &ackStatus, string &brokerMessage)
 {
    string symbol;
+   string brokerSymbol;
    string timeframe;
    if (!ExtractJsonString(payloadJson, "symbol", symbol))
    {
@@ -806,29 +892,30 @@ void ExecuteSetTimeframe(string payloadJson, string &ackStatus, string &brokerMe
          return;
       }
    }
-   if (!SymbolSelect(symbol, true))
+   if (!ResolveCommandBrokerSymbol(symbol, brokerSymbol))
    {
       ackStatus = "failed";
       brokerMessage = "symbol_not_available";
       return;
    }
    ENUM_TIMEFRAMES period = ParseTimeframePeriod(timeframe);
-   long chartId = ChartOpen(symbol, period);
+   long chartId = ChartOpen(brokerSymbol, period);
    if (chartId <= 0)
    {
       ackStatus = "failed";
       brokerMessage = "chart_timeframe_failed";
       return;
    }
-   ChartSetSymbolPeriod(chartId, symbol, period);
+   ChartSetSymbolPeriod(chartId, brokerSymbol, period);
    ChartRedraw(chartId);
    ackStatus = "accepted";
-   brokerMessage = StringFormat("{\"status\":\"OK\",\"chartId\":%I64d,\"symbol\":\"%s\",\"timeframe\":\"%s\"}", chartId, EscapeJson(symbol), EscapeJson(timeframe));
+   brokerMessage = StringFormat("{\"status\":\"OK\",\"chartId\":%I64d,\"symbol\":\"%s\",\"brokerSymbol\":\"%s\",\"timeframe\":\"%s\"}", chartId, EscapeJson(symbol), EscapeJson(brokerSymbol), EscapeJson(timeframe));
 }
 
 void ExecuteCaptureChart(string payloadJson, string &ackStatus, string &brokerMessage)
 {
    string symbol;
+   string brokerSymbol;
    string timeframe;
    double barCount = 120.0;
    if (!ExtractJsonString(payloadJson, "symbol", symbol))
@@ -842,7 +929,7 @@ void ExecuteCaptureChart(string payloadJson, string &ackStatus, string &brokerMe
       if (!ExtractJsonString(payloadJson, "period", timeframe)) timeframe = "PERIOD_H1";
    }
    ExtractJsonNumber(payloadJson, "barCount", barCount);
-   if (!SymbolSelect(symbol, true))
+   if (!ResolveCommandBrokerSymbol(symbol, brokerSymbol))
    {
       ackStatus = "failed";
       brokerMessage = "symbol_not_available";
@@ -852,7 +939,7 @@ void ExecuteCaptureChart(string payloadJson, string &ackStatus, string &brokerMe
    int bars = (int)MathMax(20, MathMin(500, barCount));
    MqlRates rates[];
    ArraySetAsSeries(rates, true);
-   int copied = CopyRates(symbol, period, 0, bars, rates);
+   int copied = CopyRates(brokerSymbol, period, 0, bars, rates);
    if (copied <= 0)
    {
       ackStatus = "failed";
@@ -875,7 +962,7 @@ void ExecuteCaptureChart(string payloadJson, string &ackStatus, string &brokerMe
    }
    barsJson += "]";
    ackStatus = "accepted";
-   brokerMessage = StringFormat("{\"status\":\"OK\",\"symbol\":\"%s\",\"timeframe\":\"%s\",\"bars\":%s}", EscapeJson(symbol), EscapeJson(timeframe), barsJson);
+   brokerMessage = StringFormat("{\"status\":\"OK\",\"symbol\":\"%s\",\"brokerSymbol\":\"%s\",\"timeframe\":\"%s\",\"bars\":%s}", EscapeJson(symbol), EscapeJson(brokerSymbol), EscapeJson(timeframe), barsJson);
 }
 
 void ExecuteCloseChart(string payloadJson, string &ackStatus, string &brokerMessage)
@@ -919,6 +1006,95 @@ ENUM_TIMEFRAMES ParseTimeframePeriod(string timeframe)
    return PERIOD_H1;
 }
 
+bool HasContinuationConfirmation(string symbol, ENUM_TIMEFRAMES timeframe, string sideLower)
+{
+   double open1 = iOpen(symbol, timeframe, 1);
+   double close1 = iClose(symbol, timeframe, 1);
+   double high1 = iHigh(symbol, timeframe, 1);
+   double low1 = iLow(symbol, timeframe, 1);
+   double open2 = iOpen(symbol, timeframe, 2);
+   double close2 = iClose(symbol, timeframe, 2);
+   double high2 = iHigh(symbol, timeframe, 2);
+   double low2 = iLow(symbol, timeframe, 2);
+   if (open1 <= 0.0 || close1 <= 0.0 || high1 <= 0.0 || low1 <= 0.0) return false;
+   double pointRef = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if (pointRef <= 0.0) pointRef = 0.00001;
+   double body = MathAbs(close1 - open1);
+   double range = MathMax(high1 - low1, pointRef);
+   double upperWick = high1 - MathMax(open1, close1);
+   double lowerWick = MathMin(open1, close1) - low1;
+   bool bullish = close1 > open1;
+   bool bearish = close1 < open1;
+   bool bullishEngulf = bullish && open2 > 0.0 && close2 > 0.0 && close2 < open2 && close1 >= open2 && open1 <= close2;
+   bool bearishEngulf = bearish && open2 > 0.0 && close2 > 0.0 && close2 > open2 && close1 <= open2 && open1 >= close2;
+   bool bullishPin = bullish && lowerWick >= body * 1.2 && lowerWick >= range * 0.35;
+   bool bearishPin = bearish && upperWick >= body * 1.2 && upperWick >= range * 0.35;
+   bool bullishMomentum = bullish && high2 > 0.0 && close1 > high2;
+   bool bearishMomentum = bearish && low2 > 0.0 && close1 < low2;
+   if (sideLower == "buy") return bullishEngulf || bullishPin || bullishMomentum;
+   if (sideLower == "sell") return bearishEngulf || bearishPin || bearishMomentum;
+   return false;
+}
+
+void ProcessVirtualEntries()
+{
+   if (virtualEntryCount <= 0) return;
+   for (int index = virtualEntryCount - 1; index >= 0; index--)
+   {
+      if (!virtualEntryActive[index]) continue;
+      string symbol = virtualEntrySymbols[index];
+      string sideLower = virtualEntrySides[index];
+      StringToLower(sideLower);
+      double bid = 0.0;
+      double ask = 0.0;
+      if (!SymbolSelect(symbol, true) || !SymbolInfoDouble(symbol, SYMBOL_BID, bid) || !SymbolInfoDouble(symbol, SYMBOL_ASK, ask))
+      {
+         continue;
+      }
+      double entry = virtualEntryPrices[index];
+      double cancelPrice = virtualEntryCancelPrices[index];
+      bool cancelled = (sideLower == "buy" && cancelPrice > 0.0 && bid <= cancelPrice)
+         || (sideLower == "sell" && cancelPrice > 0.0 && ask >= cancelPrice);
+      if (cancelled)
+      {
+         PostAck(virtualEntryCommandIds[index], virtualEntryTerminalIds[index], "failed", "", "conditional_entry_cancelled_max_retracement", 0.0, 0.0, 0, 0, 0, "PLACE_ORDER");
+         RemoveVirtualEntryAt(index);
+         continue;
+      }
+      bool priceReached = (sideLower == "buy" && ask <= entry) || (sideLower == "sell" && bid >= entry);
+      if (!priceReached) continue;
+      if (!HasContinuationConfirmation(symbol, virtualEntryTimeframes[index], sideLower)) continue;
+
+      trade.SetDeviationInPoints(SlippagePoints);
+      trade.SetExpertMagicNumber((ulong)MagicNumber);
+      bool ok = false;
+      double requestPrice = sideLower == "buy" ? ask : bid;
+      if (sideLower == "buy")
+      {
+         ok = trade.Buy(virtualEntryVolumes[index], symbol, 0.0, virtualEntryStopLosses[index], virtualEntryTakeProfits[index], virtualEntryComments[index]);
+      }
+      else if (sideLower == "sell")
+      {
+         ok = trade.Sell(virtualEntryVolumes[index], symbol, 0.0, virtualEntryStopLosses[index], virtualEntryTakeProfits[index], virtualEntryComments[index]);
+      }
+      if (!ok)
+      {
+         PostAck(virtualEntryCommandIds[index], virtualEntryTerminalIds[index], "failed", "", trade.ResultRetcodeDescription(), 0.0, 0.0, 0, 0, 0, "PLACE_ORDER");
+         RemoveVirtualEntryAt(index);
+         continue;
+      }
+      ulong deal = trade.ResultDeal();
+      ulong order = trade.ResultOrder();
+      double executedPrice = trade.ResultPrice();
+      if (executedPrice <= 0.0) executedPrice = requestPrice;
+      double pointRef = SymbolInfoDouble(symbol, SYMBOL_POINT);
+      int slippage = pointRef > 0.0 ? (int)MathRound(MathAbs(executedPrice - requestPrice) / pointRef) : 0;
+      string ticket = (string)(deal > 0 ? deal : order);
+      PostAck(virtualEntryCommandIds[index], virtualEntryTerminalIds[index], "filled", ticket, "conditional_entry_confirmed", executedPrice, virtualEntryVolumes[index], slippage, 0, 0, "PLACE_ORDER");
+      RemoveVirtualEntryAt(index);
+   }
+}
+
 void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, string &brokerMessage, double &executedPrice, double &executedVolumeLots, int &slippagePointsOut, int &spreadPointsOut)
 {
    string symbol;
@@ -927,7 +1103,10 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
    double volumeLots = 0.0;
    double stopLoss = 0.0;
    double takeProfit = 0.0;
+   double requestedEntryPrice = 0.0;
+   double cancelIfPriceBeyond = 0.0;
    string comment = "cacsms";
+   string timeframeText = "M15";
 
    if (!ExtractJsonString(payloadJson, "symbol", symbol)) { ackStatus = "failed"; brokerMessage = "{\"status\":\"FAILED\",\"reason\":\"missing_symbol\"}"; return; }
    if (!ExtractJsonString(payloadJson, "side", side)) { ackStatus = "failed"; brokerMessage = "{\"status\":\"FAILED\",\"reason\":\"missing_side\"}"; return; }
@@ -947,7 +1126,16 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
    {
       if (!ExtractJsonNumber(payloadJson, "tp", takeProfit)) takeProfit = 0.0;
    }
+   if (!ExtractJsonNumber(payloadJson, "entryPrice", requestedEntryPrice))
+   {
+      if (!ExtractJsonNumber(payloadJson, "price", requestedEntryPrice))
+      {
+         if (!ExtractJsonNumber(payloadJson, "pendingEntryPrice", requestedEntryPrice)) requestedEntryPrice = 0.0;
+      }
+   }
    ExtractJsonString(payloadJson, "comment", comment);
+   ExtractJsonString(payloadJson, "timeframe", timeframeText);
+   ExtractJsonNumber(payloadJson, "cancelIfPriceBeyond", cancelIfPriceBeyond);
 
    if (!SymbolSelect(symbol, true))
    {
@@ -985,6 +1173,11 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
    bool ok = false;
    double requestPrice = 0.0;
    double pointRef = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   datetime expiration = TimeCurrent() + 60 * 60 * 4;
+   string orderKindLower = orderKind;
+   StringToLower(orderKindLower);
+   bool requiresConfirmation = StringFind(payloadJson, "\"requiresContinuationConfirmation\":true") >= 0
+      || StringFind(payloadJson, "\"requiresContinuationConfirmation\": true") >= 0;
    string sideLower = side;
    StringToLower(sideLower);
    if (sideLower == "buy")
@@ -993,9 +1186,38 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
       double ask = 0.0;
       SymbolInfoDouble(symbol, SYMBOL_BID, bid);
       SymbolInfoDouble(symbol, SYMBOL_ASK, ask);
-      requestPrice = ask;
       spreadPointsOut = pointRef > 0.0 ? (int)MathRound((ask - bid) / pointRef) : 0;
-      ok = trade.Buy(normalizedLots, symbol, 0.0, stopLoss, takeProfit, comment);
+      if (orderKindLower == "buy_limit" || orderKindLower == "limit" || orderKindLower == "pending_limit")
+      {
+         requestPrice = NormalizeDouble(requestedEntryPrice, digits);
+         if (requestPrice <= 0.0 || requestPrice >= ask)
+         {
+            ackStatus = "failed";
+            brokerMessage = "invalid_buy_limit_price";
+            return;
+         }
+         if (requiresConfirmation)
+         {
+            if (!AddVirtualEntry(currentCommandId, currentCommandTerminalId, symbol, sideLower, ParseTimeframePeriod(timeframeText), normalizedLots, requestPrice, stopLoss, takeProfit, cancelIfPriceBeyond, comment))
+            {
+               ackStatus = "failed";
+               brokerMessage = "conditional_entry_queue_full";
+               return;
+            }
+            ackStatus = "accepted";
+            ticket = currentCommandId;
+            brokerMessage = "conditional_entry_waiting_for_retracement_confirmation";
+            executedPrice = requestPrice;
+            executedVolumeLots = normalizedLots;
+            return;
+         }
+         ok = trade.BuyLimit(normalizedLots, requestPrice, symbol, stopLoss, takeProfit, ORDER_TIME_SPECIFIED, expiration, comment);
+      }
+      else
+      {
+         requestPrice = ask;
+         ok = trade.Buy(normalizedLots, symbol, 0.0, stopLoss, takeProfit, comment);
+      }
    }
    else if (sideLower == "sell")
    {
@@ -1003,9 +1225,38 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
       double ask = 0.0;
       SymbolInfoDouble(symbol, SYMBOL_BID, bid);
       SymbolInfoDouble(symbol, SYMBOL_ASK, ask);
-      requestPrice = bid;
       spreadPointsOut = pointRef > 0.0 ? (int)MathRound((ask - bid) / pointRef) : 0;
-      ok = trade.Sell(normalizedLots, symbol, 0.0, stopLoss, takeProfit, comment);
+      if (orderKindLower == "sell_limit" || orderKindLower == "limit" || orderKindLower == "pending_limit")
+      {
+         requestPrice = NormalizeDouble(requestedEntryPrice, digits);
+         if (requestPrice <= 0.0 || requestPrice <= bid)
+         {
+            ackStatus = "failed";
+            brokerMessage = "invalid_sell_limit_price";
+            return;
+         }
+         if (requiresConfirmation)
+         {
+            if (!AddVirtualEntry(currentCommandId, currentCommandTerminalId, symbol, sideLower, ParseTimeframePeriod(timeframeText), normalizedLots, requestPrice, stopLoss, takeProfit, cancelIfPriceBeyond, comment))
+            {
+               ackStatus = "failed";
+               brokerMessage = "conditional_entry_queue_full";
+               return;
+            }
+            ackStatus = "accepted";
+            ticket = currentCommandId;
+            brokerMessage = "conditional_entry_waiting_for_retracement_confirmation";
+            executedPrice = requestPrice;
+            executedVolumeLots = normalizedLots;
+            return;
+         }
+         ok = trade.SellLimit(normalizedLots, requestPrice, symbol, stopLoss, takeProfit, ORDER_TIME_SPECIFIED, expiration, comment);
+      }
+      else
+      {
+         requestPrice = bid;
+         ok = trade.Sell(normalizedLots, symbol, 0.0, stopLoss, takeProfit, comment);
+      }
    }
    else
    {
@@ -1024,6 +1275,7 @@ void ExecutePlaceOrder(string payloadJson, string &ackStatus, string &ticket, st
    ulong deal = trade.ResultDeal();
    ulong order = trade.ResultOrder();
    executedPrice = trade.ResultPrice();
+   if (executedPrice <= 0.0) executedPrice = requestPrice;
    slippagePointsOut = pointRef > 0.0 ? (int)MathRound(MathAbs(executedPrice - requestPrice) / pointRef) : 0;
    executedVolumeLots = normalizedLots;
    ulong positionTicket = ResolveLatestPositionTicket(symbol);

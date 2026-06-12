@@ -7,6 +7,7 @@ import { SYSTEM_FOCUS_SYMBOLS } from './focus-symbols';
 import { DEFAULT_PAIR_SELECTION_CONFIG, runAutonomousPairSelection } from './pair-selector';
 import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomousDecisionInput, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
 import { getTradingStyleProfile } from './trading-styles/registry';
+import { normalizeStrategyId } from './strategy-governance';
 import { analyzeAiVisualInterpretation } from './ai-visual-interpretation-store';
 import { analyzeCaptureCandles } from './candle-detection-store';
 import { analyzeCaptureChannels } from './channel-detection-store';
@@ -158,6 +159,22 @@ CREATE TABLE IF NOT EXISTS autonomous_decision_logs (
   recommended_next_action TEXT NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS trading_style TEXT;
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS top_down_alignment_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS decision_evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS strategy_id TEXT;
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS market_regime TEXT;
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS htf_bias TEXT;
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS ltf_trigger TEXT;
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS stop_method TEXT;
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS target_method TEXT;
+ALTER TABLE autonomous_decision_logs ADD COLUMN IF NOT EXISTS risk_model_version TEXT NOT NULL DEFAULT 'equity_risk_v1';
+CREATE INDEX IF NOT EXISTS idx_autonomous_decisions_strategy ON autonomous_decision_logs(strategy_id, created_at DESC);
+UPDATE autonomous_decision_logs
+SET strategy_id = lower(COALESCE(NULLIF(trading_style, ''), 'core')) || ':' ||
+  upper(COALESCE(NULLIF(timeframe, ''), 'MULTI')) || ':' ||
+  regexp_replace(lower(COALESCE(NULLIF(setup_type, ''), 'autonomous_fusion')), '[^a-z0-9]+', '_', 'g')
+WHERE strategy_id IS NULL;
 CREATE TABLE IF NOT EXISTS autonomous_alerts (
   id UUID PRIMARY KEY,
   decision_log_id UUID REFERENCES autonomous_decision_logs(id) ON DELETE SET NULL,
@@ -248,6 +265,10 @@ let lastPipelineAdvanceAt = 0;
 export async function ensureAutonomySchema() {
   if (!schemaReady) {
     schemaReady = queryPostgres(schemaSql).then(async () => {
+      const { ensureStrategyGovernanceSchema } = await import('./strategy-governance');
+      const { ensureAutonomyDirectionMonitorSchema } = await import('./autonomy-direction-monitor');
+      await ensureStrategyGovernanceSchema();
+      await ensureAutonomyDirectionMonitorSchema();
       await seedAutonomyDefaults();
     });
   }
@@ -492,7 +513,7 @@ async function executeAutonomyJob(jobId: string) {
   const job = await getAutonomyJob(jobId);
   if (!job || job.status === 'cancelled') return job;
   const runId = randomUUID();
-  await queryPostgres('INSERT INTO autonomous_job_runs (id, job_id, worker_name, status, progress, input_payload) VALUES ($1,$2,$3,$4,$5,$6)', [runId, jobId, job.workerName, 'running', 5, job.inputPayload]);
+  await queryPostgres('INSERT INTO autonomous_job_runs (id, job_id, worker_name, status, progress, input_payload) VALUES ($1,$2,$3,$4,$5,$6::jsonb)', [runId, jobId, job.workerName, 'running', 5, JSON.stringify(job.inputPayload)]);
   await markWorker(job.workerName, 'running', jobId);
   await updateJob(jobId, 'running', 10, null, null);
   await publishAutonomyEvent('autonomy.job.started', { jobId, workerName: job.workerName, symbol: job.symbol, timeframe: job.timeframe });
@@ -500,7 +521,7 @@ async function executeAutonomyJob(jobId: string) {
   try {
     const output = await runWorker(job.workerName as AutonomyWorkerName, job.symbol, job.timeframe, job.inputPayload);
     const confidence = numberValue(output.confidenceScore ?? output.confidence ?? output.setupReadinessScore, null);
-    await queryPostgres('UPDATE autonomous_job_runs SET status = $2, progress = 100, output_payload = $3, confidence_score = $4, completed_at = now() WHERE id = $1', [runId, 'completed', output, confidence]);
+    await queryPostgres('UPDATE autonomous_job_runs SET status = $2, progress = 100, output_payload = $3::jsonb, confidence_score = $4, completed_at = now() WHERE id = $1', [runId, 'completed', JSON.stringify(output), confidence]);
     await updateJob(jobId, 'completed', 100, output, confidence);
     await markWorker(job.workerName, 'idle', null, true);
     await publishAutonomyEvent('autonomy.job.completed', { jobId, workerName: job.workerName, confidenceScore: confidence });
@@ -568,6 +589,8 @@ export async function generateAutonomousSignal(
     const { shouldRelaxContinuousTradingLimits } = await import('@/lib/autonomy-pipeline-throttle');
     refillMode = await shouldRelaxContinuousTradingLimits();
   }
+  const macro = await loadMacroContext(symbol);
+  const execution = await loadExecutionContext(symbol, timeframe);
   let decision = buildAutonomousDecision({
     symbol,
     timeframe,
@@ -578,29 +601,77 @@ export async function generateAutonomousSignal(
       ? getTradingStyleProfile(options.tradingStyle).dominantTimeframe
       : visual.dominantTimeframe,
     visual,
-    macro: await loadMacroContext(symbol),
-    execution: await loadExecutionContext(symbol, timeframe),
+    macro,
+    execution,
   });
+  const baseSignalDecision = decision.decision;
   if (['BUY', 'SELL'].includes(decision.decision)) {
     const { resolveExecutableAutonomyDecision } = await import('@/lib/autonomy-execution-adapter');
     decision = (await resolveExecutableAutonomyDecision(decision)).decision;
   }
+  const strategyId = normalizeStrategyId({
+    tradingStyle: decision.tradingStyle ?? options.tradingStyle ?? null,
+    timeframe: decision.timeframe,
+    setupType: decision.setupType,
+  });
+  const topDownEvidence = buildTopDownAlignmentEvidence(decision, visual);
+  const governanceMetadata = buildStrategyDecisionMetadata({
+    strategyId,
+    decision,
+    visual,
+    topDownEvidence,
+  });
   const decisionId = randomUUID();
   await queryPostgres(`
     INSERT INTO autonomous_decision_logs (
       id, symbol, timeframe, dominant_timeframe, final_bias, setup_type, setup_readiness_score,
       confidence_score, risk_score, decision, entry_zone_json, stop_loss, take_profit_levels_json,
       invalidation_level, reason_for_decision, reason_against_decision, macro_risk_warning,
-      liquidity_warning, anomaly_warning, recommended_next_action
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+      liquidity_warning, anomaly_warning, recommended_next_action, trading_style,
+      top_down_alignment_json, decision_evidence_json, strategy_id, market_regime,
+      htf_bias, ltf_trigger, stop_method, target_method, risk_model_version
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13::jsonb,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb,$23::jsonb,$24,$25,$26,$27,$28,$29,$30)
   `, [
     decisionId, decision.symbol, decision.timeframe, decision.dominantTimeframe, decision.finalBias, decision.setupType,
-    decision.setupReadinessScore, decision.confidenceScore, decision.riskScore, decision.decision, decision.entryZone,
-    decision.stopLoss, decision.takeProfitLevels, decision.invalidationLevel, decision.reasonForDecision,
+    decision.setupReadinessScore, decision.confidenceScore, decision.riskScore, decision.decision, JSON.stringify(decision.entryZone),
+    decision.stopLoss, JSON.stringify(decision.takeProfitLevels), decision.invalidationLevel, decision.reasonForDecision,
     decision.reasonAgainstDecision, decision.macroRiskWarning, decision.liquidityWarning, decision.anomalyWarning,
-    decision.recommendedNextAction,
+    decision.recommendedNextAction, decision.tradingStyle ?? null,
+    JSON.stringify(topDownEvidence),
+    JSON.stringify(buildDecisionEvidence({ decision, visual, macro, execution, refillMode, governance: governanceMetadata })),
+    strategyId,
+    governanceMetadata.marketRegime,
+    governanceMetadata.htfBias,
+    governanceMetadata.ltfTrigger,
+    governanceMetadata.stopMethod,
+    governanceMetadata.targetMethod,
+    governanceMetadata.riskModelVersion,
   ]);
-  await queryPostgres('INSERT INTO autonomous_outcome_tracking (id, decision_log_id, symbol, timeframe, decision) VALUES ($1,$2,$3,$4,$5)', [randomUUID(), decisionId, symbol, timeframe, decision.decision]);
+  await queryPostgres(
+    'INSERT INTO autonomous_outcome_tracking (id, decision_log_id, symbol, timeframe, decision, metadata_json) VALUES ($1,$2,$3,$4,$5,$6::jsonb)',
+    [randomUUID(), decisionId, symbol, timeframe, decision.decision, JSON.stringify({ strategyId, tradingStyle: decision.tradingStyle ?? null })],
+  );
+  const directionDiagnostics = buildTradeDirectionDiagnostics({
+    baseDecision: String(visual.finalDecision ?? baseSignalDecision),
+    finalDecision: decision.decision,
+    decision,
+    visual,
+    topDownEvidence,
+  });
+  const { logAutonomyDirectionAudit } = await import('./autonomy-direction-monitor');
+  await logAutonomyDirectionAudit({
+    decisionLogId: decisionId,
+    symbol: decision.symbol,
+    timeframe: decision.timeframe,
+    stage: 'signal_generated',
+    baseDecision: String(visual.finalDecision ?? baseSignalDecision),
+    finalDecision: decision.decision,
+    finalBias: decision.finalBias,
+    side: ['BUY', 'SELL'].includes(decision.decision) ? decision.decision : null,
+    accepted: ['BUY', 'SELL'].includes(decision.decision),
+    reasons: directionDiagnostics.reasons,
+    metrics: directionDiagnostics.metrics,
+  });
   await publishAutonomyEvent('autonomy.signal.generated', { decisionLogId: decisionId, decision });
   if (['BUY', 'SELL'].includes(decision.decision) && decision.confidenceScore >= (await getAutonomyConfig()).alertThreshold) {
     await createAlert(decisionId, symbol, timeframe, 'high', 'trade_setup', decision.reasonForDecision);
@@ -751,7 +822,7 @@ async function recoverFailedJobs(retryLimit: number) {
 }
 
 async function trackPendingOutcomes() {
-  const result = await queryPostgres("UPDATE autonomous_outcome_tracking SET metadata_json = metadata_json || $1::jsonb WHERE outcome_status = 'pending' RETURNING id", [{ checkedAt: new Date().toISOString() }]);
+  const result = await queryPostgres("UPDATE autonomous_outcome_tracking SET metadata_json = metadata_json || $1::jsonb WHERE outcome_status = 'pending' RETURNING id", [JSON.stringify({ checkedAt: new Date().toISOString() })]);
   return { outcomesChecked: result.rows.length, confidenceScore: 100 };
 }
 
@@ -767,15 +838,15 @@ async function createAutonomyJob(input: { workerName: AutonomyWorkerName | strin
     INSERT INTO autonomous_jobs (
       id, symbol, timeframe, worker_name, trigger_source, status, progress, input_payload,
       retry_count, next_run_time, audit_trace_id
-    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10)
-  `, [id, input.symbol ?? null, input.timeframe ?? null, input.workerName, input.triggerSource, 'queued', 0, input.inputPayload ?? {}, input.retryCount ?? 0, auditTraceId]);
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,now(),$10)
+  `, [id, input.symbol ?? null, input.timeframe ?? null, input.workerName, input.triggerSource, 'queued', 0, JSON.stringify(toPayload(input.inputPayload ?? {})), input.retryCount ?? 0, auditTraceId]);
   await audit(auditTraceId, id, 'autonomy.job.created', 'autonomy-runtime', toPayload(input));
   await publishAutonomyEvent('autonomy.job.created', { jobId: id, workerName: input.workerName, symbol: input.symbol, timeframe: input.timeframe });
   return id;
 }
 
 async function seedAutonomyDefaults() {
-  await queryPostgres('INSERT INTO autonomous_config (key, value_json) VALUES ($1,$2) ON CONFLICT (key) DO NOTHING', ['default', toPayload(defaultConfig)]);
+  await queryPostgres('INSERT INTO autonomous_config (key, value_json) VALUES ($1,$2::jsonb) ON CONFLICT (key) DO NOTHING', ['default', JSON.stringify(toPayload(defaultConfig))]);
   await upsertHealth('autonomy', 'running', 'Autonomous runtime is available.', false, {});
   for (const worker of AUTONOMY_WORKERS) {
     await queryPostgres(`
@@ -875,14 +946,14 @@ async function updateJob(id: string, status: AutonomyJobStatus, progress: number
     UPDATE autonomous_jobs
     SET status = $2,
         progress = $3,
-        output_payload = COALESCE($4, output_payload),
+        output_payload = COALESCE($4::jsonb, output_payload),
         confidence_score = COALESCE($5, confidence_score),
         error_message = COALESCE($6, error_message),
         started_at = CASE WHEN $2 = 'running' AND started_at IS NULL THEN now() ELSE started_at END,
         completed_at = CASE WHEN $2 IN ('completed','failed','cancelled','blocked') THEN now() ELSE completed_at END,
         updated_at = now()
     WHERE id = $1
-  `, [id, status, progress, output, confidence, error ?? null]);
+  `, [id, status, progress, output ? JSON.stringify(output) : null, confidence, error ?? null]);
   await publishAutonomyEvent(status === 'running' ? 'autonomy.job.progress' : `autonomy.job.${status}`, { jobId: id, status, progress });
 }
 
@@ -940,6 +1011,143 @@ async function loadExecutionContext(_symbol: string, _timeframe: string) {
   return { spreadScore: 75, dataQualityScore: 65, captureQualityScore: 65, sessionState: 'unknown' };
 }
 
+function buildTopDownAlignmentEvidence(
+  decision: { timeframe: string; dominantTimeframe: string; finalBias: string; setupType: string; decision: string },
+  visual: unknown,
+) {
+  const visualRecord = objectValue(visual);
+  const visualBias = String(visualRecord.finalMarketBias ?? visualRecord.finalBias ?? '').toLowerCase();
+  const decisionBias = String(decision.finalBias ?? '').toLowerCase();
+  return {
+    signalTimeframe: decision.timeframe,
+    dominantTimeframe: decision.dominantTimeframe,
+    visualBias: visualBias || null,
+    decisionBias,
+    aligned: Boolean(visualBias && decisionBias && visualBias === decisionBias),
+    setupType: decision.setupType,
+    decision: decision.decision,
+  };
+}
+
+function buildDecisionEvidence(input: {
+  decision: unknown;
+  visual: unknown;
+  macro: unknown;
+  execution: unknown;
+  refillMode: boolean;
+  governance?: Record<string, unknown>;
+}) {
+  const visual = objectValue(input.visual);
+  const macro = objectValue(input.macro);
+  const execution = objectValue(input.execution);
+  const decision = objectValue(input.decision);
+  return {
+    generatedAt: new Date().toISOString(),
+    refillMode: input.refillMode,
+    scores: {
+      confidence: decision.confidenceScore ?? null,
+      setupReadiness: decision.setupReadinessScore ?? null,
+      risk: decision.riskScore ?? null,
+    },
+    visual: {
+      finalMarketBias: visual.finalMarketBias ?? null,
+      confidenceScore: visual.confidenceScore ?? null,
+      setupReadinessScore: visual.setupReadinessScore ?? null,
+      finalDecision: visual.finalDecision ?? null,
+      marketPhase: visual.marketPhase ?? null,
+      liquidityObjective: visual.liquidityObjective ?? null,
+    },
+    macro,
+    execution,
+    governance: input.governance ?? {},
+  };
+}
+
+function buildStrategyDecisionMetadata(input: {
+  strategyId: string;
+  decision: {
+    tradingStyle?: string | null;
+    timeframe: string;
+    dominantTimeframe: string;
+    finalBias: string;
+    setupType: string;
+    stopLoss: number | null;
+    takeProfitLevels: number[];
+  };
+  visual: unknown;
+  topDownEvidence: Record<string, unknown>;
+}) {
+  const visual = objectValue(input.visual);
+  const marketPhase = String(visual.marketPhase ?? '').trim();
+  const ltfTrigger = String(visual.entryReadiness ?? input.decision.setupType ?? 'autonomous_fusion').trim();
+  const hasStructuralStop = Number(input.decision.stopLoss ?? 0) > 0;
+  const hasTargets = Array.isArray(input.decision.takeProfitLevels) && input.decision.takeProfitLevels.length > 0;
+  return {
+    strategyId: input.strategyId,
+    tradingStyle: input.decision.tradingStyle ?? null,
+    marketRegime: marketPhase || 'unknown',
+    htfBias: String(input.topDownEvidence.decisionBias ?? input.decision.finalBias ?? 'unknown'),
+    ltfTrigger,
+    stopMethod: hasStructuralStop ? 'resolved_structural_or_default_stop' : 'unresolved',
+    targetMethod: hasTargets ? 'resolved_reward_risk_target' : 'unresolved',
+    riskModelVersion: 'equity_risk_v1',
+    dominantTimeframe: input.decision.dominantTimeframe,
+    signalTimeframe: input.decision.timeframe,
+  };
+}
+
+function buildTradeDirectionDiagnostics(input: {
+  baseDecision: string;
+  finalDecision: string;
+  decision: {
+    decision: string;
+    finalBias: string;
+    confidenceScore: number;
+    setupReadinessScore: number;
+    riskScore: number;
+  };
+  visual: unknown;
+  topDownEvidence: Record<string, unknown>;
+}) {
+  const visual = objectValue(input.visual);
+  const scores = objectValue(visual.decisionScores);
+  const signals = Array.isArray(visual.signals) ? visual.signals : [];
+  const reasons: string[] = [];
+  const base = input.baseDecision.toUpperCase();
+  const final = input.finalDecision.toUpperCase();
+  const bias = String(input.decision.finalBias ?? '').toLowerCase();
+  const bullishScore = Number(scores.bullishScore ?? 0);
+  const bearishScore = Number(scores.bearishScore ?? 0);
+  if (base === 'SELL' && final !== 'SELL') reasons.push(`Visual layer produced SELL but autonomous output became ${final}.`);
+  if (base !== 'SELL' && bias === 'bearish' && final !== 'SELL') reasons.push(`Bearish bias did not mature into SELL; base=${base}.`);
+  if (final === 'SELL') reasons.push('SELL accepted by autonomous signal generation.');
+  if (final === 'BUY') reasons.push('BUY accepted by autonomous signal generation.');
+  if (bearishScore > bullishScore && final !== 'SELL') reasons.push(`Bearish score ${bearishScore} exceeded bullish score ${bullishScore}, but SELL was not selected.`);
+  if (input.decision.confidenceScore < 50) reasons.push(`Confidence ${input.decision.confidenceScore}% is weak for directional execution.`);
+  if (input.decision.setupReadinessScore < 55) reasons.push(`Setup readiness ${input.decision.setupReadinessScore}% is still immature.`);
+  if (input.decision.riskScore >= 70) reasons.push(`Risk score ${input.decision.riskScore}% blocks directional execution.`);
+  if (input.topDownEvidence.aligned === false) reasons.push('Top-down visual bias is not aligned with final decision bias.');
+  if (!reasons.length) reasons.push('No direction-specific blocker recorded at signal generation.');
+
+  return {
+    reasons,
+    metrics: {
+      baseDecision: base,
+      finalDecision: final,
+      finalBias: input.decision.finalBias,
+      bullishScore,
+      bearishScore,
+      scoreDeltaBearMinusBull: bearishScore - bullishScore,
+      confidenceScore: input.decision.confidenceScore,
+      setupReadinessScore: input.decision.setupReadinessScore,
+      riskScore: input.decision.riskScore,
+      topDownAligned: input.topDownEvidence.aligned ?? null,
+      bearishSignalCount: signals.filter((signal) => objectValue(signal).bias === 'bearish').length,
+      bullishSignalCount: signals.filter((signal) => objectValue(signal).bias === 'bullish').length,
+    },
+  };
+}
+
 async function listAlerts(limit: number) {
   const result = await queryPostgres('SELECT * FROM autonomous_alerts ORDER BY created_at DESC LIMIT $1', [limit]);
   return result.rows.map((row) => ({
@@ -970,14 +1178,14 @@ async function getHealth() {
 async function upsertHealth(key: string, status: string, message: string, emergencyStopped: boolean, payload: Record<string, unknown>) {
   await queryPostgres(`
     INSERT INTO autonomous_system_health (id, health_key, status, emergency_stopped, message, payload_json, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,now())
+    VALUES ($1,$2,$3,$4,$5,$6::jsonb,now())
     ON CONFLICT (health_key) DO UPDATE
       SET status = EXCLUDED.status,
           emergency_stopped = EXCLUDED.emergency_stopped,
           message = EXCLUDED.message,
           payload_json = EXCLUDED.payload_json,
           updated_at = now()
-  `, [randomUUID(), key, status, emergencyStopped, message, payload]);
+  `, [randomUUID(), key, status, emergencyStopped, message, JSON.stringify(payload)]);
   await publishAutonomyEvent('autonomy.health.updated', { key, status, emergencyStopped, message, payload });
 }
 
@@ -1095,7 +1303,17 @@ function mapDecision(row: Row) {
     confidenceScore: Number(row.confidence_score),
     riskScore: Number(row.risk_score),
     decision: String(row.decision),
+    tradingStyle: nullableString(row.trading_style),
+    strategyId: nullableString(row.strategy_id),
+    marketRegime: nullableString(row.market_regime),
+    htfBias: nullableString(row.htf_bias),
+    ltfTrigger: nullableString(row.ltf_trigger),
+    stopMethod: nullableString(row.stop_method),
+    targetMethod: nullableString(row.target_method),
+    riskModelVersion: nullableString(row.risk_model_version),
     entryZone: objectValue(row.entry_zone_json),
+    topDownAlignment: objectValue(row.top_down_alignment_json),
+    decisionEvidence: objectValue(row.decision_evidence_json),
     reasonForDecision: String(row.reason_for_decision),
     reasonAgainstDecision: String(row.reason_against_decision),
     macroRiskWarning: String(row.macro_risk_warning),

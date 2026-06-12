@@ -489,6 +489,7 @@ export async function markTimeouts(now = new Date()): Promise<number> {
             last_updated_at = now()
         WHERE lifecycle_state = 'ACKNOWLEDGED'
           AND COALESCE(ack_status, '') = 'accepted'
+          AND COALESCE(broker_message, '') <> 'conditional_entry_waiting_for_retracement_confirmation'
           AND acknowledged_at IS NOT NULL
           AND acknowledged_at < (now() - interval '15 seconds')
           AND expires_at > now()

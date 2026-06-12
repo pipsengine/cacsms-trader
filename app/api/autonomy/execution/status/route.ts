@@ -30,6 +30,11 @@ export async function GET(request: Request): Promise<Response> {
         checklist = await evaluateAutonomyExecutionChecklist({
           decision: {
             symbol: String(row.symbol),
+            timeframe: String(row.timeframe ?? 'M15'),
+            tradingStyle: typeof row.trading_style === 'string'
+              ? (row.trading_style as 'scalp' | 'intraday' | 'day_trade' | 'swing' | 'position')
+              : undefined,
+            setupType: String(row.setup_type ?? 'autonomous_fusion'),
             decision: String(row.decision) as 'BUY' | 'SELL' | 'WAIT' | 'AVOID' | 'MONITOR',
             confidenceScore: Number(row.confidence_score ?? 0),
             setupReadinessScore: Number(row.setup_readiness_score ?? 0),

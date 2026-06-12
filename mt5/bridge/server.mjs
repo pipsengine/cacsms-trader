@@ -12,6 +12,17 @@ const MAX_ACK_COUNT = Number(process.env.MT5_BRIDGE_MAX_ACKS ?? 300);
 const COMMAND_LEASE_MS = Number(process.env.MT5_COMMAND_LEASE_MS ?? 12000);
 const COMMAND_MAX_ATTEMPTS = Number(process.env.MT5_COMMAND_MAX_ATTEMPTS ?? 5);
 const SHARED_SECRET_FILE = process.env.CACSMS_BRIDGE_SECRET_FILE ?? path.join(process.cwd(), "data", "mt5-bridge-secret");
+const INTERNAL_APP_URL = String(
+  process.env.CACSMS_INTERNAL_APP_URL
+  ?? process.env.NEXT_INTERNAL_URL
+  ?? `http://localhost:${process.env.PORT ?? 3000}`,
+).replace(/\/+$/, "");
+const REATTACH_TOPDOWN_ENABLED = String(process.env.CACSMS_REATTACH_TOPDOWN_ENABLED ?? "true").toLowerCase() !== "false";
+const REATTACH_TOPDOWN_SYMBOLS = String(process.env.CACSMS_REATTACH_TOPDOWN_SYMBOLS ?? process.env.CACSMS_REATTACH_TOPDOWN_SYMBOL ?? "SP500")
+  .split(",")
+  .map((symbol) => symbol.trim().toUpperCase())
+  .filter(Boolean);
+const REATTACH_TOPDOWN_COOLDOWN_MS = Math.max(15_000, Number(process.env.CACSMS_REATTACH_TOPDOWN_COOLDOWN_MS ?? 45_000));
 let cachedSharedSecret = { value: String(process.env.MT5_BRIDGE_SHARED_SECRET ?? ""), mtimeMs: 0 };
 
 const terminals = new Map();
@@ -23,6 +34,7 @@ const terminalQueues = new Map();
 const acknowledgments = [];
 const events = [];
 const startedAt = new Date();
+const topDownTriggersByTerminal = new Map();
 
 const server = http.createServer(async (request, response) => {
   setCorsHeaders(response);
@@ -138,6 +150,7 @@ const server = http.createServer(async (request, response) => {
         registrations.set(heartbeat.terminalId, registration);
       }
       pushEvent("HEARTBEAT", `Received heartbeat from ${heartbeat.terminalId} (${heartbeat.latencyMs}ms latency, sequence ${heartbeat.sequence}).`);
+      maybeTriggerTopDownOnAttach(existing, heartbeat);
       sendJson(response, 200, {
         ok: true,
         terminalId: heartbeat.terminalId,
@@ -499,6 +512,7 @@ function normalizeHeartbeat(payload, existing) {
     sequence,
     missedSequenceCount: calculateMissedSequenceCount(existing, sequence),
     version: String(payload.version ?? "unknown"),
+    eaStartedAt: String(payload.eaStartedAt ?? existing?.eaStartedAt ?? ""),
     vpsId,
     receivedAt: now,
     firstSeenAt: existing?.firstSeenAt ?? now,
@@ -571,6 +585,70 @@ function resolveTerminalStatus(heartbeat, heartbeatAgeMs) {
   }
 
   return "connected";
+}
+
+function maybeTriggerTopDownOnAttach(existing, heartbeat) {
+  if (!REATTACH_TOPDOWN_ENABLED || REATTACH_TOPDOWN_SYMBOLS.length === 0) {
+    return;
+  }
+
+  const previousSequence = Number(existing?.sequence ?? 0);
+  const currentSequence = Number(heartbeat.sequence ?? 0);
+  const previousEaStartedAt = String(existing?.eaStartedAt ?? "");
+  const currentEaStartedAt = String(heartbeat.eaStartedAt ?? "");
+  const previousStatus = existing ? toTerminalView(existing).status : "new";
+  const connectedNow = toTerminalView(heartbeat).status === "connected";
+  const sequenceReset = Boolean(existing) && currentSequence > 0 && previousSequence > currentSequence;
+  const eaRestarted = Boolean(existing && previousEaStartedAt && currentEaStartedAt && previousEaStartedAt !== currentEaStartedAt);
+  const reconnected = previousStatus === "disconnected" && connectedNow;
+  const firstHeartbeat = !existing && connectedNow;
+
+  if (!firstHeartbeat && !sequenceReset && !eaRestarted && !reconnected) {
+    return;
+  }
+
+  const now = Date.now();
+  const lastTriggerAt = Number(topDownTriggersByTerminal.get(heartbeat.terminalId) ?? 0);
+  if (now - lastTriggerAt < REATTACH_TOPDOWN_COOLDOWN_MS) {
+    pushEvent(
+      "TOP_DOWN_SKIPPED",
+      `Skipped automatic top-down trigger for ${heartbeat.terminalId}; cooldown active (${Math.ceil((REATTACH_TOPDOWN_COOLDOWN_MS - (now - lastTriggerAt)) / 1000)}s remaining).`,
+    );
+    return;
+  }
+
+  topDownTriggersByTerminal.set(heartbeat.terminalId, now);
+  const reason = firstHeartbeat
+    ? "first_heartbeat"
+    : sequenceReset
+      ? "sequence_reset"
+      : eaRestarted
+        ? "ea_restart"
+        : "reconnected";
+
+  for (const symbol of REATTACH_TOPDOWN_SYMBOLS) {
+    triggerTopDownRun({ terminalId: heartbeat.terminalId, symbol, reason });
+  }
+}
+
+function triggerTopDownRun({ terminalId, symbol, reason }) {
+  const body = JSON.stringify({ terminalId, symbol, trigger: "ea_reattach", reason });
+  fetch(`${INTERNAL_APP_URL}/api/autonomous-pipeline/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  })
+    .then(async (response) => {
+      const text = await response.text().catch(() => "");
+      if (!response.ok) {
+        pushEvent("TOP_DOWN_FAILED", `Automatic top-down trigger failed for ${symbol} on ${terminalId}: HTTP ${response.status} ${text.slice(0, 240)}`);
+        return;
+      }
+      pushEvent("TOP_DOWN_TRIGGERED", `Automatic top-down trigger requested for ${symbol} on ${terminalId} after ${reason}.`);
+    })
+    .catch((error) => {
+      pushEvent("TOP_DOWN_FAILED", `Automatic top-down trigger failed for ${symbol} on ${terminalId}: ${error instanceof Error ? error.message : "unknown error"}.`);
+    });
 }
 
 function resolveLatencyMs(payload, receivedAt) {

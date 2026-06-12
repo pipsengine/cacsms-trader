@@ -11,6 +11,7 @@ import {
 } from '@/lib/execution-risk-limits';
 import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
 import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
+import { countUnprotectedOpenPositions, getOpenPositionExposureForSymbol } from '@/lib/execution-open-positions';
 import { queryPostgres } from '@/lib/postgres';
 import { hasValidStopTargets, isStopLossRequired } from '@/lib/autonomous-stop-targets';
 import { findCorrelatedOpenSymbol } from '@/lib/symbol-correlation';
@@ -58,6 +59,52 @@ function envBool(name: string, fallback = false): boolean {
   const raw = String(process.env[name] ?? '').trim().toLowerCase();
   if (!raw) return fallback;
   return raw === 'true' || raw === '1' || raw === 'yes' || raw === 'y';
+}
+
+function maxOpenPositionsPerSymbol(): number {
+  return Math.max(1, Math.min(10, Math.round(envNumber('RISK_MAX_OPEN_POSITIONS_PER_SYMBOL', 2))));
+}
+
+function maxLotsPerSymbol(rules: PropFirmRiskRules): number {
+  const configured = envNumber('RISK_MAX_LOTS_PER_SYMBOL', 0);
+  if (configured > 0) return configured;
+  return Math.max(rules.maxLotSize, rules.maxLotSize * maxOpenPositionsPerSymbol());
+}
+
+async function getActiveOpeningCommandExposure(input: {
+  terminalId: string;
+  accountNumber: string;
+  symbol: string;
+}): Promise<{ count: number; volumeLots: number }> {
+  try {
+    const result = await queryPostgres(
+      `
+        SELECT
+          COUNT(*)::int AS count,
+          COALESCE(SUM(COALESCE(
+            c.executed_volume_lots,
+            NULLIF(c.payload->>'volumeLots', '')::numeric,
+            NULLIF(c.payload->>'volume', '')::numeric,
+            0
+          )), 0)::numeric AS volume_lots
+        FROM execution_commands c
+        JOIN mt5_terminals t ON t.terminal_id = c.terminal_id
+        WHERE c.terminal_id = $1
+          AND t.account_number = $2
+          AND upper(c.symbol) = $3
+          AND upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
+          AND c.lifecycle_state IN ('QUEUED','ROUTING','SENT','ACKNOWLEDGED')
+      `,
+      [input.terminalId, input.accountNumber, input.symbol],
+    );
+    const row = result.rows[0] as { count?: number; volume_lots?: number | string } | undefined;
+    return {
+      count: Number(row?.count ?? 0),
+      volumeLots: Number(Number(row?.volume_lots ?? 0).toFixed(4)),
+    };
+  } catch {
+    return { count: 0, volumeLots: 0 };
+  }
 }
 
 export { loadPropFirmRiskRulesFromEnv } from '@/lib/execution-risk-limits';
@@ -156,7 +203,7 @@ async function loadRiskState(accountNumber: string): Promise<RiskState> {
     [accountNumber],
   );
   const tradesOpenedToday = Number((tradesTodayResult.rows[0] as { count?: number })?.count ?? 0);
-  const liveOpenTrades = await resolveLiveOpenPositionCount();
+  const liveOpenTrades = await resolveLiveOpenPositionCount({ accountNumber });
   const consecutiveLosses = await countConsecutiveLosses(accountNumber);
 
   return {
@@ -242,7 +289,10 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
   const rules = await loadPropFirmRiskRules();
   const accountNumber = await resolveAccountNumber(input.terminalId);
   const state = await loadRiskState(accountNumber);
-  const limits = await resolveExecutionRiskLimits(rules, state);
+  const limits = await resolveExecutionRiskLimits(rules, state, {
+    terminalId: input.terminalId,
+    accountNumber,
+  });
   const rewardRiskRatio = resolveRewardRiskRatio(input, rules);
   const symbol = String(input.symbol ?? '').trim().toUpperCase();
   const tradesOpenedTodayForSymbol = symbol
@@ -280,20 +330,54 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
         remainingDailyLossAmount: limits.remainingDailyLossAmount,
       };
     }
-    const openSymbols = await getOpenPositionSymbols();
+    const unprotectedOpenPositions = isStopLossRequired() && isExecutableSide
+      ? await countUnprotectedOpenPositions({ terminalId: input.terminalId, accountNumber })
+      : 0;
+    const openSymbols = await getOpenPositionSymbols({ terminalId: input.terminalId, accountNumber });
     const correlatedWith = findCorrelatedOpenSymbol(symbol, openSymbols, { excludeSameSymbol: true });
-    if (!decision && correlatedWith) {
+    const sameSymbolExposure = isExecutableSide
+      ? await getOpenPositionExposureForSymbol(symbol, { terminalId: input.terminalId, accountNumber })
+      : { count: 0, volumeLots: 0 };
+    const sameSymbolPending = isExecutableSide
+      ? await getActiveOpeningCommandExposure({ terminalId: input.terminalId, accountNumber, symbol })
+      : { count: 0, volumeLots: 0 };
+    const sameSymbolTotalCount = sameSymbolExposure.count + sameSymbolPending.count;
+    const sameSymbolTotalLots = sameSymbolExposure.volumeLots + sameSymbolPending.volumeLots;
+    const symbolPositionCap = maxOpenPositionsPerSymbol();
+    const symbolLotCap = maxLotsPerSymbol(rules);
+    if (!decision && unprotectedOpenPositions > 0) {
+      decision = {
+        allowed: false,
+        code: 'stop_loss_required',
+        message: `${symbol} blocked - ${unprotectedOpenPositions} open position(s) on this account lack broker-side stop loss or take profit.`,
+        remainingDailyLossAmount: 0,
+      };
+    } else if (!decision && isExecutableSide && sameSymbolTotalCount >= symbolPositionCap) {
+      decision = {
+        allowed: false,
+        code: 'max_open_trades',
+        message: `${symbol} blocked - same-symbol exposure cap reached (${sameSymbolTotalCount}/${symbolPositionCap} active open/pending position(s)).`,
+        remainingDailyLossAmount: limits.remainingDailyLossAmount,
+      };
+    } else if (!decision && isExecutableSide && sameSymbolTotalLots + input.requestedLots > symbolLotCap + 1e-9) {
+      decision = {
+        allowed: false,
+        code: 'lot_size_too_high',
+        message: `${symbol} blocked - same-symbol lot exposure would exceed ${symbolLotCap} lots (${sameSymbolTotalLots.toFixed(4)} open/pending + ${input.requestedLots} requested).`,
+        remainingDailyLossAmount: limits.remainingDailyLossAmount,
+      };
+    } else if (!decision && correlatedWith) {
       decision = {
         allowed: false,
         code: 'correlation_protection',
-        message: `${symbol} blocked — shares currency exposure with open ${correlatedWith}`,
+        message: `${symbol} blocked - shares currency exposure with open ${correlatedWith}`,
         remainingDailyLossAmount: 0,
       };
     } else if (!decision && isStopLossRequired() && isExecutableSide && stopLoss <= 0) {
       decision = {
         allowed: false,
         code: 'stop_loss_required',
-        message: `${symbol} blocked — every trade must include a stop loss.`,
+        message: `${symbol} blocked - every trade must include a stop loss.`,
         remainingDailyLossAmount: 0,
       };
     } else if (
@@ -307,7 +391,7 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
       decision = {
         allowed: false,
         code: 'invalid_stop_loss',
-        message: `${symbol} blocked — stop loss / take profit are invalid for ${side}.`,
+        message: `${symbol} blocked - stop loss / take profit are invalid for ${side}.`,
         remainingDailyLossAmount: 0,
       };
     } else if (!decision) {

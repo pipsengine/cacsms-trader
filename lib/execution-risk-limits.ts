@@ -190,8 +190,8 @@ export async function countTradesOpenedTodayBySymbol(accountNumber?: string): Pr
   }
 }
 
-export async function resolveLiveOpenPositionCount(): Promise<number> {
-  const metrics = await getOpenPositionMetrics().catch(() => ({
+export async function resolveLiveOpenPositionCount(filter?: { terminalId?: string; accountNumber?: string }): Promise<number> {
+  const metrics = await getOpenPositionMetrics(filter).catch(() => ({
     trackedOpen: 0,
     terminalOpen: 0,
     openOrders: 0,
@@ -223,6 +223,7 @@ export interface ResolvedExecutionRiskLimits {
 export async function resolveExecutionRiskLimits(
   rules: PropFirmRiskRules,
   state: RiskState,
+  filter?: { terminalId?: string; accountNumber?: string },
 ): Promise<ResolvedExecutionRiskLimits> {
   const symbolUniverse = await resolveActiveTradingSymbolCount();
   const tradesPerSymbolPerDay = getTradesPerSymbolPerDay();
@@ -233,7 +234,7 @@ export async function resolveExecutionRiskLimits(
   const openExposureBudgetUsd = dailyDrawdownBudgetUsd * getOpenExposureDrawdownFraction();
   const riskPerPositionUsd = sizingEquity * (rules.riskPerTradePercent / 100);
   const maxOpenPositions = computeMaxOpenPositions(rules, state);
-  const openPositions = await resolveLiveOpenPositionCount();
+  const openPositions = await resolveLiveOpenPositionCount(filter);
   const maxTradesPerDay = symbolBasedTradeLimit
     ? computeMaxTradesPerDayFromSymbols(symbolUniverse.count, tradesPerSymbolPerDay)
     : rules.maxTradesPerDay;

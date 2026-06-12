@@ -3,6 +3,7 @@ import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
 import { getLatestPairSelection, runAutonomousPairSelection, shouldRefreshPairSelection } from '@/lib/pair-selector';
 import { queryPostgres } from '@/lib/postgres';
 import { is24HourTradingEnabled } from '@/lib/trading-session-policy';
+import { evaluateAutonomySafetyLock } from '@/lib/autonomy-safety-lock';
 
 import { runMultiStyleTradingCycle } from '@/lib/trading-styles/multi-style-orchestrator';
 
@@ -83,6 +84,17 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
   }
 
   const risk = await getExecutionRiskSettings();
+  const safety = await evaluateAutonomySafetyLock({ autoActivateKillSwitch: true });
+  if (safety.locked) {
+    return {
+      status: 'paused',
+      slotsTargeted: 0,
+      symbolsProcessed: [],
+      dispatchesAttempted: 0,
+      detail: `Autonomy safety lock active: ${safety.blockers.join(' ')}`,
+    };
+  }
+
   if ((risk.remainingDailyLossAmount ?? 0) <= 0) {
     return {
       status: 'daily_limit',

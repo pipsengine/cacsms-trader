@@ -16,7 +16,12 @@ import { shouldBypassNewsBlackout } from '@/lib/trading-session-policy';
 import { getExecutionKillSwitchStatus } from '@/lib/execution-kill-switch';
 import { getExecutionPolicyStatus, isExecutionEnabled } from '@/lib/execution-policy';
 import { listTerminalSnapshots } from '@/lib/mt5-heartbeat-store';
+import { getLatestPairSelection } from '@/lib/pair-selector';
 import { queryPostgres } from '@/lib/postgres';
+import { evaluateAutonomySafetyLock } from '@/lib/autonomy-safety-lock';
+import { evaluateStrategyGovernance, normalizeStrategyId } from '@/lib/strategy-governance';
+import { logAutonomyDirectionAudit } from '@/lib/autonomy-direction-monitor';
+import { isRetracementEntryEnabled, planAutonomousRetracementEntry } from '@/lib/autonomous-entry-planner';
 
 export type AutonomyExecutionChecklist = {
   ready: boolean;
@@ -87,7 +92,7 @@ export async function resolveConnectedTerminalId(): Promise<string | null> {
 export async function evaluateAutonomyExecutionChecklist(input: {
   decision: Pick<
     AutonomousDecisionOutput,
-    'symbol' | 'decision' | 'confidenceScore' | 'setupReadinessScore' | 'riskScore' | 'stopLoss' | 'takeProfitLevels' | 'macroRiskWarning'
+    'symbol' | 'decision' | 'confidenceScore' | 'setupReadinessScore' | 'riskScore' | 'stopLoss' | 'takeProfitLevels' | 'macroRiskWarning' | 'tradingStyle' | 'timeframe' | 'setupType'
   >;
   config: Pick<AutonomyConfig, 'tradeExecutionMode' | 'confidenceThreshold' | 'riskThreshold'>;
   manual?: boolean;
@@ -114,6 +119,32 @@ export async function evaluateAutonomyExecutionChecklist(input: {
 
   if (!['BUY', 'SELL'].includes(input.decision.decision)) {
     blockers.push(`Decision ${input.decision.decision} is not executable.`);
+  }
+
+  if (!manual && ['BUY', 'SELL'].includes(input.decision.decision)) {
+    const strategyId = normalizeStrategyId({
+      tradingStyle: input.decision.tradingStyle ?? null,
+      timeframe: input.decision.timeframe,
+      setupType: input.decision.setupType,
+    });
+    const governance = await evaluateStrategyGovernance({
+      strategyId,
+      tradingStyle: input.decision.tradingStyle ?? null,
+      decision: input.decision.decision,
+      symbol: input.decision.symbol,
+      timeframe: input.decision.timeframe,
+    });
+    blockers.push(...governance.blockers);
+
+    const latestSelection = await getLatestPairSelection().catch(() => null);
+    const candidate = latestSelection?.candidates.find(
+      (item) => item.symbol.toUpperCase() === input.decision.symbol.toUpperCase(),
+    );
+    const continuousMode = isContinuousTradingEnabled();
+    if (candidate && (!candidate.tradable || candidate.blocked || (!continuousMode && !candidate.eligibleForNewEntry))) {
+      const reason = candidate.blockReason || candidate.reasons.join('; ') || 'latest pair selection marked the symbol as not tradable';
+      blockers.push(`${input.decision.symbol} is not eligible for autonomous execution: ${reason}.`);
+    }
   }
 
   const account = await resolveExecutionAccountContext();
@@ -166,6 +197,16 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     if (liveBlock) blockers.push(liveBlock);
   }
 
+  if (!manual && ['BUY', 'SELL'].includes(input.decision.decision)) {
+    const safety = await evaluateAutonomySafetyLock({
+      symbol: input.decision.symbol,
+      terminalId,
+      accountNumber: account?.accountNumber ?? null,
+      autoActivateKillSwitch: true,
+    });
+    blockers.push(...safety.blockers);
+  }
+
   if (!shouldBypassNewsBlackout()) {
     const highImpact = await queryPostgres(
       `
@@ -196,9 +237,10 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     }
   }
 
+  const uniqueBlockers = dedupeMessages(blockers);
   return {
-    ready: blockers.length === 0,
-    blockers,
+    ready: uniqueBlockers.length === 0,
+    blockers: uniqueBlockers,
     mode,
     terminalId,
     sandboxOnly: account?.sandboxMode ?? true,
@@ -248,10 +290,109 @@ async function persistDispatchRecord(input: {
       input.symbol,
       input.side,
       input.status,
-      JSON.stringify(input.blockers),
+      JSON.stringify(dedupeMessages(input.blockers)),
       JSON.stringify(input.payload ?? {}),
     ],
   ).catch(() => null);
+}
+
+function dedupeMessages(messages: string[]): string[] {
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const message of messages) {
+    const normalized = String(message ?? '').trim();
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    output.push(normalized);
+  }
+  return output;
+}
+
+function splitHybridLots(totalLots: number, marketFraction: number): { marketLots: number; limitLots: number } {
+  const total = normalizeLots(totalLots);
+  if (total < 0.02 || marketFraction <= 0) return { marketLots: 0, limitLots: total };
+  const marketLots = normalizeLots(total * Math.min(0.5, Math.max(0, marketFraction)));
+  if (marketLots < 0.01 || total - marketLots < 0.01) return { marketLots: 0, limitLots: total };
+  return {
+    marketLots,
+    limitLots: normalizeLots(total - marketLots),
+  };
+}
+
+function normalizeLots(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Number(Math.max(0, Math.floor(value * 100 + 1e-9) / 100).toFixed(2));
+}
+
+function buildExecutionPayload(input: {
+  sourceDecision: { decisionLogId: string };
+  executableDecision: AutonomousDecisionOutput;
+  account: {
+    environment: string;
+    accountClass: string;
+    accountNumber: string | null;
+    equity: number;
+  };
+  side: 'BUY' | 'SELL';
+  executionMode: string;
+  volumeLots: number;
+  stopLoss: number;
+  takeProfit: number;
+  entryPrice: number;
+  rewardRiskRatio: number;
+  stopTargetMethod: string;
+  sized: { method: string; riskAmount: number; stopPips: number };
+  strategyId: string;
+  orderType: string;
+  comment: string;
+  leg: string;
+  entryPlan?: Record<string, unknown> | null;
+}) {
+  return {
+    source: 'AUTONOMY_EXECUTION_ADAPTER',
+    decisionLogId: input.sourceDecision.decisionLogId,
+    intentId: input.sourceDecision.decisionLogId,
+    symbol: input.executableDecision.symbol,
+    side: input.side,
+    orderType: input.orderType,
+    orderKind: input.orderType,
+    volume: input.volumeLots,
+    volumeLots: input.volumeLots,
+    sl: input.stopLoss,
+    tp: input.takeProfit,
+    stopLoss: input.stopLoss,
+    takeProfit: input.takeProfit,
+    price: input.entryPrice,
+    entryPrice: input.entryPrice,
+    pendingEntryPrice: input.orderType.includes('LIMIT') ? input.entryPrice : null,
+    rewardRiskRatio: input.rewardRiskRatio,
+    stopTargetMethod: input.stopTargetMethod,
+    comment: input.comment,
+    mode: input.executionMode,
+    environment: input.account.environment,
+    accountClass: input.account.accountClass,
+    accountNumber: input.account.accountNumber,
+    equity: input.account.equity,
+    sizingMethod: input.sized.method,
+    riskAmount: input.sized.riskAmount,
+    stopPips: input.sized.stopPips,
+    timeframe: input.executableDecision.timeframe,
+    tradingStyle: input.executableDecision.tradingStyle ?? null,
+    setupType: input.executableDecision.setupType,
+    strategyId: input.strategyId,
+    confidenceScore: input.executableDecision.confidenceScore,
+    setupReadinessScore: input.executableDecision.setupReadinessScore,
+    entryModel: input.orderType.includes('LIMIT') ? 'retracement_limit' : 'market',
+    entryLeg: input.leg,
+    continuationConfirmationRequired: input.entryPlan?.confirmationRequired ?? [],
+    requiresContinuationConfirmation: input.orderType.includes('LIMIT'),
+    cancelIfPriceBeyond: input.entryPlan?.cancelIfPriceBeyond ?? null,
+    maxRetracementPrice: input.entryPlan?.maxRetracementPrice ?? null,
+    retracementZone: input.entryPlan
+      ? { low: input.entryPlan.zoneLow ?? null, high: input.entryPlan.zoneHigh ?? null }
+      : null,
+    entryPlan: input.entryPlan ?? null,
+  };
 }
 
 async function hasExistingDispatch(decisionLogId: string): Promise<boolean> {
@@ -345,6 +486,17 @@ export async function dispatchAutonomyDecision(input: {
       };
     }
   }
+  const strategyId = normalizeStrategyId({
+    tradingStyle: executableDecision.tradingStyle ?? null,
+    timeframe: executableDecision.timeframe,
+    setupType: executableDecision.setupType,
+  });
+  const strategyMetadata = {
+    strategyId,
+    tradingStyle: executableDecision.tradingStyle ?? null,
+    timeframe: executableDecision.timeframe,
+    setupType: executableDecision.setupType,
+  };
   const checklist = await evaluateAutonomyExecutionChecklist({
     decision: executableDecision,
     config: input.config,
@@ -359,7 +511,27 @@ export async function dispatchAutonomyDecision(input: {
       side: input.decision.decision,
       status: 'blocked',
       blockers: checklist.blockers,
-      payload: { manual: Boolean(input.manual), mode: checklist.mode },
+      payload: { manual: Boolean(input.manual), mode: checklist.mode, strategy: strategyMetadata },
+    });
+    await logAutonomyDirectionAudit({
+      decisionLogId: input.decisionLogId,
+      symbol: executableDecision.symbol,
+      timeframe: executableDecision.timeframe,
+      stage: 'execution_blocked',
+      baseDecision: executableDecision.decision,
+      finalDecision: executableDecision.decision,
+      finalBias: executableDecision.finalBias,
+      side: executableDecision.decision,
+      accepted: false,
+      reasons: checklist.blockers,
+      metrics: {
+        mode: checklist.mode,
+        terminalId: checklist.terminalId,
+        strategy: strategyMetadata,
+        confidenceScore: executableDecision.confidenceScore,
+        setupReadinessScore: executableDecision.setupReadinessScore,
+        riskScore: executableDecision.riskScore,
+      },
     });
     return {
       ok: false,
@@ -378,7 +550,20 @@ export async function dispatchAutonomyDecision(input: {
       side: executableDecision.decision,
       status: 'blocked',
       blockers,
-      payload: { manual: Boolean(input.manual), mode: checklist.mode },
+      payload: { manual: Boolean(input.manual), mode: checklist.mode, strategy: strategyMetadata },
+    });
+    await logAutonomyDirectionAudit({
+      decisionLogId: input.decisionLogId,
+      symbol: executableDecision.symbol,
+      timeframe: executableDecision.timeframe,
+      stage: 'execution_blocked',
+      baseDecision: executableDecision.decision,
+      finalDecision: executableDecision.decision,
+      finalBias: executableDecision.finalBias,
+      side: executableDecision.decision,
+      accepted: false,
+      reasons: blockers,
+      metrics: { mode: checklist.mode, strategy: strategyMetadata, blockerType: 'missing_stop_targets' },
     });
     return {
       ok: false,
@@ -410,51 +595,92 @@ export async function dispatchAutonomyDecision(input: {
   const volumeLots = sized.lots;
   const stopLoss = stopTargets.stopLoss;
   const takeProfit = stopTargets.takeProfit;
+  const entryPlan = await planAutonomousRetracementEntry({
+    symbol: executableDecision.symbol,
+    timeframe: executableDecision.timeframe,
+    side,
+    currentPrice: stopTargets.entryPrice,
+    stopLoss,
+    rewardRiskRatio: stopTargets.rewardRiskRatio,
+  }).catch(() => null);
+  const useRetracementEntry = Boolean(entryPlan && isRetracementEntryEnabled());
+  const split = splitHybridLots(volumeLots, entryPlan?.marketFraction ?? 0);
   const commandId = `autonomy-${input.decisionLogId.slice(0, 8)}-${randomUUID()}`;
-  const dedupeKey = `AUTONOMY:${input.decisionLogId}:${input.decision.symbol}:${side}:${volumeLots}`;
+  const pendingCommandId = useRetracementEntry ? `autonomy-${input.decisionLogId.slice(0, 8)}-limit-${randomUUID()}` : commandId;
   const executionMode = account.sandboxMode ? 'SANDBOX' : 'LIVE';
 
   try {
+    const dispatchedCommands: Array<{ commandId: string; orderType: string; volumeLots: number }> = [];
+    if (useRetracementEntry && entryPlan && split.marketLots > 0) {
+      const marketResult = await dispatchExecutionCommand({
+        commandId,
+        terminalId: checklist.terminalId,
+        type: 'place_order',
+        payload: buildExecutionPayload({
+          sourceDecision: input,
+          executableDecision,
+          account,
+          side,
+          executionMode,
+          volumeLots: split.marketLots,
+          stopLoss,
+          takeProfit,
+          entryPrice: stopTargets.entryPrice,
+          rewardRiskRatio: stopTargets.rewardRiskRatio,
+          stopTargetMethod: stopTargets.method,
+          sized,
+          strategyId,
+          orderType: 'MARKET',
+          comment: `Cacsms autonomy ${side} market scout ${executableDecision.symbol}`,
+          entryPlan,
+          leg: 'market_scout',
+        }),
+        environment: account.environment,
+        sandboxMode: account.sandboxMode,
+        dedupeKey: `AUTONOMY:${input.decisionLogId}:${input.decision.symbol}:${side}:MARKET:${split.marketLots}`,
+        intentId: `${input.decisionLogId}:market`,
+        source: 'AUTONOMY_EXECUTION_ADAPTER',
+      });
+      dispatchedCommands.push({ commandId: marketResult.command.commandId, orderType: 'MARKET', volumeLots: split.marketLots });
+    }
+
+    const finalOrderType = useRetracementEntry ? (side === 'BUY' ? 'BUY_LIMIT' : 'SELL_LIMIT') : 'MARKET';
+    const finalVolumeLots = useRetracementEntry ? split.limitLots : volumeLots;
+    const finalEntryPrice = useRetracementEntry && entryPlan ? entryPlan.pendingEntryPrice : stopTargets.entryPrice;
+    const finalStopLoss = useRetracementEntry && entryPlan ? entryPlan.stopLoss : stopLoss;
+    const finalTakeProfit = useRetracementEntry && entryPlan ? entryPlan.takeProfit : takeProfit;
     const result = await dispatchExecutionCommand({
-      commandId,
+      commandId: pendingCommandId,
       terminalId: checklist.terminalId,
       type: 'place_order',
-      payload: {
-        source: 'AUTONOMY_EXECUTION_ADAPTER',
-        decisionLogId: input.decisionLogId,
-        intentId: input.decisionLogId,
-        symbol: executableDecision.symbol,
+      payload: buildExecutionPayload({
+        sourceDecision: input,
+        executableDecision,
+        account,
         side,
-        orderType: 'MARKET',
-        volume: volumeLots,
-        volumeLots,
-        sl: stopLoss,
-        tp: takeProfit,
-        stopLoss,
-        takeProfit,
-        entryPrice: stopTargets.entryPrice,
+        executionMode,
+        volumeLots: finalVolumeLots,
+        stopLoss: finalStopLoss,
+        takeProfit: finalTakeProfit,
+        entryPrice: finalEntryPrice,
         rewardRiskRatio: stopTargets.rewardRiskRatio,
-        stopTargetMethod: stopTargets.method,
-        comment: `Cacsms autonomy ${side} ${executableDecision.symbol}`,
-        mode: executionMode,
-        environment: account.environment,
-        accountClass: account.accountClass,
-        accountNumber: account.accountNumber,
-        equity: account.equity,
-        sizingMethod: sized.method,
-        riskAmount: sized.riskAmount,
-        stopPips: sized.stopPips,
-        timeframe: executableDecision.timeframe,
-        tradingStyle: executableDecision.tradingStyle ?? null,
-        confidenceScore: executableDecision.confidenceScore,
-        setupReadinessScore: executableDecision.setupReadinessScore,
-      },
+        stopTargetMethod: useRetracementEntry ? 'retracement_entry' : stopTargets.method,
+        sized,
+        strategyId,
+        orderType: finalOrderType,
+        comment: useRetracementEntry
+          ? `Cacsms autonomy ${side} retracement ${executableDecision.symbol}`
+          : `Cacsms autonomy ${side} ${executableDecision.symbol}`,
+        entryPlan: entryPlan ?? undefined,
+        leg: useRetracementEntry ? 'retracement_limit' : 'market_full',
+      }),
       environment: account.environment,
       sandboxMode: account.sandboxMode,
-      dedupeKey,
-      intentId: input.decisionLogId,
+      dedupeKey: `AUTONOMY:${input.decisionLogId}:${input.decision.symbol}:${side}:${finalOrderType}:${finalVolumeLots}:${finalEntryPrice}`,
+      intentId: useRetracementEntry ? `${input.decisionLogId}:limit` : input.decisionLogId,
       source: 'AUTONOMY_EXECUTION_ADAPTER',
     });
+    dispatchedCommands.push({ commandId: result.command.commandId, orderType: finalOrderType, volumeLots: finalVolumeLots });
 
     await persistDispatchRecord({
       decisionLogId: input.decisionLogId,
@@ -472,10 +698,35 @@ export async function dispatchAutonomyDecision(input: {
         environment: account.environment,
         volumeLots,
         sizingMethod: sized.method,
-        stopLoss,
-        takeProfit,
-        entryPrice: stopTargets.entryPrice,
-        stopTargetMethod: stopTargets.method,
+        stopLoss: finalStopLoss,
+        takeProfit: finalTakeProfit,
+        entryPrice: finalEntryPrice,
+        stopTargetMethod: useRetracementEntry ? 'retracement_entry' : stopTargets.method,
+        rewardRiskRatio: stopTargets.rewardRiskRatio,
+        strategy: strategyMetadata,
+        entryPlan: entryPlan ?? null,
+        commands: dispatchedCommands,
+      },
+    });
+    await logAutonomyDirectionAudit({
+      decisionLogId: input.decisionLogId,
+      symbol: executableDecision.symbol,
+      timeframe: executableDecision.timeframe,
+      stage: 'execution_dispatched',
+      baseDecision: executableDecision.decision,
+      finalDecision: executableDecision.decision,
+      finalBias: executableDecision.finalBias,
+      side,
+      accepted: true,
+      reasons: [`${side} ${useRetracementEntry ? 'retracement entry plan' : 'market order'} dispatched to execution bridge.`],
+      metrics: {
+        commandId: result.command.commandId,
+        terminalId: checklist.terminalId,
+        strategy: strategyMetadata,
+        volumeLots,
+        stopLoss: finalStopLoss,
+        takeProfit: finalTakeProfit,
+        entryPlan: entryPlan ?? null,
         rewardRiskRatio: stopTargets.rewardRiskRatio,
       },
     });
@@ -503,7 +754,20 @@ export async function dispatchAutonomyDecision(input: {
       side,
       status: 'failed',
       blockers,
-      payload: { manual: Boolean(input.manual) },
+      payload: { manual: Boolean(input.manual), strategy: strategyMetadata },
+    });
+    await logAutonomyDirectionAudit({
+      decisionLogId: input.decisionLogId,
+      symbol: executableDecision.symbol,
+      timeframe: executableDecision.timeframe,
+      stage: 'execution_failed',
+      baseDecision: executableDecision.decision,
+      finalDecision: executableDecision.decision,
+      finalBias: executableDecision.finalBias,
+      side,
+      accepted: false,
+      reasons: blockers,
+      metrics: { terminalId: checklist.terminalId, strategy: strategyMetadata },
     });
     return {
       ok: false,

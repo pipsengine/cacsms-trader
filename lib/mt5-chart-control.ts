@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 
+import { extractSymbolTelemetry } from './mt5-symbol-telemetry';
 import { resolveMt5BridgeSharedSecret } from './mt5-bridge-secret';
 
 const CHART_COMMAND_TYPES = new Set(['open_chart', 'set_timeframe', 'capture_chart', 'close_chart']);
@@ -8,6 +9,8 @@ export type Mt5ChartCommandType = 'open_chart' | 'set_timeframe' | 'capture_char
 
 export interface Mt5ChartCommandPayload {
   symbol: string;
+  canonicalSymbol?: string;
+  brokerSymbol?: string;
   timeframe?: string;
   sessionId?: string;
   chartId?: number;
@@ -20,6 +23,25 @@ function bridgeUrl(): string {
 
 async function bridgeSecret(): Promise<string> {
   return resolveMt5BridgeSharedSecret();
+}
+
+async function resolveBrokerSymbol(terminalId: string, symbol: string): Promise<{ canonicalSymbol: string; brokerSymbol: string }> {
+  const canonicalSymbol = symbol.toUpperCase();
+  try {
+    const response = await fetch(`${bridgeUrl()}/terminals`, { cache: 'no-store' });
+    if (response.ok) {
+      const payload = await response.json();
+      const terminals = Array.isArray(payload.terminals) ? payload.terminals : [];
+      const terminal = terminals.find((item: { terminalId?: string }) => String(item.terminalId ?? '') === terminalId) ?? terminals[0];
+      const telemetry = extractSymbolTelemetry(terminal);
+      const row = telemetry.find((item) => item.symbol.toUpperCase() === canonicalSymbol);
+      const brokerSymbol = String(row?.brokerSymbol ?? '').trim();
+      if (row?.available && brokerSymbol) return { canonicalSymbol, brokerSymbol };
+    }
+  } catch {
+    // Fall back to the canonical symbol when the bridge is temporarily unavailable.
+  }
+  return { canonicalSymbol, brokerSymbol: canonicalSymbol };
 }
 
 export function timeframeToMt5Period(timeframe: string): string {
@@ -75,25 +97,41 @@ export async function enqueueMt5ChartCommand(input: {
 }
 
 export async function openChartOnTerminal(terminalId: string, symbol: string, sessionId?: string) {
+  const resolved = await resolveBrokerSymbol(terminalId, symbol);
   return enqueueMt5ChartCommand({
     terminalId,
     type: 'open_chart',
-    payload: { symbol: symbol.toUpperCase(), sessionId },
+    payload: { symbol: resolved.brokerSymbol, canonicalSymbol: resolved.canonicalSymbol, brokerSymbol: resolved.brokerSymbol, sessionId },
   });
 }
 
 export async function setChartTimeframe(terminalId: string, symbol: string, timeframe: string, sessionId?: string) {
+  const resolved = await resolveBrokerSymbol(terminalId, symbol);
   return enqueueMt5ChartCommand({
     terminalId,
     type: 'set_timeframe',
-    payload: { symbol: symbol.toUpperCase(), timeframe: timeframeToMt5Period(timeframe), sessionId },
+    payload: {
+      symbol: resolved.brokerSymbol,
+      canonicalSymbol: resolved.canonicalSymbol,
+      brokerSymbol: resolved.brokerSymbol,
+      timeframe: timeframeToMt5Period(timeframe),
+      sessionId,
+    },
   });
 }
 
 export async function captureChartOnTerminal(terminalId: string, symbol: string, timeframe: string, sessionId?: string) {
+  const resolved = await resolveBrokerSymbol(terminalId, symbol);
   return enqueueMt5ChartCommand({
     terminalId,
     type: 'capture_chart',
-    payload: { symbol: symbol.toUpperCase(), timeframe: timeframeToMt5Period(timeframe), sessionId, barCount: 120 },
+    payload: {
+      symbol: resolved.brokerSymbol,
+      canonicalSymbol: resolved.canonicalSymbol,
+      brokerSymbol: resolved.brokerSymbol,
+      timeframe: timeframeToMt5Period(timeframe),
+      sessionId,
+      barCount: 120,
+    },
   });
 }

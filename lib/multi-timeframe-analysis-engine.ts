@@ -382,8 +382,10 @@ function snapshotFor(snapshots: TimeframeAnalysisSnapshot[], timeframe: MtfTimef
 
 function directional(value: string): 'bullish' | 'bearish' | 'neutral' {
   const text = value.toLowerCase();
-  if (text.includes('bull') || text.includes('buy')) return 'bullish';
-  if (text.includes('bear') || text.includes('sell')) return 'bearish';
+  if (/\bbuy[_\s-]?side[_\s-]?(sweep|liquidity|stop|pool)/.test(text)) return 'bearish';
+  if (/\bsell[_\s-]?side[_\s-]?(sweep|liquidity|stop|pool)/.test(text)) return 'bullish';
+  if (/\b(bull|buy|long|demand|accumulation)\b/.test(text)) return 'bullish';
+  if (/\b(bear|sell|short|supply|distribution)\b/.test(text)) return 'bearish';
   return 'neutral';
 }
 
