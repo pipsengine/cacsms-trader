@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { CalendarClock, Database, Eye, Landmark, Loader2, Menu, RefreshCw, ShieldAlert, TrendingDown, TrendingUp } from 'lucide-react';
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -323,10 +323,12 @@ export default function MonetaryPolicyInterestRatesPage() {
   }, [currentRows]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white">
-      <TraderSidebar bridgeOnline={false} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
-
-      <div className="flex flex-1 flex-col overflow-hidden">
+    <DashboardPageFrame
+      bridgeOnline={false}
+      mobileOpen={mobileSidebarOpen}
+      onMobileOpenChange={setMobileSidebarOpen}
+      className="flex min-w-0 flex-1 flex-col overflow-hidden"
+    >
         <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 md:px-6">
           <div className="flex items-center gap-3">
             <button
@@ -794,7 +796,6 @@ export default function MonetaryPolicyInterestRatesPage() {
             </main>
           </ScrollArea>
         </div>
-      </div>
-    </div>
+    </DashboardPageFrame>
   );
 }

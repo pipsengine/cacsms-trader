@@ -30,7 +30,7 @@ import {
   Zap,
   type LucideIcon,
 } from 'lucide-react';
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -298,9 +298,12 @@ function EconomicCalendarIntelligencePage() {
   };
 
   return (
-    <div className="macro-light flex h-screen overflow-hidden bg-white text-slate-900 font-sans">
-      <TraderSidebar bridgeOnline={false} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
-      <div className="flex min-w-0 flex-1 flex-col bg-white">
+    <DashboardPageFrame
+      bridgeOnline={false}
+      mobileOpen={mobileSidebarOpen}
+      onMobileOpenChange={setMobileSidebarOpen}
+      className="macro-light flex min-w-0 flex-1 flex-col bg-white text-slate-900 font-sans"
+    >
         <header className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 py-3 md:px-6">
           <div className="flex items-center gap-4">
             <button
@@ -470,9 +473,8 @@ function EconomicCalendarIntelligencePage() {
             </section>
           </main>
         </div>
-      </div>
       <SourceComparisonModal open={comparisonOpen} onClose={() => setComparisonOpen(false)} event={selectedEvent} />
-    </div>
+    </DashboardPageFrame>
   );
 }
 

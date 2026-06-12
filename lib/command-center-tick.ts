@@ -1,6 +1,7 @@
 import { getBridgeExecutionMetrics } from './autonomous-pipeline-risk-execution';
 import { buildFundedNextCompliance, type PropFirmComplianceView } from './prop-firm-profiles';
 import { getLiveTerminalFeed, type LiveTerminalFeed } from './live-terminal-feed';
+import { getContinuousTradingSessionStatus } from './continuous-trading-session';
 
 let tickSequence = 0;
 
@@ -31,6 +32,11 @@ export interface CommandCenterTick {
     }>;
   };
   propFirm: PropFirmComplianceView;
+  continuousTrading: {
+    active: boolean;
+    startedAt: string | null;
+    stoppedAt: string | null;
+  };
 }
 
 export interface CommandCenterTickOptions {
@@ -63,12 +69,15 @@ export async function getCommandCenterTick(options: CommandCenterTickOptions = {
   const trackedCount = Math.max(execution.trackedOpen, execution.openPositions.length);
   const openPositions = Math.max(liveFeed.totalOpenOrders, execution.terminalOpen, execution.openOrders, trackedCount);
 
-  const propFirm = await buildFundedNextCompliance({
-    accountNumber: primaryAccount,
-    liveEquity: liveFeed.totalEquity,
-    liveBalance: liveFeed.totalBalance,
-    liveOpenTrades: openPositions,
-  });
+  const [propFirm, continuousTrading] = await Promise.all([
+    buildFundedNextCompliance({
+      accountNumber: primaryAccount,
+      liveEquity: liveFeed.totalEquity,
+      liveBalance: liveFeed.totalBalance,
+      liveOpenTrades: openPositions,
+    }),
+    getContinuousTradingSessionStatus(),
+  ]);
 
   return {
     sequence: tickSequence,
@@ -91,5 +100,10 @@ export async function getCommandCenterTick(options: CommandCenterTickOptions = {
       openPositionDetails: execution.openPositions,
     },
     propFirm,
+    continuousTrading: {
+      active: continuousTrading.active,
+      startedAt: continuousTrading.startedAt,
+      stoppedAt: continuousTrading.stoppedAt,
+    },
   };
 }

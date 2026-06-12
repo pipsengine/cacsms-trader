@@ -1,11 +1,10 @@
-import { generateAutonomousSignal } from '@/lib/autonomy-store';
 import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
 import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
 import { getLatestPairSelection, runAutonomousPairSelection, shouldRefreshPairSelection } from '@/lib/pair-selector';
 import { queryPostgres } from '@/lib/postgres';
 import { is24HourTradingEnabled } from '@/lib/trading-session-policy';
 
-const SIGNAL_TIMEFRAME = 'M15';
+import { runMultiStyleTradingCycle } from '@/lib/trading-styles/multi-style-orchestrator';
 
 function envNumber(name: string, fallback: number): number {
   const raw = String(process.env[name] ?? '').trim();
@@ -162,27 +161,13 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
     };
   }
 
-  let dispatchesAttempted = 0;
-  let actionableDispatches = 0;
-  const processedSymbols: string[] = [];
-  for (const symbol of targets) {
-    if (actionableDispatches >= targetEntries) break;
-    try {
-      const { recoverPendingPipelineCaptures, syncMt5CaptureAcks } = await import('./mt5-capture-ingest');
-      const { analyzeVisualMarketInterpretation } = await import('./visual-market-interpretation-store');
-      await recoverPendingPipelineCaptures(symbol).catch(() => 0);
-      await syncMt5CaptureAcks({ symbol, limit: 12 }).catch(() => null);
-      await analyzeVisualMarketInterpretation({ symbol, timeframe: SIGNAL_TIMEFRAME }).catch(() => null);
-      const signal = await generateAutonomousSignal(symbol, SIGNAL_TIMEFRAME, { refillMode: true });
-      dispatchesAttempted += 1;
-      processedSymbols.push(symbol);
-      if (!['BUY', 'SELL'].includes(signal.decision)) continue;
-      actionableDispatches += 1;
-      if (signal.executionDispatch?.status === 'dispatched') continue;
-    } catch {
-      // try next symbol in the batch
-    }
-  }
+  const multiStyle = await runMultiStyleTradingCycle({
+    maxTotalEntries: targetEntries,
+    symbols: targets,
+  });
+  const dispatchesAttempted = multiStyle.dispatchesAttempted;
+  const actionableDispatches = multiStyle.actionableDispatches;
+  const processedSymbols = Object.values(multiStyle.byStyle).flatMap((row) => row.symbols);
 
   await queryPostgres(
     `
@@ -196,6 +181,7 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
       dispatchesAttempted,
       actionableDispatches,
       openCount,
+      multiStyle,
       at: new Date().toISOString(),
     })],
   ).catch(() => null);
@@ -205,10 +191,6 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
     slotsTargeted: targetEntries,
     symbolsProcessed: processedSymbols,
     dispatchesAttempted,
-    detail: actionableDispatches > 0
-      ? `Institutional refill placed ${actionableDispatches} actionable signal(s) across ${processedSymbols.join(', ')}.`
-      : dispatchesAttempted > 0
-        ? `Scanned ${dispatchesAttempted} symbol(s) (${processedSymbols.join(', ')}) — no BUY/SELL dispatch yet; retrying next cycle.`
-        : `Candidates found (${targets.join(', ')}) but no actionable dispatches this cycle.`,
+    detail: multiStyle.detail,
   };
 }

@@ -126,6 +126,20 @@ export async function getPatternAnalysis(captureId: string): Promise<PatternAnal
   };
 }
 
+export async function getPatternCoverageMap(): Promise<Record<string, number>> {
+  await ensurePatternRecognitionSchema();
+  const result = await queryPostgres(`
+    SELECT chart_capture_id, COUNT(*)::int AS pattern_count
+    FROM pattern_recognition_results
+    GROUP BY chart_capture_id
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.chart_capture_id)] = Number(row.pattern_count);
+  }
+  return coverage;
+}
+
 export async function getPatternResults(captureId: string): Promise<PatternRecognitionResult[]> {
   await ensurePatternRecognitionSchema();
   const result = await queryPostgres(`

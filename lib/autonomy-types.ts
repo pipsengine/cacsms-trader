@@ -67,6 +67,8 @@ export interface AutonomousDecisionInput {
   accountClass?: 'demo' | 'prop_firm' | 'live' | 'large_equity';
   /** Lower decision thresholds while refilling open slots in continuous mode. */
   refillMode?: boolean;
+  /** Institutional trading style: scalp, intraday, day_trade, swing, position. */
+  tradingStyle?: 'scalp' | 'intraday' | 'day_trade' | 'swing' | 'position';
   dominantTimeframe?: string | null;
   visual?: {
     finalMarketBias?: string | null;
@@ -97,6 +99,7 @@ export interface AutonomousDecisionInput {
 export interface AutonomousDecisionOutput {
   symbol: string;
   timeframe: string;
+  tradingStyle?: AutonomousDecisionInput['tradingStyle'];
   dominantTimeframe: string;
   finalBias: string;
   setupType: string;

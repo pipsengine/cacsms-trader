@@ -1,11 +1,5 @@
-import { VisualIntelligenceModulePage } from '@/components/visual-intelligence-module-page';
+import { SupportResistanceMappingDashboard } from '@/components/support-resistance-mapping-dashboard';
 
 export default function SupportResistanceMappingPage() {
-  return (
-    <VisualIntelligenceModulePage
-      title="Support / Resistance Mapping"
-      description="Review persisted support and resistance zones for each chart capture."
-      module="support-resistance"
-    />
-  );
+  return <SupportResistanceMappingDashboard />;
 }

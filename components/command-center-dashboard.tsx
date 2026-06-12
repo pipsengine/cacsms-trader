@@ -27,8 +27,9 @@ import {
   Zap,
 } from 'lucide-react';
 
+import { useContinuousTradingSession } from '@/components/continuous-trading-session-provider';
 import { PairSelectionLivePanel } from '@/components/pair-selection-live-panel';
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
@@ -209,6 +210,7 @@ type DashboardTick = {
   bridge: { online: boolean; connected: number; degraded: number; disconnected: number };
   trading: OverviewPayload['trading'];
   propFirm: OverviewPayload['propFirm'];
+  continuousTrading?: OverviewPayload['continuousTrading'];
 };
 
 const HEALTH_TONE: Record<OverviewPayload['systemHealth']['level'], DashboardTone> = {
@@ -313,13 +315,14 @@ function createBootstrapOverviewFromTick(tick: DashboardTick): OverviewPayload {
       stoppedAt: null,
       minOpenPositions: 1,
       maxEntriesPerCycle: 3,
-      targetDescription: 'Press Start to begin institutional continuous trading.',
+      targetDescription: 'Loading continuous trading session…',
       lastMaintenance: null,
     },
   };
 }
 
 export function CommandCenterDashboard() {
+  const tradingSession = useContinuousTradingSession();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [overview, setOverview] = useState<OverviewPayload | null>(null);
   const [loading, setLoading] = useState(true);
@@ -330,8 +333,11 @@ export function CommandCenterDashboard() {
   const [tickSequence, setTickSequence] = useState(0);
   const [streamConnected, setStreamConnected] = useState(false);
   const [clockNow, setClockNow] = useState(() => new Date());
-  const [sessionBusy, setSessionBusy] = useState(false);
-  const [sessionMessage, setSessionMessage] = useState<string | null>(null);
+  const sessionActive = tradingSession.loaded
+    ? tradingSession.active
+    : (overview?.continuousTrading.active ?? false);
+  const sessionBusy = tradingSession.busy;
+  const sessionMessage = tradingSession.message;
 
   const applyTick = useCallback((tick: DashboardTick) => {
     setTickSequence(tick.sequence);
@@ -368,6 +374,17 @@ export function CommandCenterDashboard() {
         },
         propFirm: tick.propFirm,
         live: { tickSequence: tick.sequence, tickAt: tick.tickAt },
+        continuousTrading: tick.continuousTrading
+          ? {
+            ...base.continuousTrading,
+            active: tick.continuousTrading.active,
+            startedAt: tick.continuousTrading.startedAt,
+            stoppedAt: tick.continuousTrading.stoppedAt,
+            targetDescription: tick.continuousTrading.active
+              ? 'Institutional refill active — maintains uncorrelated open exposure until daily drawdown limit.'
+              : 'Stopped — press Start on the command center to resume autonomous trading.',
+          }
+          : base.continuousTrading,
       };
     });
   }, []);
@@ -391,28 +408,6 @@ export function CommandCenterDashboard() {
       setRefreshing(false);
     }
   }, []);
-
-  const toggleContinuousTrading = useCallback(async (action: 'start' | 'stop') => {
-    setSessionBusy(true);
-    setSessionMessage(null);
-    try {
-      const response = await fetch('/api/command-center/continuous-trading', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action }),
-      });
-      const payload = await response.json();
-      if (!response.ok || !payload.ok) {
-        throw new Error(String(payload.error ?? `Unable to ${action} continuous trading.`));
-      }
-      setSessionMessage(String(payload.message ?? (action === 'start' ? 'Trading started.' : 'Trading stopped.')));
-      await loadOverview(true);
-    } catch (toggleError) {
-      setSessionMessage(toggleError instanceof Error ? toggleError.message : `Unable to ${action} continuous trading.`);
-    } finally {
-      setSessionBusy(false);
-    }
-  }, [loadOverview]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setClockNow(new Date()), 1000);
@@ -534,14 +529,12 @@ export function CommandCenterDashboard() {
   }, [overview]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white">
-      <TraderSidebar
-        bridgeOnline={overview?.pipeline.bridgeOnline ?? false}
-        mobileOpen={mobileSidebarOpen}
-        onMobileOpenChange={setMobileSidebarOpen}
-      />
-
-      <div className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden">
+    <DashboardPageFrame
+      bridgeOnline={overview?.pipeline.bridgeOnline ?? false}
+      mobileOpen={mobileSidebarOpen}
+      onMobileOpenChange={setMobileSidebarOpen}
+    >
+      <div className="relative z-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <header className="sticky top-0 z-20 shrink-0 border-b border-slate-200 bg-white px-4 py-4 md:px-6">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             <div className="flex min-w-0 items-center gap-3">
@@ -562,12 +555,12 @@ export function CommandCenterDashboard() {
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              {overview?.continuousTrading.active ? (
+              {sessionActive ? (
                 <Button
                   size="sm"
                   variant="destructive"
                   disabled={sessionBusy}
-                  onClick={() => void toggleContinuousTrading('stop')}
+                  onClick={() => void tradingSession.stop()}
                 >
                   <Square className="mr-2 h-4 w-4" />
                   {sessionBusy ? 'Stopping…' : 'Stop trading'}
@@ -577,7 +570,7 @@ export function CommandCenterDashboard() {
                   size="sm"
                   className="bg-emerald-600 hover:bg-emerald-700"
                   disabled={sessionBusy}
-                  onClick={() => void toggleContinuousTrading('start')}
+                  onClick={() => void tradingSession.start()}
                 >
                   <PlayCircle className="mr-2 h-4 w-4" />
                   {sessionBusy ? 'Starting…' : 'Start trading'}
@@ -586,11 +579,11 @@ export function CommandCenterDashboard() {
               <span
                 className={cn(
                   'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold',
-                  overview?.continuousTrading.active ? toneBadge('emerald') : toneBadge('slate'),
+                  sessionActive ? toneBadge('emerald') : toneBadge('slate'),
                 )}
               >
-                <Activity className={cn('h-3 w-3', overview?.continuousTrading.active && 'animate-pulse')} />
-                {overview?.continuousTrading.active ? 'Session live' : 'Session stopped'}
+                <Activity className={cn('h-3 w-3', sessionActive && 'animate-pulse')} />
+                {sessionActive ? 'Session live' : tradingSession.loaded ? 'Session stopped' : 'Checking session…'}
               </span>
               <span
                 className={cn(
@@ -636,24 +629,24 @@ export function CommandCenterDashboard() {
               <section
                 className={cn(
                   'mb-4 rounded-2xl border p-4 shadow-sm',
-                  toneCard(overview.continuousTrading.active ? 'emerald' : 'slate'),
+                  toneCard(sessionActive ? 'emerald' : 'slate'),
                 )}
               >
                 <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                   <div>
-                    <p className={cn('text-[11px] font-bold uppercase tracking-[0.18em]', toneMuted(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
+                    <p className={cn('text-[11px] font-bold uppercase tracking-[0.18em]', toneMuted(sessionActive ? 'emerald' : 'slate'))}>
                       Institutional continuous trading
                     </p>
-                    <p className={cn('text-lg font-semibold', toneTitle(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
-                      {overview.continuousTrading.active ? 'Session running' : 'Session stopped'}
+                    <p className={cn('text-lg font-semibold', toneTitle(sessionActive ? 'emerald' : 'slate'))}>
+                      {sessionActive ? 'Session running' : tradingSession.loaded ? 'Session stopped' : 'Checking session…'}
                     </p>
-                    <p className={cn('text-sm', toneBody(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
+                    <p className={cn('text-sm', toneBody(sessionActive ? 'emerald' : 'slate'))}>
                       {overview.continuousTrading.targetDescription}
                     </p>
                     {sessionMessage ? (
                       <p className="mt-2 text-xs font-medium text-slate-700">{sessionMessage}</p>
                     ) : null}
-                    <p className={cn('mt-2 text-xs', toneMuted(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
+                    <p className={cn('mt-2 text-xs', toneMuted(sessionActive ? 'emerald' : 'slate'))}>
                       Min open positions: {overview.continuousTrading.minOpenPositions}
                       {' · '}
                       Max entries/cycle: {overview.continuousTrading.maxEntriesPerCycle}
@@ -665,7 +658,7 @@ export function CommandCenterDashboard() {
                       Daily budget left: ${overview.risk.remainingDailyLossAmount?.toFixed(2) ?? '—'}
                     </p>
                     {overview.continuousTrading.lastMaintenance?.at ? (
-                      <p className={cn('mt-1 text-xs', toneMuted(overview.continuousTrading.active ? 'emerald' : 'slate'))}>
+                      <p className={cn('mt-1 text-xs', toneMuted(sessionActive ? 'emerald' : 'slate'))}>
                         Last refill: {overview.continuousTrading.lastMaintenance.dispatchesAttempted} dispatch(es)
                         {overview.continuousTrading.lastMaintenance.targets.length > 0
                           ? ` · ${overview.continuousTrading.lastMaintenance.targets.join(', ')}`
@@ -676,8 +669,8 @@ export function CommandCenterDashboard() {
                     ) : null}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {overview.continuousTrading.active ? (
-                      <Button variant="destructive" disabled={sessionBusy} onClick={() => void toggleContinuousTrading('stop')}>
+                    {sessionActive ? (
+                      <Button variant="destructive" disabled={sessionBusy} onClick={() => void tradingSession.stop()}>
                         <Square className="mr-2 h-4 w-4" />
                         {sessionBusy ? 'Stopping…' : 'Stop trading'}
                       </Button>
@@ -685,7 +678,7 @@ export function CommandCenterDashboard() {
                       <Button
                         className="bg-emerald-600 hover:bg-emerald-700"
                         disabled={sessionBusy}
-                        onClick={() => void toggleContinuousTrading('start')}
+                        onClick={() => void tradingSession.start()}
                       >
                         <PlayCircle className="mr-2 h-4 w-4" />
                         {sessionBusy ? 'Starting…' : 'Start trading'}
@@ -1163,7 +1156,7 @@ export function CommandCenterDashboard() {
           ) : null}
         </main>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }
 

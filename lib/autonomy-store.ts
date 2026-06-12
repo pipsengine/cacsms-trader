@@ -5,7 +5,8 @@ import { buildAutonomousDecision } from './autonomous-decision-engine';
 import { resolveExecutionAccountContext } from './execution-account-context';
 import { SYSTEM_FOCUS_SYMBOLS } from './focus-symbols';
 import { DEFAULT_PAIR_SELECTION_CONFIG, runAutonomousPairSelection } from './pair-selector';
-import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
+import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomousDecisionInput, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
+import { getTradingStyleProfile } from './trading-styles/registry';
 import { analyzeAiVisualInterpretation } from './ai-visual-interpretation-store';
 import { analyzeCaptureCandles } from './candle-detection-store';
 import { analyzeCaptureChannels } from './channel-detection-store';
@@ -425,7 +426,8 @@ export async function resumeAutonomy() {
 }
 
 async function runAutonomyTick(triggerSource: string) {
-  const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
+  const { isContinuousTradingSessionActive, syncContinuousTradingRuntime } = await import('./continuous-trading-session');
+  await syncContinuousTradingRuntime();
   if (!(await isContinuousTradingSessionActive())) return;
   if ((await isEmergencyStopped())) return;
   const config = await getAutonomyConfig();
@@ -557,7 +559,7 @@ async function runWorker(workerName: AutonomyWorkerName, symbol: string | null, 
 export async function generateAutonomousSignal(
   symbol: string,
   timeframe: string,
-  options: { refillMode?: boolean } = {},
+  options: { refillMode?: boolean; tradingStyle?: AutonomousDecisionInput['tradingStyle'] } = {},
 ) {
   const account = await resolveExecutionAccountContext();
   const visual = await getLatestVisualMarketInterpretation(symbol, timeframe) ?? await analyzeVisualMarketInterpretation({ symbol, timeframe });
@@ -571,7 +573,10 @@ export async function generateAutonomousSignal(
     timeframe,
     accountClass: account?.accountClass ?? 'demo',
     refillMode,
-    dominantTimeframe: visual.dominantTimeframe,
+    tradingStyle: options.tradingStyle,
+    dominantTimeframe: options.tradingStyle
+      ? getTradingStyleProfile(options.tradingStyle).dominantTimeframe
+      : visual.dominantTimeframe,
     visual,
     macro: await loadMacroContext(symbol),
     execution: await loadExecutionContext(symbol, timeframe),

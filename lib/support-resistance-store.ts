@@ -103,6 +103,20 @@ export async function getSupportResistanceAnalysis(captureId: string): Promise<S
   return { captureId, zones, liquidity, summary: summarize(zones) };
 }
 
+export async function getSupportResistanceCoverageMap(): Promise<Record<string, number>> {
+  await ensureSupportResistanceSchema();
+  const result = await queryPostgres(`
+    SELECT chart_capture_id, COUNT(*)::int AS zone_count
+    FROM support_resistance_zones
+    GROUP BY chart_capture_id
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.chart_capture_id)] = Number(row.zone_count);
+  }
+  return coverage;
+}
+
 export async function getSupportResistanceZones(captureId: string): Promise<SupportResistanceZone[]> {
   await ensureSupportResistanceSchema();
   const result = await queryPostgres(`

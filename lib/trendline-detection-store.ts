@@ -124,6 +124,20 @@ export async function getTrendlineAnalysis(captureId: string): Promise<Trendline
   return { captureId, trendlines, breaks, retests, summary: summarize(trendlines) };
 }
 
+export async function getTrendlineCoverageMap(): Promise<Record<string, number>> {
+  await ensureTrendlineDetectionSchema();
+  const result = await queryPostgres(`
+    SELECT chart_capture_id, COUNT(*)::int AS trendline_count
+    FROM trendline_detections
+    GROUP BY chart_capture_id
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.chart_capture_id)] = Number(row.trendline_count);
+  }
+  return coverage;
+}
+
 export async function getTrendlineDetections(captureId: string): Promise<TrendlineDetection[]> {
   await ensureTrendlineDetectionSchema();
   const result = await queryPostgres(`

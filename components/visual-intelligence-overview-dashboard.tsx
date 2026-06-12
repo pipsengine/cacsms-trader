@@ -19,7 +19,7 @@ import {
   Workflow,
 } from 'lucide-react';
 
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
@@ -219,10 +219,8 @@ export function VisualIntelligenceOverviewDashboard() {
   const recentEvents = [...events].reverse().slice(0, 8);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white">
-      <TraderSidebar bridgeOnline={bridgeOnline} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
-
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+    <DashboardPageFrame bridgeOnline={bridgeOnline} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen}>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <header className="shrink-0 border-b border-slate-200 bg-white px-4 py-4 md:px-6">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
@@ -473,7 +471,7 @@ export function VisualIntelligenceOverviewDashboard() {
           </section>
         </main>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }
 

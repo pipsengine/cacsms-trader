@@ -3,7 +3,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Clock, Menu } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 
 type BridgeTerminal = {
   terminalId: string;
@@ -245,14 +245,13 @@ export function Mt5OpsShell(props: {
   }, [props.subtitle, state.bridgeOnline, state.lastError]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white text-slate-900 font-sans">
-      <TraderSidebar
-        bridgeOnline={state.bridgeOnline}
-        mobileOpen={mobileSidebarOpen}
-        onMobileOpenChange={setMobileSidebarOpen}
-      />
-
-      <div className="flex min-w-0 flex-1 flex-col bg-white">
+    <DashboardPageFrame
+      bridgeOnline={state.bridgeOnline}
+      mobileOpen={mobileSidebarOpen}
+      onMobileOpenChange={setMobileSidebarOpen}
+      className="flex min-h-0 min-w-0 flex-1 flex-col bg-white text-slate-900 font-sans"
+    >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-white">
         <header className="flex items-center justify-between px-4 py-3 md:px-6 border-b border-slate-200 bg-white shrink-0">
           <div className="flex items-center gap-4">
             <button
@@ -294,6 +293,6 @@ export function Mt5OpsShell(props: {
           </div>
         </Mt5OpsStateContext.Provider>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }

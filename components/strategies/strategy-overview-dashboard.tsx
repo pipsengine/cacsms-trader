@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useState } from 'react';
 import { BrainCircuit, Menu, Sparkles } from 'lucide-react';
 
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { toneBadge, toneBody, toneCard, toneCardHeader, toneMuted, toneTitle } from '@/lib/dashboard-card-tones';
 import { MOVING_AVERAGE_CROSSOVER_STRATEGY } from '@/lib/strategies/registry';
@@ -16,9 +16,8 @@ export function StrategyOverviewDashboard() {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
-      <TraderSidebar bridgeOnline mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
-      <div className="flex min-w-0 flex-1 flex-col">
+    <DashboardPageFrame bridgeOnline mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} className="flex min-h-0 min-w-0 flex-1 flex-col bg-slate-50">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex h-14 items-center border-b border-slate-200 bg-white px-4 lg:px-6">
           <button type="button" className="rounded-md border border-slate-200 p-2 lg:hidden" onClick={() => setMobileSidebarOpen(true)}>
             <Menu className="h-4 w-4" />
@@ -62,6 +61,6 @@ export function StrategyOverviewDashboard() {
           </Card>
         </main>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }

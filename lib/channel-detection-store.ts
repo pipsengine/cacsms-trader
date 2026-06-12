@@ -116,6 +116,20 @@ export async function getChannelAnalysis(captureId: string): Promise<ChannelAnal
   return { captureId, channels, breakoutPressure, summary: summarize(channels) };
 }
 
+export async function getChannelCoverageMap(): Promise<Record<string, number>> {
+  await ensureChannelDetectionSchema();
+  const result = await queryPostgres(`
+    SELECT chart_capture_id, COUNT(*)::int AS channel_count
+    FROM channel_detections
+    GROUP BY chart_capture_id
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.chart_capture_id)] = Number(row.channel_count);
+  }
+  return coverage;
+}
+
 export async function getChannelDetections(captureId: string): Promise<ChannelDetection[]> {
   await ensureChannelDetectionSchema();
   const result = await queryPostgres(`

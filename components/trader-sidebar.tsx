@@ -1,7 +1,7 @@
 'use client';
 
 import Link from "next/link";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   BrainCircuit,
@@ -17,6 +17,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { useContinuousTradingSession } from "@/components/continuous-trading-session-provider";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { strategyPageHref, strategyPageIdFromPath } from "@/lib/strategy-routes";
 import { cn } from "@/lib/utils";
@@ -131,41 +132,46 @@ const defaultPreferences: SidebarPreferences = {
   activePage: defaultActivePage,
 };
 
+function readStoredSidebarPreferences(): SidebarPreferences {
+  if (typeof window === 'undefined') return defaultPreferences;
+  const stored = window.localStorage.getItem(preferenceKey);
+  if (!stored) return defaultPreferences;
+  try {
+    return { ...defaultPreferences, ...JSON.parse(stored) as SidebarPreferences };
+  } catch {
+    return defaultPreferences;
+  }
+}
+
+function resolveSidebarPreferences(pathname: string, base: SidebarPreferences): SidebarPreferences {
+  const inferredActivePage = pageIdForPathname(pathname);
+  const activePage = inferredActivePage ?? base.activePage;
+  const ancestors = inferredActivePage ? findNavigationAncestors(inferredActivePage) : { modules: [], groups: [] };
+  return {
+    ...base,
+    activePage,
+    openModules: mergeUnique(base.openModules, ancestors.modules),
+    openGroups: mergeUnique(base.openGroups, ancestors.groups),
+  };
+}
+
 export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: TraderSidebarProps) {
-  const [mounted, setMounted] = useState(false);
   const [preferences, setPreferences] = useState<SidebarPreferences>(defaultPreferences);
+  const [preferencesReady, setPreferencesReady] = useState(false);
   const router = useRouter();
   const pathname = usePathname();
 
   useLayoutEffect(() => {
-    let nextPreferences = defaultPreferences;
-    const stored = window.localStorage.getItem(preferenceKey);
-
-    if (stored) {
-      try {
-        nextPreferences = { ...defaultPreferences, ...JSON.parse(stored) };
-      } catch {
-        nextPreferences = defaultPreferences;
-      }
-    }
-
-    const inferredActivePage = pageIdForPathname(pathname);
-    const activePage = inferredActivePage ?? nextPreferences.activePage;
-
-    queueMicrotask(() => {
-      setPreferences({
-        ...nextPreferences,
-        activePage,
-      });
-      setMounted(true);
-    });
+    const stored = readStoredSidebarPreferences();
+    setPreferences(resolveSidebarPreferences(pathname, stored));
+    setPreferencesReady(true);
   }, [pathname]);
 
   useEffect(() => {
-    if (mounted) {
+    if (preferencesReady) {
       window.localStorage.setItem(preferenceKey, JSON.stringify(preferences));
     }
-  }, [mounted, preferences]);
+  }, [preferencesReady, preferences]);
 
   const activeModuleIds = useMemo(() => {
     return new Set(navigationModules.filter((item) => hasActiveChild(item, preferences.activePage)).map((item) => item.id));
@@ -263,6 +269,38 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
   );
 }
 
+function ContinuousTradingSidebarStatus(props: {
+  collapsed: boolean;
+  active: boolean;
+  loaded: boolean;
+}) {
+  const tone = !props.loaded ? "slate" : props.active ? "emerald" : "amber";
+  return (
+    <div className={cn(
+      "flex items-center gap-3 rounded-lg border px-3 py-3",
+      tone === "emerald" && "border-emerald-200 bg-emerald-50 text-emerald-800",
+      tone === "amber" && "border-amber-200 bg-amber-50 text-amber-800",
+      tone === "slate" && "border-slate-200 bg-slate-50 text-slate-700",
+      props.collapsed && "justify-center px-0",
+    )}>
+      <div className={cn(
+        "h-2.5 w-2.5 shrink-0 rounded-full",
+        tone === "emerald" && "bg-emerald-500",
+        tone === "amber" && "bg-amber-500",
+        tone === "slate" && "bg-slate-400",
+      )} />
+      {!props.collapsed ? (
+        <div>
+          <div className="text-xs font-semibold">
+            {!props.loaded ? "Trading session…" : props.active ? "Trading active" : "Trading stopped"}
+          </div>
+          <div className="text-[11px] opacity-75">Persists across all pages</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function SidebarShell(props: {
   activeModuleIds: Set<string>;
   activePage: string;
@@ -275,6 +313,8 @@ function SidebarShell(props: {
   openGroups: string[];
   openModules: string[];
 }) {
+  const tradingSession = useContinuousTradingSession();
+
   return (
     <aside className={cn(
       "sticky top-0 z-40 hidden h-screen shrink-0 self-start flex-col overflow-hidden border-r border-slate-200 bg-white transition-[width] duration-200 lg:flex",
@@ -300,7 +340,7 @@ function SidebarShell(props: {
 
       <NavigationTree {...props} />
 
-      <div className="border-t border-slate-200 p-3">
+      <div className="border-t border-slate-200 p-3 space-y-2">
         <div className={cn(
           "flex items-center gap-3 rounded-lg border px-3 py-3",
           props.bridgeOnline ? "border-teal-200 bg-teal-50 text-teal-800" : "border-rose-200 bg-rose-50 text-rose-700",
@@ -314,6 +354,11 @@ function SidebarShell(props: {
             </div>
           ) : null}
         </div>
+        <ContinuousTradingSidebarStatus
+          collapsed={props.collapsed}
+          active={tradingSession.active}
+          loaded={tradingSession.loaded}
+        />
       </div>
     </aside>
   );
@@ -331,16 +376,20 @@ function NavigationTree(props: {
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
 
-  useLayoutEffect(() => {
+  const restoreScrollPosition = useCallback(() => {
     const storedPosition = window.localStorage.getItem(scrollPositionKey);
     const nextScrollTop = storedPosition ? Number(storedPosition) : 0;
-
     if (!Number.isFinite(nextScrollTop) || nextScrollTop <= 0) return;
-
     if (viewportRef.current) {
       viewportRef.current.scrollTop = nextScrollTop;
     }
   }, []);
+
+  useLayoutEffect(() => {
+    restoreScrollPosition();
+    const frame = window.requestAnimationFrame(restoreScrollPosition);
+    return () => window.cancelAnimationFrame(frame);
+  }, [props.activePage, restoreScrollPosition]);
 
   const rememberScrollPosition = () => {
     if (viewportRef.current) {

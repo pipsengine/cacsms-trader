@@ -14,7 +14,7 @@ import {
   TrendingUp,
 } from 'lucide-react';
 
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -94,14 +94,13 @@ export function MovingAverageCrossoverDashboard() {
   );
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
-      <TraderSidebar
-        bridgeOnline
-        mobileOpen={mobileSidebarOpen}
-        onMobileOpenChange={setMobileSidebarOpen}
-      />
-
-      <div className="flex min-w-0 flex-1 flex-col">
+    <DashboardPageFrame
+      bridgeOnline
+      mobileOpen={mobileSidebarOpen}
+      onMobileOpenChange={setMobileSidebarOpen}
+      className="flex min-h-0 min-w-0 flex-1 flex-col bg-slate-50"
+    >
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-slate-200 bg-white/90 px-4 backdrop-blur lg:px-6">
           <div className="flex items-center gap-3">
             <button
@@ -305,7 +304,7 @@ export function MovingAverageCrossoverDashboard() {
           </div>
         </main>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }
 

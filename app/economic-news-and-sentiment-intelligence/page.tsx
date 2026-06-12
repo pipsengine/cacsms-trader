@@ -26,7 +26,7 @@ import {
   Zap,
   type LucideIcon,
 } from 'lucide-react';
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -138,10 +138,12 @@ export default function MacroIntelligenceOverviewPage() {
   ], []);
 
   return (
-    <div className="macro-light flex h-screen overflow-hidden bg-white text-slate-900 font-sans">
-      <TraderSidebar bridgeOnline={false} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
-
-      <div className="flex min-w-0 flex-1 flex-col bg-white">
+    <DashboardPageFrame
+      bridgeOnline={false}
+      mobileOpen={mobileSidebarOpen}
+      onMobileOpenChange={setMobileSidebarOpen}
+      className="macro-light flex min-w-0 flex-1 flex-col bg-white text-slate-900 font-sans"
+    >
         <header className="flex items-center justify-between border-b border-slate-200 bg-white px-4 py-3 md:px-6 shrink-0">
           <div className="flex items-center gap-4">
             <button
@@ -353,8 +355,7 @@ export default function MacroIntelligenceOverviewPage() {
             </Tabs>
           </main>
         </div>
-      </div>
-    </div>
+    </DashboardPageFrame>
   );
 }
 

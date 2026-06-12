@@ -1,0 +1,29 @@
+---
+description: After implementing runtime or trading changes, rebuild Docker and verify live APIs
+alwaysApply: true
+---
+
+# Deploy and Verify
+
+When changing trading logic, autonomy, pipeline, execution, or Docker configuration, finish the task by deploying and verifying — do not stop at "code is written."
+
+## Required steps
+
+1. **Build** — Run `npm run build` locally if TypeScript/runtime code changed.
+2. **Deploy** — Run `docker compose up -d --build app` from the repo root.
+3. **Wait** — Allow ~10s for the app container to become ready after recreate.
+4. **Verify env** — Confirm new env vars inside the container, e.g. `docker exec cacsms-trader-app-1 printenv CACSMS_ENABLED_TRADING_STYLES`.
+5. **Verify APIs** — Hit relevant endpoints with `Cache-Control: no-store` semantics:
+   - Multi-style: `GET /api/trading-styles/status` — all enabled styles present, `ok: true`
+   - Bridge: `GET /api/mt5/status` — terminal connected
+   - Continuous session: `GET /api/command-center/continuous-trading` — report `active` state (do not auto-start live trading unless the user explicitly requests it)
+6. **Session persistence** — After continuous-trading UI/runtime changes, confirm `GET /api/command-center/continuous-trading` reflects the same `active` state before and after navigating away from the command center (session is server-persisted, not page-local).
+7. **Report** — Tell the user deploy succeeded, what was verified, and what still requires their action (e.g. Start on home page, EA recompile).
+
+## Trading-style changes
+
+After multi-style or maintenance-loop work, confirm `/api/trading-styles/status` lists scalp, intraday, day_trade, swing, and position with `enabled: true`. `lastCycle` is populated only after continuous trading is active and maintenance runs.
+
+## Do not skip
+
+If Docker is available and the change affects runtime behavior, deploying and verifying is part of the task — not an optional follow-up.

@@ -1,6 +1,18 @@
 import { getContinuousRefillDecisionThresholds, getDecisionThresholds } from './autonomy-account-profiles';
+import { getTradingStyleProfile } from './trading-styles/registry';
 import { shouldBypassNewsBlackout } from './trading-session-policy';
 import type { AutonomousDecisionInput, AutonomousDecisionOutput, AutonomyDecision } from './autonomy-types';
+
+function resolveStyleRefillThresholds(input: { accountClass?: string; tradingStyle?: AutonomousDecisionInput['tradingStyle'] }) {
+  const base = getContinuousRefillDecisionThresholds((input.accountClass ?? 'demo') as 'demo');
+  if (!input.tradingStyle) return base;
+  const profile = getTradingStyleProfile(input.tradingStyle);
+  return {
+    confidence: Math.min(base.confidence, profile.confidenceFloor),
+    readiness: Math.min(base.readiness, profile.readinessFloor),
+    visualReadiness: Math.min(base.visualReadiness, profile.readinessFloor + 8),
+  };
+}
 
 export function buildAutonomousDecision(input: AutonomousDecisionInput): AutonomousDecisionOutput {
   const visual = input.visual ?? {};
@@ -22,6 +34,7 @@ export function buildAutonomousDecision(input: AutonomousDecisionInput): Autonom
   return {
     symbol: input.symbol.toUpperCase(),
     timeframe: input.timeframe.toUpperCase(),
+    tradingStyle: input.tradingStyle,
     dominantTimeframe: input.dominantTimeframe ?? input.timeframe.toUpperCase(),
     finalBias,
     setupType,
@@ -46,7 +59,7 @@ function collectBlockers(input: { confidenceScore: number; setupReadinessScore: 
   const blockers: string[] = [];
   const text = `${input.input.visual?.riskWarning ?? ''} ${input.input.visual?.liquidityObjective ?? ''}`.toLowerCase();
   const thresholds = input.input.refillMode
-    ? getContinuousRefillDecisionThresholds(input.input.accountClass ?? 'demo')
+    ? resolveStyleRefillThresholds(input.input)
     : getDecisionThresholds(input.input.accountClass ?? 'demo');
   const confidenceThreshold = thresholds.confidence;
   const readinessThreshold = thresholds.readiness;

@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { Menu } from 'lucide-react';
 
 import { MovingAverageCrossoverDashboard } from '@/components/strategies/moving-average-crossover-dashboard';
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { toneBody, toneCard, toneCardHeader, toneMuted, toneTitle } from '@/lib/dashboard-card-tones';
@@ -26,9 +26,8 @@ function StrategyPlaceholderPage({ group, strategy }: { group: string; strategy:
   const label = definition?.label ?? strategy.replace(/-/g, ' ');
 
   return (
-    <div className="flex min-h-screen bg-slate-50">
-      <TraderSidebar bridgeOnline mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
-      <div className="flex min-w-0 flex-1 flex-col">
+    <DashboardPageFrame bridgeOnline mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} className="flex min-h-0 min-w-0 flex-1 flex-col bg-slate-50">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="flex h-14 items-center border-b border-slate-200 bg-white px-4 lg:px-6">
           <button type="button" className="rounded-md border border-slate-200 p-2 lg:hidden" onClick={() => setMobileSidebarOpen(true)}>
             <Menu className="h-4 w-4" />
@@ -54,6 +53,6 @@ function StrategyPlaceholderPage({ group, strategy }: { group: string; strategy:
           </Card>
         </main>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }

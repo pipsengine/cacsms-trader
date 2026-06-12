@@ -3,8 +3,8 @@ export async function bootstrapContinuousTradingRuntime(): Promise<void> {
   const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
   if (!(await isContinuousTradingSessionActive())) return;
 
-  const { ensureAutonomyRuntime } = await import('./autonomy-store');
-  await ensureAutonomyRuntime();
+  const { syncContinuousTradingRuntime } = await import('./continuous-trading-session');
+  await syncContinuousTradingRuntime();
 
   try {
     const { advanceAutonomousPipeline } = await import('./autonomous-pipeline-store');

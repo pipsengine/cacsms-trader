@@ -5,6 +5,8 @@ import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
 import { loadPropFirmRiskRulesFromEnv } from '@/lib/execution-risk-gate';
 import { resolvePropFirmSizingEquity } from '@/lib/execution-risk-limits';
 import type { RiskState } from '@/packages/shared-types';
+import { getTradingStyleProfile } from '@/lib/trading-styles/registry';
+import type { TradingStyleId } from '@/lib/trading-styles/types';
 
 function envNumber(name: string, fallback: number): number {
   const raw = String(process.env[name] ?? '').trim();
@@ -61,13 +63,16 @@ function estimateStopPips(
 }
 
 export function resolveAutonomousVolumeLots(input: {
-  decision: Pick<AutonomousDecisionOutput, 'symbol' | 'timeframe' | 'decision' | 'stopLoss'>;
+  decision: Pick<AutonomousDecisionOutput, 'symbol' | 'timeframe' | 'decision' | 'stopLoss' | 'tradingStyle'>;
   account: ExecutionAccountContext;
   entryPrice?: number | null;
+  tradingStyle?: TradingStyleId;
 }): { lots: number; riskAmount: number; stopPips: number; method: 'fixed' | 'equity_risk' } {
   const fallbackLots = envNumber('CACSMS_AUTONOMY_DEFAULT_LOTS', 0.01);
   const rules = loadPropFirmRiskRulesFromEnv();
   const profile = getAutonomyThresholdProfile(input.account.accountClass);
+  const styleId = input.tradingStyle ?? input.decision.tradingStyle;
+  const styleRiskPercent = styleId ? getTradingStyleProfile(styleId).riskPerTradePercent : null;
   const liveEquity = Math.max(input.account.equity, input.account.balance, 0);
 
   if (liveEquity <= 0) {
@@ -101,7 +106,7 @@ export function resolveAutonomousVolumeLots(input: {
   try {
     const sized = calculateLotSize({
       accountEquity: sizingEquity,
-      riskPercent: profile.riskPerTradePercent,
+      riskPercent: styleRiskPercent ?? profile.riskPerTradePercent,
       stopLossPips: stopPips,
       pipValuePerLot: pipValue,
       minLot: envNumber('CACSMS_MIN_LOT_SIZE', 0.01),

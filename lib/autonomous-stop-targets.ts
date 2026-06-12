@@ -5,6 +5,8 @@ import { getSwingDetections } from '@/lib/swing-point-store';
 import { getSupportResistanceAnalysis } from '@/lib/support-resistance-store';
 import { queryPostgres } from '@/lib/postgres';
 import type { ReconstructedCandle } from '@/lib/visual-intelligence-types';
+import { getTradingStyleProfile } from '@/lib/trading-styles/registry';
+import type { TradingStyleId } from '@/lib/trading-styles/types';
 
 export type AutonomousTradeSide = 'BUY' | 'SELL';
 
@@ -47,10 +49,18 @@ export function defaultStopPips(symbol: string, timeframe: string): number {
   const normalized = symbol.toUpperCase();
   const tf = timeframe.toUpperCase();
   if (normalized.includes('XAU')) {
+    if (tf === 'M5') return envNumber('CACSMS_DEFAULT_STOP_PIPS_XAU_M5', 80);
     if (tf === 'M15') return envNumber('CACSMS_DEFAULT_STOP_PIPS_XAU_M15', 120);
     if (tf === 'H1') return envNumber('CACSMS_DEFAULT_STOP_PIPS_XAU_H1', 220);
+    if (tf === 'H4') return envNumber('CACSMS_DEFAULT_STOP_PIPS_XAU_H4', 320);
+    if (tf === 'D' || tf === 'W') return envNumber('CACSMS_DEFAULT_STOP_PIPS_XAU_D', 450);
     return envNumber('CACSMS_DEFAULT_STOP_PIPS_XAU', 180);
   }
+  if (tf === 'M5' || tf === 'M1') return envNumber('CACSMS_DEFAULT_STOP_PIPS_FX_M5', 10);
+  if (tf === 'M15') return envNumber('CACSMS_DEFAULT_STOP_PIPS_FX_M15', 18);
+  if (tf === 'H1') return envNumber('CACSMS_DEFAULT_STOP_PIPS_FX_H1', 28);
+  if (tf === 'H4') return envNumber('CACSMS_DEFAULT_STOP_PIPS_FX_H4', 45);
+  if (tf === 'D' || tf === 'W') return envNumber('CACSMS_DEFAULT_STOP_PIPS_FX_D', 80);
   return envNumber('CACSMS_DEFAULT_STOP_PIPS_FX', 25);
 }
 
@@ -184,7 +194,9 @@ function structureStopLevel(input: {
   atr: number;
   pipSize: number;
   minStopDistance: number;
+  atrMultiplier?: number;
 }): { stopLoss: number; method: AutonomousStopTargetResult['method'] } {
+  const atrMultiplier = input.atrMultiplier ?? envNumber('CACSMS_ATR_STOP_MULTIPLIER', 1.2);
   const buffer = Math.max(input.pipSize * 2, input.atr * 0.15);
   if (input.side === 'BUY') {
     const swingLow = input.swings
@@ -193,7 +205,7 @@ function structureStopLevel(input: {
     const support = input.supports
       .filter((level) => level < input.entryPrice)
       .sort((a, b) => b - a)[0];
-    const anchor = swingLow ?? support ?? (input.entryPrice - Math.max(input.minStopDistance, input.atr * envNumber('CACSMS_ATR_STOP_MULTIPLIER', 1.2)));
+    const anchor = swingLow ?? support ?? (input.entryPrice - Math.max(input.minStopDistance, input.atr * atrMultiplier));
     const stopLoss = anchor - buffer;
     return {
       stopLoss,
@@ -207,7 +219,7 @@ function structureStopLevel(input: {
   const resistance = input.resistances
     .filter((level) => level > input.entryPrice)
     .sort((a, b) => a - b)[0];
-  const anchor = swingHigh ?? resistance ?? (input.entryPrice + Math.max(input.minStopDistance, input.atr * envNumber('CACSMS_ATR_STOP_MULTIPLIER', 1.2)));
+  const anchor = swingHigh ?? resistance ?? (input.entryPrice + Math.max(input.minStopDistance, input.atr * atrMultiplier));
   const stopLoss = anchor + buffer;
   return {
     stopLoss,
@@ -251,10 +263,14 @@ export async function resolveAutonomousStopTargets(input: {
   timeframe: string;
   side: AutonomousTradeSide;
   entryPrice?: number | null;
+  tradingStyle?: TradingStyleId;
 }): Promise<AutonomousStopTargetResult | null> {
   const symbol = input.symbol.toUpperCase();
   const timeframe = input.timeframe.toUpperCase();
   const rules = loadPropFirmRiskRulesFromEnv();
+  const styleProfile = input.tradingStyle ? getTradingStyleProfile(input.tradingStyle) : null;
+  const minRewardRiskRatio = styleProfile?.minRewardRisk ?? rules.minRewardRiskRatio;
+  const atrMultiplier = styleProfile?.stopAtrMultiplier ?? envNumber('CACSMS_ATR_STOP_MULTIPLIER', 1.2);
   const pipSize = pipSizeForSymbol(symbol);
   const minStopDistance = defaultStopPips(symbol, timeframe) * pipSize;
 
@@ -297,6 +313,7 @@ export async function resolveAutonomousStopTargets(input: {
     atr,
     pipSize,
     minStopDistance,
+    atrMultiplier,
   });
 
   if (!Number.isFinite(stopLoss) || stopLoss <= 0) {
@@ -316,8 +333,8 @@ export async function resolveAutonomousStopTargets(input: {
   }
 
   const takeProfit = input.side === 'BUY'
-    ? resolvedEntry + stopDistance * rules.minRewardRiskRatio
-    : resolvedEntry - stopDistance * rules.minRewardRiskRatio;
+    ? resolvedEntry + stopDistance * minRewardRiskRatio
+    : resolvedEntry - stopDistance * minRewardRiskRatio;
 
   const roundedEntry = roundPrice(symbol, resolvedEntry);
   let roundedStop = roundPrice(symbol, stopLoss);
@@ -328,7 +345,7 @@ export async function resolveAutonomousStopTargets(input: {
     entryPrice: roundedEntry,
     stopLoss: roundedStop,
     takeProfit: roundedTp,
-    minRewardRiskRatio: rules.minRewardRiskRatio,
+    minRewardRiskRatio,
     minStopDistance,
   });
 
@@ -341,8 +358,8 @@ export async function resolveAutonomousStopTargets(input: {
     roundedTp = roundPrice(
       symbol,
       input.side === 'BUY'
-        ? roundedEntry + widenedDistance * rules.minRewardRiskRatio
-        : roundedEntry - widenedDistance * rules.minRewardRiskRatio,
+        ? roundedEntry + widenedDistance * minRewardRiskRatio
+        : roundedEntry - widenedDistance * minRewardRiskRatio,
     );
     validationError = validateStopTargets({
       symbol,
@@ -350,7 +367,7 @@ export async function resolveAutonomousStopTargets(input: {
       entryPrice: roundedEntry,
       stopLoss: roundedStop,
       takeProfit: roundedTp,
-      minRewardRiskRatio: rules.minRewardRiskRatio,
+      minRewardRiskRatio,
       minStopDistance,
     });
     return buildGuaranteedPipStopTargets({
@@ -358,7 +375,7 @@ export async function resolveAutonomousStopTargets(input: {
       side: input.side,
       entryPrice: roundedEntry,
       timeframe,
-      rewardRiskRatio: rules.minRewardRiskRatio,
+      rewardRiskRatio: minRewardRiskRatio,
     });
   }
 
@@ -366,7 +383,7 @@ export async function resolveAutonomousStopTargets(input: {
 
   const stopPips = stopPipsFromDistance(symbol, roundedEntry, roundedStop);
   const rewardDistance = Math.abs(roundedTp - roundedEntry);
-  const rewardRiskRatio = stopDistance > 0 ? Number((rewardDistance / stopDistance).toFixed(4)) : rules.minRewardRiskRatio;
+  const rewardRiskRatio = stopDistance > 0 ? Number((rewardDistance / stopDistance).toFixed(4)) : minRewardRiskRatio;
 
   return {
     entryPrice: roundedEntry,

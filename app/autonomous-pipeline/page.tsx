@@ -15,7 +15,7 @@ import {
 import { AutonomousPipelineStageCard } from '@/components/autonomous-pipeline-stage-card';
 import { PairSelectionLivePanel } from '@/components/pair-selection-live-panel';
 import { ExecutionRiskSettingsPanel } from '@/components/execution-risk-settings-panel';
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
@@ -214,14 +214,12 @@ export default function AutonomousPipelinePage() {
   const overallMeta = PIPELINE_STAGE_STATUS_META[status?.overallStatus ?? 'not_started'];
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white">
-      <TraderSidebar
-        bridgeOnline={Boolean(status?.bridgeOnline)}
-        mobileOpen={mobileSidebarOpen}
-        onMobileOpenChange={setMobileSidebarOpen}
-      />
-
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+    <DashboardPageFrame
+      bridgeOnline={Boolean(status?.bridgeOnline)}
+      mobileOpen={mobileSidebarOpen}
+      onMobileOpenChange={setMobileSidebarOpen}
+      className="flex min-w-0 flex-1 flex-col overflow-hidden"
+    >
         <header className="z-20 shrink-0 border-b border-slate-200 bg-white/90 backdrop-blur">
           <div className="flex items-center justify-between gap-4 px-4 py-4 lg:px-8">
             <div className="flex items-center gap-3">
@@ -523,7 +521,6 @@ export default function AutonomousPipelinePage() {
             </CardContent>
           </Card>
         </main>
-      </div>
-    </div>
+    </DashboardPageFrame>
   );
 }

@@ -111,6 +111,20 @@ export async function getOrderBlockAnalysis(captureId: string): Promise<OrderBlo
   return { captureId, orderBlocks, mitigationEvents, summary: summarize(orderBlocks) };
 }
 
+export async function getOrderBlockCoverageMap(): Promise<Record<string, number>> {
+  await ensureOrderBlockSchema();
+  const result = await queryPostgres(`
+    SELECT chart_capture_id, COUNT(*)::int AS block_count
+    FROM order_block_detections
+    GROUP BY chart_capture_id
+  `);
+  const coverage: Record<string, number> = {};
+  for (const row of result.rows) {
+    coverage[String(row.chart_capture_id)] = Number(row.block_count);
+  }
+  return coverage;
+}
+
 export async function getOrderBlocks(captureId: string): Promise<OrderBlockDetection[]> {
   await ensureOrderBlockSchema();
   const result = await queryPostgres(`

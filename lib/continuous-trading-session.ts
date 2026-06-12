@@ -54,6 +54,28 @@ export async function isContinuousTradingSessionActive(): Promise<boolean> {
   return (await getContinuousTradingSessionStatus()).active;
 }
 
+/** Keep autonomy runtime and execution gate aligned with a persisted active session. */
+export async function syncContinuousTradingRuntime(): Promise<void> {
+  if (!(await isContinuousTradingSessionActive())) return;
+
+  const health = await queryPostgres(
+    `SELECT emergency_stopped FROM autonomous_system_health WHERE health_key = 'autonomy' LIMIT 1`,
+  ).catch(() => ({ rows: [] as Array<{ emergency_stopped?: boolean }> }));
+  const emergencyStopped = Boolean(health.rows[0]?.emergency_stopped);
+
+  const { ensureAutonomyRuntime, resumeAutonomy } = await import('./autonomy-store');
+  if (emergencyStopped) {
+    await resumeAutonomy();
+    await deactivateExecutionKillSwitch({
+      reason: 'Continuous trading session is active — runtime realigned.',
+      operator: 'system',
+    }).catch(() => null);
+    return;
+  }
+
+  await ensureAutonomyRuntime();
+}
+
 export async function startContinuousTradingSession(input?: {
   operator?: string;
 }): Promise<ContinuousTradingSessionStatus> {

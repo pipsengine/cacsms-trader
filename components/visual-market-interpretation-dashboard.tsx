@@ -21,7 +21,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 
-import { TraderSidebar } from '@/components/trader-sidebar';
+import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Progress } from '@/components/ui/progress';
@@ -229,10 +229,8 @@ export function VisualMarketInterpretationDashboard() {
   const fusionReadyCount = readiness?.timeframes.filter((item) => item.readyForFusion).length ?? 0;
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white">
-      <TraderSidebar bridgeOnline={bridgeOnline} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} />
-
-      <div className="relative z-0 flex min-w-0 flex-1 flex-col overflow-hidden">
+    <DashboardPageFrame bridgeOnline={bridgeOnline} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen}>
+      <div className="relative z-0 flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         <header className="sticky top-0 z-20 shrink-0 border-b border-slate-200 bg-white px-4 py-4 md:px-6">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
             <div className="flex min-w-0 items-center gap-3">
@@ -426,7 +424,7 @@ export function VisualMarketInterpretationDashboard() {
           </div>
         </main>
       </div>
-    </div>
+    </DashboardPageFrame>
   );
 }
 

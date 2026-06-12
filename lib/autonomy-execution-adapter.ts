@@ -279,6 +279,7 @@ export async function resolveExecutableAutonomyDecision(
     symbol: decision.symbol,
     timeframe: decision.timeframe,
     side,
+    tradingStyle: decision.tradingStyle,
   });
   if (!stopTargets) {
     const storedStop = Number(decision.stopLoss ?? 0);
@@ -333,6 +334,7 @@ export async function dispatchAutonomyDecision(input: {
       symbol: input.decision.symbol,
       timeframe: input.decision.timeframe,
       side: input.decision.decision as AutonomousTradeSide,
+      tradingStyle: input.decision.tradingStyle,
     });
     if (stopTargets) {
       executableDecision = {
@@ -399,7 +401,12 @@ export async function dispatchAutonomyDecision(input: {
 
   const sized = input.volumeLots != null
     ? { lots: Number(input.volumeLots), riskAmount: 0, stopPips: stopTargets.stopPips, method: 'fixed' as const }
-    : resolveAutonomousVolumeLots({ decision: executableDecision, account, entryPrice: stopTargets.entryPrice });
+    : resolveAutonomousVolumeLots({
+      decision: executableDecision,
+      account,
+      entryPrice: stopTargets.entryPrice,
+      tradingStyle: executableDecision.tradingStyle,
+    });
   const volumeLots = sized.lots;
   const stopLoss = stopTargets.stopLoss;
   const takeProfit = stopTargets.takeProfit;
@@ -438,6 +445,7 @@ export async function dispatchAutonomyDecision(input: {
         riskAmount: sized.riskAmount,
         stopPips: sized.stopPips,
         timeframe: executableDecision.timeframe,
+        tradingStyle: executableDecision.tradingStyle ?? null,
         confidenceScore: executableDecision.confidenceScore,
         setupReadinessScore: executableDecision.setupReadinessScore,
       },
