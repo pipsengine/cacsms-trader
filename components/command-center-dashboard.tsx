@@ -230,6 +230,13 @@ const QUICK_LINKS = [
 
 const TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
 
+type MarketSessionStatus = {
+  open: boolean;
+  label: string;
+  detail: string;
+  tone: DashboardTone;
+};
+
 function createBootstrapOverviewFromTick(tick: DashboardTick): OverviewPayload {
   return {
     generatedAt: tick.tickAt,
@@ -338,6 +345,7 @@ export function CommandCenterDashboard() {
     : (overview?.continuousTrading.active ?? false);
   const sessionBusy = tradingSession.busy;
   const sessionMessage = tradingSession.message;
+  const marketStatus = useMemo(() => getMarketSessionStatus(clockNow), [clockNow]);
 
   const applyTick = useCallback((tick: DashboardTick) => {
     setTickSequence(tick.sequence);
@@ -593,6 +601,17 @@ export function CommandCenterDashboard() {
               >
                 <Radio className={cn('h-3 w-3', streamConnected && 'animate-pulse')} />
                 {streamConnected ? 'SSE live' : 'Tick poll'}
+              </span>
+              <span
+                className={cn(
+                  'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold',
+                  toneBadge(marketStatus.tone),
+                )}
+                title={marketStatus.detail}
+              >
+                <Clock className={cn('h-3 w-3', marketStatus.open && 'animate-pulse')} />
+                {marketStatus.label}
+                <span className="hidden font-medium opacity-80 2xl:inline">{marketStatus.detail}</span>
               </span>
               <Button variant="outline" size="sm" onClick={() => void loadOverview(false)} disabled={loading}>
                 <RefreshCw className={cn('mr-2 h-4 w-4', (loading || refreshing) && 'animate-spin')} />
@@ -1260,6 +1279,64 @@ function formatWatClock(value: Date): string {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
+    hour12: false,
+  });
+}
+
+function getMarketSessionStatus(now: Date): MarketSessionStatus {
+  const ny = getTimeParts(now, 'America/New_York');
+  const minutes = ny.hour * 60 + ny.minute;
+  const boundaryMinutes = 17 * 60;
+  const open =
+    (ny.weekday > 0 && ny.weekday < 5) ||
+    (ny.weekday === 0 && minutes >= boundaryMinutes) ||
+    (ny.weekday === 5 && minutes < boundaryMinutes);
+  const boundary = nextMarketBoundary(now, open, ny.weekday, minutes, boundaryMinutes);
+
+  return {
+    open,
+    label: open ? 'Market open' : 'Market closed',
+    detail: `${open ? 'closes' : 'opens'} ${formatWatDateTime(boundary)}`,
+    tone: open ? 'emerald' : 'rose',
+  };
+}
+
+function nextMarketBoundary(now: Date, open: boolean, nyWeekday: number, nyMinutes: number, boundaryMinutes: number): Date {
+  const nyMidnightUtc = new Date(now.getTime() - nyMinutes * 60_000);
+  let daysUntilBoundary = 0;
+  if (open) {
+    daysUntilBoundary = nyWeekday <= 5 ? 5 - nyWeekday : 6;
+  } else if (nyWeekday === 0 && nyMinutes < boundaryMinutes) {
+    daysUntilBoundary = 0;
+  } else {
+    daysUntilBoundary = (7 - nyWeekday) % 7;
+  }
+  return new Date(nyMidnightUtc.getTime() + daysUntilBoundary * 86_400_000 + boundaryMinutes * 60_000);
+}
+
+function getTimeParts(value: Date, timeZone: string): { weekday: number; hour: number; minute: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(value);
+  const weekdayText = parts.find((part) => part.type === 'weekday')?.value ?? 'Sun';
+  const weekday = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(weekdayText);
+  return {
+    weekday: weekday >= 0 ? weekday : 0,
+    hour: Number(parts.find((part) => part.type === 'hour')?.value ?? 0),
+    minute: Number(parts.find((part) => part.type === 'minute')?.value ?? 0),
+  };
+}
+
+function formatWatDateTime(value: Date): string {
+  return value.toLocaleString('en-GB', {
+    timeZone: 'Africa/Lagos',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
     hour12: false,
   });
 }
