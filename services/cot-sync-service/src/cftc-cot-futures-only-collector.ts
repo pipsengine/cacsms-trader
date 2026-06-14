@@ -802,7 +802,8 @@ export class CotWeeklySchedulerService {
           SELECT 1
           FROM cot_source_logs
           WHERE job_type = $1
-            AND status = 'success'
+            AND status IN ('success', 'warning', 'error', 'info')
+            AND message NOT LIKE 'Scheduler firing%'
             AND DATE(fetched_at AT TIME ZONE 'Africa/Lagos') = $2::date
           LIMIT 1
         `,

@@ -85,14 +85,47 @@ export async function GET() {
       `,
     ).then((r) => Number((r.rows[0] as any)?.total ?? 0));
 
-    const lastSyncLog = await queryPostgres(
-      `
-        SELECT id, job_type, status, message, fetched_at
-        FROM cot_source_logs
-        ORDER BY fetched_at DESC, id DESC
-        LIMIT 1
-      `,
-    ).then((r) => (r.rows[0] as any) ?? null).catch(() => null);
+    const [lastSuccessLog, lastAttemptLog] = await Promise.all([
+      queryPostgres(
+        `
+          SELECT id, job_type, status, message, fetched_at
+          FROM cot_source_logs
+          WHERE status IN ('success', 'warning')
+            AND job_type NOT LIKE '%_upsert_row'
+          ORDER BY fetched_at DESC, id DESC
+          LIMIT 1
+        `,
+      ).then((r) => (r.rows[0] as any) ?? null).catch(() => null),
+      queryPostgres(
+        `
+          SELECT id, job_type, status, message, fetched_at
+          FROM cot_source_logs
+          WHERE job_type = 'cot_weekly_scheduler'
+            AND status IN ('success', 'warning', 'error')
+            AND message NOT LIKE 'Scheduler firing%'
+          ORDER BY fetched_at DESC, id DESC
+          LIMIT 1
+        `,
+      ).then((r) => (r.rows[0] as any) ?? null).catch(() => null),
+    ]);
+
+    const reportAgeDays = latestDate
+      ? Math.floor((Date.now() - Date.parse(`${latestDate}T00:00:00Z`)) / (24 * 60 * 60 * 1000))
+      : null;
+    const cotStale = reportAgeDays == null || reportAgeDays >= 8;
+    const displayLog = lastSuccessLog ?? lastAttemptLog;
+    const lastSyncStatus = displayLog
+      ? `${String(displayLog.status ?? '').toUpperCase()} - ${String(displayLog.job_type ?? '')}`
+      : totalRecordsSynced > 0
+        ? 'SUCCESS - cot_data'
+        : 'UNKNOWN';
+    const lastSyncAt = displayLog?.fetched_at ? new Date(displayLog.fetched_at).toISOString() : null;
+    const lastAttemptStatus = lastAttemptLog && lastAttemptLog.id !== lastSuccessLog?.id
+      ? `${String(lastAttemptLog.status ?? '').toUpperCase()} - ${String(lastAttemptLog.job_type ?? '')}`
+      : null;
+    const lastAttemptAt = lastAttemptLog && lastAttemptLog.id !== lastSuccessLog?.id && lastAttemptLog.fetched_at
+      ? new Date(lastAttemptLog.fetched_at).toISOString()
+      : null;
 
     return NextResponse.json(
       {
@@ -106,8 +139,15 @@ export async function GET() {
           largestShortIncrease,
           biggestNetPositionChange,
           totalRecordsSynced,
-          lastSyncStatus: lastSyncLog ? `${String(lastSyncLog.status ?? '').toUpperCase()} - ${String(lastSyncLog.job_type ?? '')}` : 'UNKNOWN',
-          lastSyncAt: lastSyncLog?.fetched_at ? new Date(lastSyncLog.fetched_at).toISOString() : null,
+          reportAgeDays,
+          cotStale,
+          lastSyncStatus,
+          lastSyncAt,
+          lastAttemptStatus,
+          lastAttemptAt,
+          lastAttemptMessage: lastAttemptLog && lastAttemptLog.id !== lastSuccessLog?.id
+            ? String(lastAttemptLog.message ?? '')
+            : null,
         },
       },
       { headers: { 'Cache-Control': 'no-store' } },

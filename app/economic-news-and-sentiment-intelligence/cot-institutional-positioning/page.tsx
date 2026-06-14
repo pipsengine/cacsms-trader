@@ -59,8 +59,13 @@ type SummaryPayload = {
     largestShortIncrease: { currency: string; value: number } | null;
     biggestNetPositionChange: { currency: string; value: number } | null;
     totalRecordsSynced: number;
+    reportAgeDays?: number | null;
+    cotStale?: boolean;
     lastSyncStatus: string;
     lastSyncAt: string | null;
+    lastAttemptStatus?: string | null;
+    lastAttemptAt?: string | null;
+    lastAttemptMessage?: string | null;
   };
 };
 
@@ -426,13 +431,14 @@ export default function CotInstitutionalPositioningPage() {
 
   const lastSyncTone: Tone = useMemo(() => {
     const status = String(summary?.summary.lastSyncStatus ?? '').toUpperCase();
+    if (summary?.summary.cotStale) return 'amber';
     if (!status) return 'slate';
     if (status.includes('SUCCESS')) return 'emerald';
-    if (status.includes('ERROR') || status.includes('FAILED')) return 'rose';
     if (status.includes('WARNING') || status.includes('PARTIAL')) return 'amber';
+    if (status.includes('ERROR') || status.includes('FAILED')) return 'rose';
     if (status.includes('MISSING')) return 'amber';
     return 'slate';
-  }, [summary?.summary.lastSyncStatus]);
+  }, [summary?.summary.lastSyncStatus, summary?.summary.cotStale]);
 
   const summaryCards = [
     { icon: CalendarClock, label: 'Latest COT Report Date', value: summary?.summary.latestCotReportDate ? String(summary.summary.latestCotReportDate).slice(0, 10) : '—', tone: 'violet' as Tone },
@@ -495,6 +501,17 @@ export default function CotInstitutionalPositioningPage() {
               </div>
             ) : null}
 
+            {summary?.summary.cotStale ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+                COT report data is {summary.summary.reportAgeDays ?? '?' } days old (latest: {summary.summary.latestCotReportDate ? String(summary.summary.latestCotReportDate).slice(0, 10) : 'unknown'}).
+                The app container cannot reach CFTC directly — run{' '}
+                <code className="rounded bg-white px-1 py-0.5 font-mono text-xs">npm run cot:sync:latest</code> on the host, then refresh.
+                {summary.summary.lastAttemptMessage ? (
+                  <span className="mt-1 block text-xs text-amber-800">Last in-container attempt: {summary.summary.lastAttemptMessage}</span>
+                ) : null}
+              </div>
+            ) : null}
+
             <section className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-4">
               {summaryCards.map((card) => (
                 <Card key={card.label} className={cn('border shadow-sm shadow-slate-900/5', cardAccentClass(card.tone))}>
@@ -510,6 +527,12 @@ export default function CotInstitutionalPositioningPage() {
                     </div>
                     {card.label === 'Last Sync Status' && summary?.summary.lastSyncAt ? (
                       <div className="mt-0.5 text-[10px] font-mono text-slate-500">at {new Date(summary.summary.lastSyncAt).toLocaleString()}</div>
+                    ) : null}
+                    {card.label === 'Last Sync Status' && summary?.summary.lastAttemptStatus && summary.summary.lastAttemptStatus !== summary.summary.lastSyncStatus ? (
+                      <div className="mt-0.5 text-[10px] font-mono text-rose-600">
+                        latest attempt: {summary.summary.lastAttemptStatus}
+                        {summary.summary.lastAttemptAt ? ` · ${new Date(summary.summary.lastAttemptAt).toLocaleString()}` : ''}
+                      </div>
                     ) : null}
                   </CardContent>
                 </Card>
