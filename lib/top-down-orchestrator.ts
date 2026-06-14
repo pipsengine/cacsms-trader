@@ -64,6 +64,7 @@ export async function startTopDownSession(input: {
       'mtf-fusion',
       'cacsms-vision',
       'macro-intelligence',
+      'strategy-book-scan',
       'signal-generation',
       'risk-gate',
       'execution',

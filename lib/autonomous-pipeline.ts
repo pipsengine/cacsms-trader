@@ -7,6 +7,7 @@ import {
   Crosshair,
   Globe2,
   Layers3,
+  Library,
   MonitorCheck,
   Network,
   Radar,
@@ -26,6 +27,7 @@ export type PipelineStageId =
   | 'mtf-fusion'
   | 'cacsms-vision'
   | 'macro-intelligence'
+  | 'strategy-book-scan'
   | 'signal-generation'
   | 'risk-gate'
   | 'execution'
@@ -178,18 +180,28 @@ export const PIPELINE_STAGES: PipelineStageDefinition[] = [
     ],
   },
   {
-    id: 'signal-generation',
+    id: 'strategy-book-scan',
     order: 9,
+    label: 'Strategy Book Scan',
+    shortLabel: 'Strategies',
+    description: 'All active institutional strategy engines evaluated for the symbol; best-fit engine selected by score and historical win rate.',
+    icon: Library,
+    primaryHref: '/institutional-strategy-intelligence',
+    primaryLabel: 'Institutional strategy intelligence',
+  },
+  {
+    id: 'signal-generation',
+    order: 10,
     label: 'Signal Generation',
     shortLabel: 'Signals',
-    description: 'Autonomous BUY/SELL/MONITOR decisions from fused visual and macro evidence.',
+    description: 'Autonomous BUY/SELL/MONITOR decisions from fused visual, macro, and strategy book evidence.',
     icon: Target,
     primaryHref: '/cacsms-vision',
     primaryLabel: 'Trade opportunity radar',
   },
   {
     id: 'risk-gate',
-    order: 10,
+    order: 11,
     label: 'Risk Gate',
     shortLabel: 'Risk',
     description: 'Prop-firm guardrails, kill switch, drawdown limits, and news blackout enforcement.',
@@ -202,7 +214,7 @@ export const PIPELINE_STAGES: PipelineStageDefinition[] = [
   },
   {
     id: 'execution',
-    order: 11,
+    order: 12,
     label: 'Execution',
     shortLabel: 'Execution',
     description: 'Approved intents converted to MT5 commands with acknowledgment and audit trail.',
@@ -215,7 +227,7 @@ export const PIPELINE_STAGES: PipelineStageDefinition[] = [
   },
   {
     id: 'trade-monitoring',
-    order: 12,
+    order: 13,
     label: 'Trade Monitoring',
     shortLabel: 'Monitoring',
     description: 'Live position lifecycle: break-even, trail, partial close, and emergency exit.',
@@ -225,7 +237,7 @@ export const PIPELINE_STAGES: PipelineStageDefinition[] = [
   },
   {
     id: 'unattended-operations',
-    order: 13,
+    order: 14,
     label: 'Unattended Operations',
     shortLabel: 'Operations',
     description: '24/7 scheduler, failure recovery, watchdog, and autonomous session continuity.',

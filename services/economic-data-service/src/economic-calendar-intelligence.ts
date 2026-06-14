@@ -177,12 +177,13 @@ export class EconomicCalendarIntelligenceService {
     const generatedAt = new Date().toISOString();
 
     try {
-      const [events, sources, conflicts, sourceLogs, activeRestrictionCount] = await Promise.all([
+      const [events, sources, conflicts, sourceLogs, activeRestrictionCount, freshness] = await Promise.all([
         this.listEvents(),
         this.listSources(),
         this.listConflicts(),
         this.listSourceLogs(),
         this.countActiveRestrictions(),
+        this.getCalendarFreshness().catch(() => ({ stale: true, latestEventDate: null, lastSyncAt: null, upcomingFromToday: 0 })),
       ]);
 
       const currencyBias = this.computeCurrencyBias(events);
@@ -206,6 +207,9 @@ export class EconomicCalendarIntelligenceService {
           sourceCollectionHealth,
           strongestBullishCurrencyToday,
           strongestBearishCurrencyToday,
+          calendarStale: freshness.stale,
+          latestEventDate: freshness.latestEventDate,
+          lastSyncAt: freshness.lastSyncAt,
         },
         currencyBias,
         conflicts,
@@ -455,37 +459,60 @@ export class EconomicCalendarIntelligenceService {
   }
 
   async isCalendarStale(): Promise<boolean> {
+    const freshness = await this.getCalendarFreshness();
+    return freshness.stale;
+  }
+
+  async getCalendarFreshness(): Promise<{ stale: boolean; latestEventDate: string | null; lastSyncAt: string | null; upcomingFromToday: number }> {
     try {
       const today = new Date().toISOString().slice(0, 10);
-      const result = await queryPostgres(
-        `
-          SELECT
-            MAX(event_date)::text AS max_date,
-            COUNT(*) FILTER (WHERE event_date >= $1::date)::int AS from_today
-          FROM economic_events
-          WHERE currency = ANY($2::text[])
-            AND source_name <> 'ForexFactory'
-        `,
-        [today, [...REQUIRED_CURRENCIES]],
-      );
-      const maxDate = String(result.rows[0]?.max_date ?? '').trim();
-      const fromToday = Number(result.rows[0]?.from_today ?? 0);
-      if (!maxDate || maxDate < today || fromToday === 0) return true;
-      return false;
+      const nextWeekEnd = shiftWeekRange(weekRangeForIsoDate(today), 1).toDate;
+      const [stats, lastSync] = await Promise.all([
+        queryPostgres(
+          `
+            SELECT
+              MAX(event_date)::text AS latest_event_date,
+              COUNT(*) FILTER (WHERE event_date >= $2::date AND event_date <= $3::date)::int AS upcoming_in_window
+            FROM economic_events
+            WHERE currency = ANY($1::text[])
+              AND source_name <> 'ForexFactory'
+          `,
+          [[...REQUIRED_CURRENCIES], today, nextWeekEnd],
+        ),
+        queryPostgres(
+          `
+            SELECT fetched_at::text AS fetched_at
+            FROM source_fetch_logs
+            WHERE job_type IN ('weekly_calendar_discovery', 'daily_calendar_refresh', 'forex_factory_hybrid_sync')
+              AND status = 'SUCCESS'
+            ORDER BY fetched_at DESC
+            LIMIT 1
+          `,
+        ),
+      ]);
+
+      const latestEventDate = nullableString((stats.rows[0] as { latest_event_date?: unknown })?.latest_event_date);
+      const upcomingFromToday = Number((stats.rows[0] as { upcoming_in_window?: unknown })?.upcoming_in_window ?? 0);
+      const lastSyncAt = nullableString((lastSync.rows[0] as { fetched_at?: unknown })?.fetched_at);
+      const stale = upcomingFromToday <= 0 || !latestEventDate || latestEventDate < today;
+      return { stale, latestEventDate, lastSyncAt, upcomingFromToday };
     } catch {
-      return true;
+      return { stale: true, latestEventDate: null, lastSyncAt: null, upcomingFromToday: 0 };
     }
   }
 
-  private async collectForexFactoryThisWeek(jobType: string): Promise<{ stored: number; lifecycle: LifecycleReconciliation }> {
+  private async collectForexFactoryThisWeek(jobType: string): Promise<{ stored: number; lifecycle: LifecycleReconciliation; rangesSynced: number; error?: string }> {
     let stored = 0;
     let lifecycle: LifecycleReconciliation = { preMonitoring: 0, watching: 0, failed: 0, watcherJobsQueued: 0 };
-    for (const range of calendarSyncRangesForToday()) {
+    let lastError: string | undefined;
+    const ranges = calendarSyncRangesForToday();
+    for (const range of ranges) {
       const result = await this.runInvestingCalendarSync({ jobType, range });
       stored += result.stored;
       lifecycle = result.lifecycle;
+      if (result.error) lastError = result.error;
     }
-    return { stored, lifecycle };
+    return { stored, lifecycle, rangesSynced: ranges.length, error: stored > 0 ? undefined : lastError };
   }
 
   private async runForexFactoryHybridSync(props: { jobType: string; mode: 'json' | 'xml' | 'browser' | 'hybrid' }) {
@@ -503,7 +530,7 @@ export class EconomicCalendarIntelligenceService {
     return { stored, lifecycle, investingCount, capturedActuals };
   }
 
-  private async runInvestingCalendarSync(props: { jobType: string; range: { fromDate: string; toDate: string } }): Promise<{ stored: number; lifecycle: LifecycleReconciliation; investingCount: number; capturedActuals: number }> {
+  private async runInvestingCalendarSync(props: { jobType: string; range: { fromDate: string; toDate: string } }): Promise<{ stored: number; lifecycle: LifecycleReconciliation; investingCount: number; capturedActuals: number; error?: string }> {
     const sourceName = 'Investing.com';
     const startedAt = Date.now();
 
@@ -531,6 +558,11 @@ export class EconomicCalendarIntelligenceService {
 
     try {
       const investingCalendar = await scrapeInvestingEconomicCalendarRange(props.range);
+      if (!investingCalendar.length) {
+        const message = 'investing_calendar_empty';
+        await this.logSourceFetch(sourceName, props.jobType, 'FAILED', `${message} range=${props.range.fromDate}..${props.range.toDate}`, Date.now() - startedAt);
+        return { stored: 0, lifecycle: await this.reconcileReleaseLifecycle(), investingCount: 0, capturedActuals: 0, error: message };
+      }
 
       let stored = 0;
       let capturedActuals = 0;
@@ -637,7 +669,7 @@ export class EconomicCalendarIntelligenceService {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'investing_calendar_sync_failed';
       await this.logSourceFetch(sourceName, props.jobType, 'FAILED', message, Date.now() - startedAt);
-      return { stored: 0, lifecycle: await this.reconcileReleaseLifecycle(), investingCount: 0, capturedActuals: 0 };
+      return { stored: 0, lifecycle: await this.reconcileReleaseLifecycle(), investingCount: 0, capturedActuals: 0, error: message };
     }
   }
 
@@ -2465,6 +2497,23 @@ function weekRangeForIsoDate(dateIso: string): { fromDate: string; toDate: strin
   return { fromDate: monday.toISOString().slice(0, 10), toDate: sunday.toISOString().slice(0, 10) };
 }
 
+function shiftWeekRange(range: { fromDate: string; toDate: string }, weeks: number): { fromDate: string; toDate: string } {
+  const from = new Date(`${range.fromDate}T00:00:00Z`);
+  const to = new Date(`${range.toDate}T00:00:00Z`);
+  const shiftMs = weeks * 7 * 24 * 60 * 60_000;
+  return {
+    fromDate: new Date(from.getTime() + shiftMs).toISOString().slice(0, 10),
+    toDate: new Date(to.getTime() + shiftMs).toISOString().slice(0, 10),
+  };
+}
+
+function calendarSyncRangesForToday(): Array<{ fromDate: string; toDate: string }> {
+  const today = new Date().toISOString().slice(0, 10);
+  const thisWeek = weekRangeForIsoDate(today);
+  const nextWeek = shiftWeekRange(thisWeek, 1);
+  return [thisWeek, nextWeek];
+}
+
 function normalizeLooseTitle(value: string): string {
   return String(value ?? '')
     .toLowerCase()
@@ -2942,6 +2991,7 @@ type EconomicCalendarWorkerState = {
   timer: ReturnType<typeof setInterval>;
   running: boolean;
   lastTickAt: number;
+  lastCalendarSyncAt: number;
 };
 
 export function ensureEconomicCalendarWorkerStarted() {
@@ -2956,7 +3006,15 @@ export function ensureEconomicCalendarWorkerStarted() {
       state.running = true;
       state.lastTickAt = Date.now();
       try {
-        await new EconomicCalendarIntelligenceService().processDueMonitoringJobs({ maxJobs: 5 });
+        const service = new EconomicCalendarIntelligenceService();
+        await service.processDueMonitoringJobs({ maxJobs: 5 });
+        if (Date.now() - state.lastCalendarSyncAt >= 60 * 60_000) {
+          const stale = await service.isCalendarStale();
+          if (stale) {
+            await service.recordAction('refresh');
+            state.lastCalendarSyncAt = Date.now();
+          }
+        }
       } catch (error) {
         console.error('economic_calendar_worker_tick_failed', error);
       } finally {
@@ -2965,6 +3023,7 @@ export function ensureEconomicCalendarWorkerStarted() {
     }, 15_000),
     running: false,
     lastTickAt: 0,
+    lastCalendarSyncAt: 0,
   };
 
   globalAny.__cacsmsEconomicCalendarWorker = state;

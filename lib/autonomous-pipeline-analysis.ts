@@ -22,6 +22,7 @@ export interface PipelineAnalysisSummary {
   mtfFusion: 'skipped' | 'completed' | 'failed';
   cacsmsVision: 'skipped' | 'completed' | 'failed';
   macroIntelligence: 'skipped' | 'completed' | 'failed' | 'in_progress';
+  strategyBookScan: 'skipped' | 'completed' | 'in_progress' | 'failed';
   signalGeneration: 'skipped' | 'completed' | 'in_progress' | 'failed';
   riskGate: 'skipped' | 'completed' | 'blocked' | 'failed';
   execution: 'skipped' | 'dispatched' | 'blocked' | 'failed' | 'not_actionable';
@@ -77,6 +78,7 @@ export async function advancePipelineAnalysis(symbol: string): Promise<PipelineA
     mtfFusion: 'skipped',
     cacsmsVision: 'skipped',
     macroIntelligence: 'skipped',
+    strategyBookScan: 'skipped',
     signalGeneration: 'skipped',
     riskGate: 'skipped',
     execution: 'skipped',
@@ -178,6 +180,31 @@ export async function advancePipelineAnalysis(symbol: string): Promise<PipelineA
   }
 
   try {
+    const { runSymbolStrategyBookScan } = await import('@/lib/strategies/run-symbol-strategy-book');
+    const book = await runSymbolStrategyBookScan({ symbol: normalized, signalTimeframe: SIGNAL_TIMEFRAME });
+    const bookReady = book.healthyCount >= 5 && Boolean(book.bestStrategy);
+    summary.strategyBookScan = bookReady ? 'completed' : 'in_progress';
+    if (sessionId) {
+      await completePipelineStage(sessionId, 'strategy-book-scan', bookReady ? 100 : 55, {
+        eventType: 'strategy.book.scan.completed',
+        message: book.bestStrategy
+          ? `Best fit: ${book.bestStrategy.label} (${book.bestStrategy.score}/100, ${book.bookDecision}).`
+          : `Scanned ${book.healthyCount}/${book.totalCount} strategy engines.`,
+        payload: {
+          healthyCount: book.healthyCount,
+          totalCount: book.totalCount,
+          bookDecision: book.bookDecision,
+          bestStrategyId: book.bestStrategy?.id ?? null,
+          bestStrategyScore: book.bestStrategy?.score ?? null,
+        },
+      });
+    }
+  } catch (error) {
+    summary.strategyBookScan = 'failed';
+    summary.errors.push(error instanceof Error ? error.message : 'Strategy book scan failed.');
+  }
+
+  try {
     const account = await resolveExecutionAccountContext();
     const accountClass = account?.accountClass ?? 'demo';
     await ensureCaptureAnalysesForSymbol(normalized);
@@ -201,6 +228,8 @@ export async function advancePipelineAnalysis(symbol: string): Promise<PipelineA
             confidenceScore: signal.confidenceScore,
             setupReadinessScore: signal.setupReadinessScore,
             reasonAgainstDecision: signal.reasonAgainstDecision,
+            selectedStrategyId: signal.selectedStrategyId ?? null,
+            strategyBookScore: signal.strategyBookScore ?? null,
           },
         });
       }

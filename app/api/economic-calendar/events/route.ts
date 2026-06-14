@@ -7,12 +7,12 @@ export const dynamic = 'force-dynamic';
 
 
 
-function shouldAutoDiscover(): boolean {
-  const globalAny = globalThis as unknown as { __cacsmsEconomicCalendarAutoDiscoverAt?: number };
+function shouldAutoSyncCalendar(): boolean {
+  const globalAny = globalThis as unknown as { __cacsmsEconomicCalendarAutoSyncAt?: number };
   const now = Date.now();
-  const last = globalAny.__cacsmsEconomicCalendarAutoDiscoverAt ?? 0;
+  const last = globalAny.__cacsmsEconomicCalendarAutoSyncAt ?? 0;
   if (now - last < 5 * 60_000) return false;
-  globalAny.__cacsmsEconomicCalendarAutoDiscoverAt = now;
+  globalAny.__cacsmsEconomicCalendarAutoSyncAt = now;
   return true;
 }
 
@@ -22,9 +22,13 @@ export async function GET(request: Request) {
     ensureEconomicCalendarWorkerStarted();
     const service = new EconomicCalendarIntelligenceService();
     let dashboard = await service.getDashboard();
-    if (dashboard.ok && dashboard.events.length === 0 && shouldAutoDiscover()) {
-      await service.recordAction('discover');
-      dashboard = await service.getDashboard();
+    if (dashboard.ok && shouldAutoSyncCalendar()) {
+      const needsDiscover = dashboard.events.length === 0;
+      const needsRefresh = !needsDiscover && (dashboard.summary.calendarStale ?? false);
+      if (needsDiscover || needsRefresh) {
+        await service.recordAction(needsDiscover ? 'discover' : 'refresh');
+        dashboard = await service.getDashboard();
+      }
     }
     return NextResponse.json(dashboard, { headers: { 'Cache-Control': 'no-store' } });
   } catch (error) {

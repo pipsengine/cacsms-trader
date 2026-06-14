@@ -591,6 +591,8 @@ export async function generateAutonomousSignal(
   }
   const macro = await loadMacroContext(symbol);
   const execution = await loadExecutionContext(symbol, timeframe);
+  const { runSymbolStrategyBookScan } = await import('@/lib/strategies/run-symbol-strategy-book');
+  const strategyBook = await runSymbolStrategyBookScan({ symbol, signalTimeframe: timeframe }).catch(() => null);
   let decision = buildAutonomousDecision({
     symbol,
     timeframe,
@@ -603,17 +605,19 @@ export async function generateAutonomousSignal(
     visual,
     macro,
     execution,
+    strategyBook,
   });
   const baseSignalDecision = decision.decision;
   if (['BUY', 'SELL'].includes(decision.decision)) {
     const { resolveExecutableAutonomyDecision } = await import('@/lib/autonomy-execution-adapter');
     decision = (await resolveExecutableAutonomyDecision(decision)).decision;
   }
-  const strategyId = normalizeStrategyId({
-    tradingStyle: decision.tradingStyle ?? options.tradingStyle ?? null,
-    timeframe: decision.timeframe,
-    setupType: decision.setupType,
-  });
+  const strategyId = decision.selectedStrategyId
+    ?? normalizeStrategyId({
+      tradingStyle: decision.tradingStyle ?? options.tradingStyle ?? null,
+      timeframe: decision.timeframe,
+      setupType: decision.setupType,
+    });
   const topDownEvidence = buildTopDownAlignmentEvidence(decision, visual);
   const governanceMetadata = buildStrategyDecisionMetadata({
     strategyId,
@@ -638,7 +642,7 @@ export async function generateAutonomousSignal(
     decision.reasonAgainstDecision, decision.macroRiskWarning, decision.liquidityWarning, decision.anomalyWarning,
     decision.recommendedNextAction, decision.tradingStyle ?? null,
     JSON.stringify(topDownEvidence),
-    JSON.stringify(buildDecisionEvidence({ decision, visual, macro, execution, refillMode, governance: governanceMetadata })),
+    JSON.stringify(buildDecisionEvidence({ decision, visual, macro, execution, refillMode, governance: governanceMetadata, strategyBook })),
     strategyId,
     governanceMetadata.marketRegime,
     governanceMetadata.htfBias,
@@ -1036,6 +1040,7 @@ function buildDecisionEvidence(input: {
   execution: unknown;
   refillMode: boolean;
   governance?: Record<string, unknown>;
+  strategyBook?: unknown;
 }) {
   const visual = objectValue(input.visual);
   const macro = objectValue(input.macro);
@@ -1048,6 +1053,7 @@ function buildDecisionEvidence(input: {
       confidence: decision.confidenceScore ?? null,
       setupReadiness: decision.setupReadinessScore ?? null,
       risk: decision.riskScore ?? null,
+      strategyBookScore: decision.strategyBookScore ?? null,
     },
     visual: {
       finalMarketBias: visual.finalMarketBias ?? null,
@@ -1059,6 +1065,7 @@ function buildDecisionEvidence(input: {
     },
     macro,
     execution,
+    strategyBook: input.strategyBook ?? null,
     governance: input.governance ?? {},
   };
 }

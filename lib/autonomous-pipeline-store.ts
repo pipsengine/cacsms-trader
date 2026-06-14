@@ -239,12 +239,13 @@ export async function getAutonomousPipelineStatus(
     }
   }
 
-  const [session, captureCounts, mtf, vision, macro, decisions, risk, execution, autonomyConfig, jobs, continuousSession, maintenance] = await Promise.all([
+  const [session, captureCounts, mtf, vision, macro, strategyBook, decisions, risk, execution, autonomyConfig, jobs, continuousSession, maintenance] = await Promise.all([
     getLatestPipelineSession(normalizedSymbol),
     getCaptureCoverage(normalizedSymbol),
     getMtfStatus(normalizedSymbol),
     getVisionStatus(normalizedSymbol),
     getMacroPipelineStatus(normalizedSymbol),
+    getStrategyBookStatus(normalizedSymbol),
     getSignalStatus(normalizedSymbol),
     getPipelineRiskStatus(normalizedSymbol),
     getPipelineExecutionStatus(normalizedSymbol),
@@ -366,6 +367,7 @@ export async function getAutonomousPipelineStatus(
     'mtf-fusion': () => mtf,
     'cacsms-vision': () => vision,
     'macro-intelligence': () => macro,
+    'strategy-book-scan': () => strategyBook,
     'signal-generation': () => decisions,
     'risk-gate': () => risk,
     'execution': () => execution,
@@ -582,6 +584,53 @@ async function getVisionStatus(symbol: string) {
     return { status: 'in_progress' as const, detail: 'Cacsms Vision scan in progress.', progress: 55, metrics: {} };
   }
   return { status: 'not_started' as const, detail: 'No recent Cacsms Vision analysis.', progress: 0, metrics: {} };
+}
+
+async function getStrategyBookStatus(symbol: string) {
+  const result = await queryPostgres(
+    `SELECT
+       decision_evidence_json->'strategyBook' AS book,
+       strategy_id,
+       created_at
+     FROM autonomous_decision_logs
+     WHERE upper(symbol) = $1
+       AND decision_evidence_json->'strategyBook' IS NOT NULL
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [symbol],
+  );
+  if (!result.rows[0]) {
+    return { status: 'not_started' as const, detail: 'Strategy book scan not yet run for this symbol.', progress: 0, metrics: {} };
+  }
+  const book = objectValue(result.rows[0].book);
+  const healthyCount = Number(book.healthyCount ?? 0);
+  const totalCount = Number(book.totalCount ?? 0);
+  const best = objectValue(book.bestStrategy);
+  const bestLabel = stringValue(best.label, stringValue(result.rows[0].strategy_id, 'unknown'));
+  const bestScore = Number(best.score ?? 0);
+  const bookDecision = stringValue(book.bookDecision, 'neutral');
+  const metrics = {
+    healthyCount,
+    totalCount,
+    bookDecision,
+    bestStrategyId: stringValue(best.id, stringValue(result.rows[0].strategy_id, '')),
+    bestStrategyScore: bestScore,
+    scannedAt: String(result.rows[0].created_at ?? ''),
+  };
+  if (healthyCount >= 5 && bestScore >= 45) {
+    return {
+      status: 'completed' as const,
+      detail: `Best fit: ${bestLabel} (${bestScore}/100, book ${bookDecision}). ${healthyCount}/${totalCount} engines healthy.`,
+      progress: 100,
+      metrics,
+    };
+  }
+  return {
+    status: 'in_progress' as const,
+    detail: `Strategy book scanned ${healthyCount}/${totalCount} engines — awaiting stronger consensus.`,
+    progress: Math.round(Math.min(90, (healthyCount / Math.max(totalCount, 1)) * 100)),
+    metrics,
+  };
 }
 
 async function getSignalStatus(symbol: string) {

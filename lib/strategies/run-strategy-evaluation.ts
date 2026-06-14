@@ -12,6 +12,8 @@ import {
   buildAutonomousConfig,
   resolveAutonomousPipelineSymbol,
   resolveAutonomousStrategyContext,
+  resolveAutonomousTimeframeForGroup,
+  STRATEGY_AUTONOMOUS_REFRESH_MS,
 } from './autonomous-strategy-context';
 
 function parseTimeframe(value: unknown): Timeframe {
@@ -40,6 +42,10 @@ export interface StrategyEvaluationPayload {
 export async function runStrategyEvaluation(input: {
   strategyId: string;
   autonomous?: boolean;
+  /** When autonomous, evaluate this symbol instead of the pipeline default. */
+  symbol?: string;
+  /** When autonomous with symbol, optional timeframe override (else group preference). */
+  timeframe?: string;
   body?: Record<string, unknown>;
 }): Promise<StrategyEvaluationPayload> {
   const definition = getStrategyDefinition(input.strategyId);
@@ -53,18 +59,31 @@ export async function runStrategyEvaluation(input: {
   let meta: StrategyEvaluationPayload['context'] = { symbol: 'EURUSD', timeframe: 'H1' };
 
   if (input.autonomous) {
-    const autonomous = await resolveAutonomousStrategyContext(definition);
-    symbol = autonomous.symbol;
-    timeframe = autonomous.timeframe;
-    config = autonomous.config;
-    meta = {
-      symbol,
-      timeframe,
-      pipelineMode: autonomous.pipelineMode,
-      activeSymbols: autonomous.activeSymbols,
-      bridgeOnline: autonomous.bridgeOnline,
-      refreshIntervalMs: autonomous.refreshIntervalMs,
-    };
+    if (input.symbol) {
+      symbol = input.symbol.toUpperCase();
+      timeframe = input.timeframe
+        ? parseTimeframe(input.timeframe)
+        : resolveAutonomousTimeframeForGroup(definition.group);
+      config = buildAutonomousConfig(definition, symbol, timeframe);
+      meta = {
+        symbol,
+        timeframe,
+        refreshIntervalMs: STRATEGY_AUTONOMOUS_REFRESH_MS,
+      };
+    } else {
+      const autonomous = await resolveAutonomousStrategyContext(definition);
+      symbol = autonomous.symbol;
+      timeframe = autonomous.timeframe;
+      config = autonomous.config;
+      meta = {
+        symbol,
+        timeframe,
+        pipelineMode: autonomous.pipelineMode,
+        activeSymbols: autonomous.activeSymbols,
+        bridgeOnline: autonomous.bridgeOnline,
+        refreshIntervalMs: autonomous.refreshIntervalMs,
+      };
+    }
   } else {
     const body = input.body ?? {};
     symbol = String(body.symbol ?? 'EURUSD').toUpperCase();

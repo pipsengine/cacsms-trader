@@ -94,6 +94,23 @@ export interface AutonomousDecisionInput {
     captureQualityScore?: number | null;
     sessionState?: string | null;
   } | null;
+  /** Full active-strategy book scan for this symbol (best-fit engine selection). */
+  strategyBook?: {
+    healthyCount: number;
+    totalCount: number;
+    bookDecision: 'buy' | 'sell' | 'wait' | 'neutral';
+    bestStrategy: {
+      id: string;
+      label: string;
+      decision: 'buy' | 'sell' | 'wait';
+      score: number;
+      confidence: number;
+      winRate: number | null;
+      sampleSize: number;
+    } | null;
+    topRankings: Array<{ id: string; label: string; score: number; decision: 'buy' | 'sell' | 'wait'; confidence: number }>;
+    reasons: string[];
+  } | null;
 }
 
 export interface AutonomousDecisionOutput {
@@ -117,4 +134,9 @@ export interface AutonomousDecisionOutput {
   liquidityWarning: string;
   anomalyWarning: string;
   recommendedNextAction: string;
+  /** Catalog strategy selected as best fit for this symbol analysis. */
+  selectedStrategyId?: string | null;
+  selectedStrategyLabel?: string | null;
+  strategyBookScore?: number | null;
+  strategyBookConsensus?: string | null;
 }

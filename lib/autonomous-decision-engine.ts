@@ -1,6 +1,7 @@
 import { getContinuousRefillDecisionThresholds, getDecisionThresholds } from './autonomy-account-profiles';
 import { getTradingStyleProfile } from './trading-styles/registry';
 import { shouldBypassNewsBlackout } from './trading-session-policy';
+import { mapBookSideToAutonomy } from '@/lib/strategies/strategy-book-scoring';
 import type { AutonomousDecisionInput, AutonomousDecisionOutput, AutonomyDecision } from './autonomy-types';
 
 function resolveStyleRefillThresholds(input: { accountClass?: string; tradingStyle?: AutonomousDecisionInput['tradingStyle'] }) {
@@ -28,30 +29,140 @@ export function buildAutonomousDecision(input: AutonomousDecisionInput): Autonom
   const finalBias = normalizeBias(visual.finalMarketBias);
   const baseDecision = normalizeDecision(visual.finalDecision);
   const blockers = collectBlockers({ confidenceScore, setupReadinessScore, riskScore, input });
-  const decision = downgradeDecision(baseDecision, finalBias, blockers, Boolean(input.refillMode));
-  const setupType = inferSetupType(String(visual.marketPhase ?? ''), String(visual.liquidityObjective ?? ''));
+  const strategyFusion = fuseStrategyBook({
+    visualDecision: baseDecision,
+    visualBias: finalBias,
+    visualConfidence: confidenceScore,
+    visualReadiness: setupReadinessScore,
+    strategyBook: input.strategyBook ?? null,
+    refillMode: Boolean(input.refillMode),
+  });
+  const decision = downgradeDecision(
+    strategyFusion.decision,
+    strategyFusion.bias,
+    [...blockers, ...strategyFusion.blockers],
+    Boolean(input.refillMode),
+  );
+  const fusedConfidence = strategyFusion.confidenceScore;
+  const fusedReadiness = strategyFusion.setupReadinessScore;
+  const setupType = strategyFusion.setupType ?? inferSetupType(String(visual.marketPhase ?? ''), String(visual.liquidityObjective ?? ''));
 
   return {
     symbol: input.symbol.toUpperCase(),
     timeframe: input.timeframe.toUpperCase(),
     tradingStyle: input.tradingStyle,
     dominantTimeframe: input.dominantTimeframe ?? input.timeframe.toUpperCase(),
-    finalBias,
+    finalBias: strategyFusion.bias,
     setupType,
-    setupReadinessScore: Math.round(setupReadinessScore),
-    confidenceScore: Math.round(confidenceScore),
+    setupReadinessScore: Math.round(fusedReadiness),
+    confidenceScore: Math.round(fusedConfidence),
     riskScore,
     decision,
     entryZone: buildEntryZone(decision, visual.entryReadiness),
     stopLoss: null,
     takeProfitLevels: [],
     invalidationLevel: null,
-    reasonForDecision: reasonFor(decision, finalBias, setupReadinessScore, confidenceScore),
-    reasonAgainstDecision: blockers.length ? blockers.join(' ') : 'No hard autonomous blocker is active from the available evidence.',
+    reasonForDecision: strategyFusion.reasonForDecision,
+    reasonAgainstDecision: blockers.length || strategyFusion.blockers.length
+      ? [...blockers, ...strategyFusion.blockers].join(' ')
+      : 'No hard autonomous blocker is active from the available evidence.',
     macroRiskWarning: macro.warning ?? (economicRisk >= 65 ? 'Macro risk is elevated near high-impact conditions.' : 'No high-impact macro blocker is available from current data.'),
     liquidityWarning: visual.liquidityObjective ?? 'Liquidity context is not available; the system will not force an execution signal.',
     anomalyWarning: visual.riskWarning ?? 'No visual anomaly warning is available from the latest result.',
     recommendedNextAction: nextAction(decision),
+    selectedStrategyId: strategyFusion.selectedStrategyId,
+    selectedStrategyLabel: strategyFusion.selectedStrategyLabel,
+    strategyBookScore: strategyFusion.strategyBookScore,
+    strategyBookConsensus: strategyFusion.strategyBookConsensus,
+  };
+}
+
+function fuseStrategyBook(input: {
+  visualDecision: AutonomyDecision;
+  visualBias: string;
+  visualConfidence: number;
+  visualReadiness: number;
+  strategyBook: AutonomousDecisionInput['strategyBook'];
+  refillMode: boolean;
+}): {
+  decision: AutonomyDecision;
+  bias: string;
+  confidenceScore: number;
+  setupReadinessScore: number;
+  setupType?: string;
+  blockers: string[];
+  reasonForDecision: string;
+  selectedStrategyId: string | null;
+  selectedStrategyLabel: string | null;
+  strategyBookScore: number | null;
+  strategyBookConsensus: string | null;
+} {
+  const book = input.strategyBook;
+  if (!book || book.healthyCount < 5 || !book.bestStrategy) {
+    return {
+      decision: input.visualDecision,
+      bias: input.visualBias,
+      confidenceScore: input.visualConfidence,
+      setupReadinessScore: input.visualReadiness,
+      blockers: [],
+      reasonForDecision: reasonFor(input.visualDecision, input.visualBias, input.visualReadiness, input.visualConfidence),
+      selectedStrategyId: null,
+      selectedStrategyLabel: null,
+      strategyBookScore: null,
+      strategyBookConsensus: book?.bookDecision ?? null,
+    };
+  }
+
+  const leader = book.bestStrategy;
+  const bookSide = mapBookSideToAutonomy(leader.decision);
+  const bookBias = leader.decision === 'buy' ? 'bullish' : leader.decision === 'sell' ? 'bearish' : input.visualBias;
+  const blockers: string[] = [];
+  const visualSide = input.visualDecision === 'BUY' || input.visualDecision === 'SELL' ? input.visualDecision : null;
+
+  let decision: AutonomyDecision = input.visualDecision;
+  if (leader.score >= 55 && bookSide !== 'WAIT') {
+    if (!visualSide || visualSide === bookSide || input.visualDecision === 'WAIT' || input.visualDecision === 'MONITOR') {
+      decision = bookSide;
+    } else if (leader.score >= 72 && book.healthyCount >= 12) {
+      decision = input.refillMode ? bookSide : 'MONITOR';
+      if (decision === 'MONITOR') {
+        blockers.push(`Visual ${visualSide} conflicts with strategy book leader ${leader.label} (${bookSide}).`);
+      }
+    } else {
+      decision = 'MONITOR';
+      blockers.push(`Visual ${visualSide} conflicts with strategy book leader ${leader.label} (${bookSide}).`);
+    }
+  } else if (book.bookDecision === 'neutral' && leader.score < 45) {
+    if (input.visualDecision === 'BUY' || input.visualDecision === 'SELL') {
+      decision = input.refillMode ? input.visualDecision : 'MONITOR';
+      blockers.push('Strategy book lacks actionable consensus for this symbol.');
+    }
+  }
+
+  const confidenceScore = Math.round(
+    clamp(input.visualConfidence * 0.4 + leader.score * 0.45 + leader.confidence * 0.15, 0, 100),
+  );
+  const setupReadinessScore = Math.round(
+    clamp(input.visualReadiness * 0.45 + leader.score * 0.55, 0, 100),
+  );
+  const setupType = `${leader.label} (${leader.id})`;
+  const winRateText = leader.winRate != null && leader.sampleSize >= 3
+    ? ` · ${(leader.winRate * 100).toFixed(1)}% win rate`
+    : '';
+  const reasonForDecision = `${decision} selected using strategy book leader ${leader.label} (${leader.score}/100${winRateText}) fused with visual confidence ${Math.round(input.visualConfidence)}. ${book.reasons[0] ?? ''}`.trim();
+
+  return {
+    decision,
+    bias: bookBias,
+    confidenceScore,
+    setupReadinessScore,
+    setupType,
+    blockers,
+    reasonForDecision,
+    selectedStrategyId: leader.id,
+    selectedStrategyLabel: leader.label,
+    strategyBookScore: leader.score,
+    strategyBookConsensus: book.bookDecision,
   };
 }
 

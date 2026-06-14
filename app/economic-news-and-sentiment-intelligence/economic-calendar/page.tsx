@@ -33,7 +33,7 @@ import {
 import { DashboardPageFrame } from '@/components/dashboard-page-frame';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 
@@ -123,6 +123,9 @@ type DashboardPayload = {
     sourceCollectionHealth: number;
     strongestBullishCurrencyToday: string | null;
     strongestBearishCurrencyToday: string | null;
+    calendarStale?: boolean;
+    latestEventDate?: string | null;
+    lastSyncAt?: string | null;
   };
   currencyBias: Array<{ currency: string; score: number; bias: Bias; eventCount: number }>;
   conflicts: Array<{ id: string; eventId: string | null; conflictType: string; fieldName: string; sourceA: string; sourceB: string; valueA: string | null; valueB: string | null; createdAt: string }>;
@@ -191,6 +194,7 @@ function EconomicCalendarIntelligencePage() {
   const [selectedEventId, setSelectedEventId] = useState('');
   const [activeTab, setActiveTab] = useState('table');
   const [comparisonOpen, setComparisonOpen] = useState(false);
+  const [autoRefreshAttempted, setAutoRefreshAttempted] = useState(false);
   const searchParams = useSearchParams();
 
   useEffect(() => {
@@ -240,6 +244,22 @@ function EconomicCalendarIntelligencePage() {
     const interval = window.setInterval(loadDashboard, 60_000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (loading || autoRefreshAttempted || !dashboard.ok || !dashboard.summary.calendarStale) return;
+    setAutoRefreshAttempted(true);
+    void (async () => {
+      setActionMessage('Refresh Calendar requested...');
+      try {
+        const response = await fetch('/api/economic-calendar/refresh', { method: 'POST' });
+        const payload = await response.json() as { ok: boolean; message: string };
+        setActionMessage(payload.message || 'Refresh Calendar completed.');
+        await loadDashboard();
+      } catch (error) {
+        setActionMessage(error instanceof Error ? error.message : 'Refresh Calendar failed.');
+      }
+    })();
+  }, [autoRefreshAttempted, dashboard.ok, dashboard.summary.calendarStale, loading]);
 
   const countries = useMemo(() => ['All', ...Array.from(new Set(dashboard.events.map((event) => event.country).filter(Boolean))).sort()], [dashboard.events]);
   const sources = useMemo(() => ['All', ...Array.from(new Set(dashboard.events.map((event) => event.sourceName).filter(Boolean))).sort()], [dashboard.events]);
@@ -335,6 +355,14 @@ function EconomicCalendarIntelligencePage() {
                 Cacsms Trader could not collect data from the selected source. Check source health, retry collection, or enable backup sources. {loadError}
               </AlertBanner>
             ) : null}
+            {!loading && dashboard.summary.calendarStale ? (
+              <AlertBanner tone="amber" icon={CalendarClock}>
+                Calendar data is stale
+                {dashboard.summary.latestEventDate ? ` (latest event: ${dashboard.summary.latestEventDate})` : ''}.
+                {dashboard.summary.lastSyncAt ? ` Last successful sync: ${formatDateTime(dashboard.summary.lastSyncAt)}.` : ' No successful sync recorded yet.'}
+                {' '}Use Refresh Calendar or run <span className="font-mono">npm run calendar:refresh</span> on the host if Docker cannot reach Investing.com.
+              </AlertBanner>
+            ) : null}
             {actionMessage ? <AlertBanner tone="cyan" icon={Bell}>{actionMessage}</AlertBanner> : null}
             {!loading && dashboard.events.length === 0 ? (
               <AlertBanner tone="amber" icon={Search}>
@@ -412,21 +440,23 @@ function EconomicCalendarIntelligencePage() {
             </Panel>
 
             <Tabs value={activeTab} onValueChange={setActiveTab} className="rounded-lg border border-slate-200 bg-white">
-              <div className="flex flex-col gap-3 border-b border-slate-200 p-4 xl:flex-row xl:items-center xl:justify-between">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-950">Economic Event Intelligence Views</h2>
-                  <p className="mt-1 text-xs text-slate-500">Upcoming, live, released, analyzed, failed, conflicted, archived, and restriction-focused event views.</p>
+              <div className="border-b border-slate-200 bg-white p-4">
+                <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+                  <div>
+                    <h2 className="text-sm font-semibold text-slate-950">Economic Event Intelligence Views</h2>
+                    <p className="mt-1 text-xs text-slate-500">Upcoming, live, released, analyzed, failed, conflicted, archived, and restriction-focused event views.</p>
+                  </div>
+                  <TabsList className="h-auto flex-wrap justify-start bg-slate-100">
+                    <TabsTrigger value="table">Table</TabsTrigger>
+                    <TabsTrigger value="timeline">Timeline</TabsTrigger>
+                    <TabsTrigger value="currency">Currency</TabsTrigger>
+                    <TabsTrigger value="impact">Impact</TabsTrigger>
+                    <TabsTrigger value="source">Source</TabsTrigger>
+                    <TabsTrigger value="history">History</TabsTrigger>
+                    <TabsTrigger value="conflict">Conflict</TabsTrigger>
+                    <TabsTrigger value="restriction">Restrictions</TabsTrigger>
+                  </TabsList>
                 </div>
-                <TabsList className="h-auto flex-wrap justify-start bg-slate-100">
-                  <TabsTrigger value="table">Table</TabsTrigger>
-                  <TabsTrigger value="timeline">Timeline</TabsTrigger>
-                  <TabsTrigger value="currency">Currency</TabsTrigger>
-                  <TabsTrigger value="impact">Impact</TabsTrigger>
-                  <TabsTrigger value="source">Source</TabsTrigger>
-                  <TabsTrigger value="history">History</TabsTrigger>
-                  <TabsTrigger value="conflict">Conflict</TabsTrigger>
-                  <TabsTrigger value="restriction">Restrictions</TabsTrigger>
-                </TabsList>
               </div>
               <CardContent className="p-0">
                 <TabsContent value="table" className="m-0">
@@ -440,25 +470,25 @@ function EconomicCalendarIntelligencePage() {
                     onCaptureActual={captureActual}
                   />
                 </TabsContent>
-                <TabsContent value="timeline" className="m-0 p-4">
+                <TabsContent value="timeline" className="m-0 max-h-[min(65vh,720px)] overflow-y-auto overscroll-y-contain p-4">
                   <TimelineView events={filteredEvents} onSelect={setSelectedEventId} />
                 </TabsContent>
-                <TabsContent value="currency" className="m-0 p-4">
+                <TabsContent value="currency" className="m-0 max-h-[min(65vh,720px)] overflow-y-auto overscroll-y-contain p-4">
                   <CurrencyView events={filteredEvents} currencyBias={dashboard.currencyBias} />
                 </TabsContent>
-                <TabsContent value="impact" className="m-0 p-4">
+                <TabsContent value="impact" className="m-0 max-h-[min(65vh,720px)] overflow-y-auto overscroll-y-contain p-4">
                   <GroupedCards events={filteredEvents} groupBy={(event) => event.impactLevel} empty="No events for the selected impact filters." />
                 </TabsContent>
-                <TabsContent value="source" className="m-0 p-4">
+                <TabsContent value="source" className="m-0 max-h-[min(65vh,720px)] overflow-y-auto overscroll-y-contain p-4">
                   <SourceHealthPanel sources={dashboard.sources} />
                 </TabsContent>
-                <TabsContent value="history" className="m-0 p-4">
+                <TabsContent value="history" className="m-0 max-h-[min(65vh,720px)] overflow-y-auto overscroll-y-contain p-4">
                   <GroupedCards events={filteredEvents.filter((event) => event.status === 'ARCHIVED')} groupBy={(event) => event.currency} empty="No archived economic events have been recorded yet." />
                 </TabsContent>
-                <TabsContent value="conflict" className="m-0 p-4">
+                <TabsContent value="conflict" className="m-0 max-h-[min(65vh,720px)] overflow-y-auto overscroll-y-contain p-4">
                   <ConflictPanel conflicts={dashboard.conflicts} />
                 </TabsContent>
-                <TabsContent value="restriction" className="m-0 p-4">
+                <TabsContent value="restriction" className="m-0 max-h-[min(65vh,720px)] overflow-y-auto overscroll-y-contain p-4">
                   <TradeRestrictionPanel events={filteredEvents.filter((event) => event.tradeRestrictionRequired)} />
                 </TabsContent>
               </CardContent>
@@ -487,83 +517,90 @@ function EventTable(props: {
   onSelect: (id: string) => void;
   onCaptureActual: (id: string) => Promise<void>;
 }) {
+  const columns = ['Date', 'Time', 'Local Time', 'Currency', 'Country', 'Event Name', 'Impact', 'Actual', 'Actual Source', 'Capture', 'Forecast', 'Previous', 'Surprise', 'Bias', 'Status', 'Source', 'Reliability', 'Trade Restriction', 'Last Checked', 'Actions'];
+
   return (
-    <div className="w-full overflow-x-auto">
-      <Table>
-      <TableHeader className="bg-slate-50">
-        <TableRow className="hover:bg-transparent">
-          {['Date', 'Time', 'Local Time', 'Currency', 'Country', 'Event Name', 'Impact', 'Actual', 'Actual Source', 'Capture', 'Forecast', 'Previous', 'Surprise', 'Bias', 'Status', 'Source', 'Reliability', 'Trade Restriction', 'Last Checked', 'Actions'].map((column) => (
-            <TableHead key={column} className="whitespace-nowrap px-3 py-3 text-[11px] uppercase tracking-wider text-slate-500">{column}</TableHead>
-          ))}
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {props.loading || props.events.length === 0 ? (
+    <div className="max-h-[min(65vh,720px)] min-h-[320px] overflow-auto overscroll-y-contain">
+      <table className="w-full min-w-max caption-bottom text-sm">
+        <TableHeader className="bg-slate-50">
           <TableRow className="hover:bg-transparent">
-            <TableCell colSpan={18} className="h-36 text-center text-sm text-slate-600">
-              {props.loading
-                ? 'Collecting and validating economic calendar data...'
-                : props.totalEvents > 0 && props.filtersActive
-                  ? `No events match the current filters (${props.totalEvents} collected). Try "All" for the date range or run Refresh Calendar for the latest week.`
-                  : 'No economic events have been collected yet. Start by running Discover Upcoming Events to allow Cacsms Trader to build its internal calendar from enabled free sources.'}
-            </TableCell>
-          </TableRow>
-        ) : props.events.map((event) => (
-          <TableRow key={event.id} className={cn('cursor-pointer hover:bg-indigo-50/50', props.selectedId === event.id && 'bg-indigo-50')} onClick={() => props.onSelect(event.id)}>
-            <TableCell className="px-3 font-mono text-xs">{event.eventDate}</TableCell>
-            <TableCell className="px-3 font-mono text-xs">{event.eventTime ?? '--'}</TableCell>
-            <TableCell className="px-3 font-mono text-xs">{formatDateTime(event.localEventTime)}</TableCell>
-            <TableCell className="px-3"><CurrencyBadge currency={event.currency} /></TableCell>
-            <TableCell className="px-3 text-xs text-slate-700">{event.country}</TableCell>
-            <TableCell className="min-w-[260px] px-3">
-              <div className="text-sm font-semibold text-slate-950">{event.eventName}</div>
-              <div className="mt-1 flex flex-wrap gap-1">
-                <SourceIndicators event={event} />
-              </div>
-              <div className="text-xs text-slate-500">{event.normalizedEventName}</div>
-            </TableCell>
-            <TableCell className="px-3"><ImpactBadge impact={event.impactLevel} /></TableCell>
-            <TableCell className="px-3 font-mono text-xs">
-              {actualDisplayValue(event)}
-            </TableCell>
-            <TableCell className="px-3 text-xs"><Badge className="border border-slate-200 bg-slate-50 text-slate-700">{event.actualSource ?? 'NONE'}</Badge></TableCell>
-            <TableCell className="px-3 text-xs"><Badge className="border border-slate-200 bg-slate-50 text-slate-700">{event.actualCaptureStatus ?? 'PENDING'}</Badge></TableCell>
-            <TableCell className="px-3 font-mono text-xs">{event.forecastValue ?? '--'}</TableCell>
-            <TableCell className="px-3 font-mono text-xs">{event.revisedPreviousValue ?? event.previousValue ?? '--'}</TableCell>
-            <TableCell className="px-3 font-mono text-xs">{event.surprisePercentage == null ? 'Pending' : `${event.surprisePercentage}%`}</TableCell>
-            <TableCell className="px-3"><BiasBadge bias={event.bias} /></TableCell>
-            <TableCell className="px-3"><StatusBadge status={event.status} /></TableCell>
-            <TableCell className="px-3 text-xs">{event.sourcePriorityUsed ?? (String(event.validationStatus ?? '').toUpperCase().includes('INVESTING') ? 'INVESTING' : event.sourceName)}</TableCell>
-            <TableCell className="px-3 font-mono text-xs">{event.sourceReliabilityScore}/100</TableCell>
-            <TableCell className="px-3">{event.tradeRestrictionRequired ? <Badge className="bg-rose-50 text-rose-700 border border-rose-200">Restricted</Badge> : <Badge className="bg-slate-50 text-slate-600 border border-slate-200">None</Badge>}</TableCell>
-            <TableCell className="px-3 font-mono text-xs">{formatDateTime(event.lastCheckedAt)}</TableCell>
-            <TableCell className="px-3">
-              <button
-                type="button"
-                className="mr-2 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 disabled:opacity-50"
-                disabled={Boolean(event.actualValue)}
-                onClick={async (e) => {
-                  e.stopPropagation();
-                  await props.onCaptureActual(event.id);
-                }}
+            {columns.map((column) => (
+              <TableHead
+                key={column}
+                className="sticky top-0 z-20 whitespace-nowrap border-b border-slate-200 bg-slate-50 px-3 py-3 text-[11px] uppercase tracking-wider text-slate-500 shadow-[0_1px_0_0_rgb(226_232_240)]"
               >
-                Fetch Actual
-              </button>
-              <button
-                type="button"
-                className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (event.sourceUrl) window.open(event.sourceUrl, '_blank', 'noopener,noreferrer');
-                }}
-              >
-                Open
-              </button>
-            </TableCell>
+                {column}
+              </TableHead>
+            ))}
           </TableRow>
-        ))}
-      </TableBody>
-      </Table>
+        </TableHeader>
+        <TableBody>
+          {props.loading || props.events.length === 0 ? (
+            <TableRow className="hover:bg-transparent">
+              <TableCell colSpan={columns.length} className="h-36 text-center text-sm text-slate-600">
+                {props.loading
+                  ? 'Collecting and validating economic calendar data...'
+                  : props.totalEvents > 0 && props.filtersActive
+                    ? `No events match the current filters (${props.totalEvents} collected). Try "All" for the date range or run Refresh Calendar for the latest week.`
+                    : 'No economic events have been collected yet. Start by running Discover Upcoming Events to allow Cacsms Trader to build its internal calendar from enabled free sources.'}
+              </TableCell>
+            </TableRow>
+          ) : props.events.map((event) => (
+            <TableRow key={event.id} className={cn('cursor-pointer hover:bg-indigo-50/50', props.selectedId === event.id && 'bg-indigo-50')} onClick={() => props.onSelect(event.id)}>
+              <TableCell className="px-3 font-mono text-xs">{event.eventDate}</TableCell>
+              <TableCell className="px-3 font-mono text-xs">{event.eventTime ?? '--'}</TableCell>
+              <TableCell className="px-3 font-mono text-xs">{formatDateTime(event.localEventTime)}</TableCell>
+              <TableCell className="px-3"><CurrencyBadge currency={event.currency} /></TableCell>
+              <TableCell className="px-3 text-xs text-slate-700">{event.country}</TableCell>
+              <TableCell className="min-w-[260px] px-3">
+                <div className="text-sm font-semibold text-slate-950">{event.eventName}</div>
+                <div className="mt-1 flex flex-wrap gap-1">
+                  <SourceIndicators event={event} />
+                </div>
+                <div className="text-xs text-slate-500">{event.normalizedEventName}</div>
+              </TableCell>
+              <TableCell className="px-3"><ImpactBadge impact={event.impactLevel} /></TableCell>
+              <TableCell className="px-3 font-mono text-xs">
+                {actualDisplayValue(event)}
+              </TableCell>
+              <TableCell className="px-3 text-xs"><Badge className="border border-slate-200 bg-slate-50 text-slate-700">{event.actualSource ?? 'NONE'}</Badge></TableCell>
+              <TableCell className="px-3 text-xs"><Badge className="border border-slate-200 bg-slate-50 text-slate-700">{event.actualCaptureStatus ?? 'PENDING'}</Badge></TableCell>
+              <TableCell className="px-3 font-mono text-xs">{event.forecastValue ?? '--'}</TableCell>
+              <TableCell className="px-3 font-mono text-xs">{event.revisedPreviousValue ?? event.previousValue ?? '--'}</TableCell>
+              <TableCell className="px-3 font-mono text-xs">{event.surprisePercentage == null ? 'Pending' : `${event.surprisePercentage}%`}</TableCell>
+              <TableCell className="px-3"><BiasBadge bias={event.bias} /></TableCell>
+              <TableCell className="px-3"><StatusBadge status={event.status} /></TableCell>
+              <TableCell className="px-3 text-xs">{event.sourcePriorityUsed ?? (String(event.validationStatus ?? '').toUpperCase().includes('INVESTING') ? 'INVESTING' : event.sourceName)}</TableCell>
+              <TableCell className="px-3 font-mono text-xs">{event.sourceReliabilityScore}/100</TableCell>
+              <TableCell className="px-3">{event.tradeRestrictionRequired ? <Badge className="bg-rose-50 text-rose-700 border border-rose-200">Restricted</Badge> : <Badge className="bg-slate-50 text-slate-600 border border-slate-200">None</Badge>}</TableCell>
+              <TableCell className="px-3 font-mono text-xs">{formatDateTime(event.lastCheckedAt)}</TableCell>
+              <TableCell className="px-3">
+                <button
+                  type="button"
+                  className="mr-2 rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 disabled:opacity-50"
+                  disabled={Boolean(event.actualValue)}
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    await props.onCaptureActual(event.id);
+                  }}
+                >
+                  Fetch Actual
+                </button>
+                <button
+                  type="button"
+                  className="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (event.sourceUrl) window.open(event.sourceUrl, '_blank', 'noopener,noreferrer');
+                  }}
+                >
+                  Open
+                </button>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </table>
     </div>
   );
 }
