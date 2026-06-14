@@ -6,6 +6,7 @@ import { BrainCircuit, Menu, Radio, Sparkles } from 'lucide-react';
 
 import { DashboardPageFrame, DashboardPageScroll, DashboardPageShell } from '@/components/dashboard-page-frame';
 import { useAutonomousStrategyOverview } from '@/components/strategies/use-autonomous-strategy-overview';
+import { useModuleSummaries } from '@/components/strategies/use-module-summaries';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   toneBadge,
@@ -24,6 +25,8 @@ import {
   STRATEGY_GROUP_META,
   listStrategiesByGroup,
 } from '@/lib/strategies/registry';
+import { STRATEGY_CONTROL_MODULES } from '@/lib/strategies/strategy-control-modules';
+import { RESEARCH_EVOLUTION_MODULES } from '@/lib/strategies/research-evolution-modules';
 import { cn } from '@/lib/utils';
 
 function decisionTone(decision: string): DashboardTone {
@@ -45,6 +48,20 @@ export function StrategyOverviewDashboard() {
     lastSyncAt,
     strategies: liveEvaluations,
   } = useAutonomousStrategyOverview();
+  const {
+    loading: modulesLoading,
+    refreshing: modulesRefreshing,
+    payload: moduleSummaries,
+  } = useModuleSummaries();
+
+  const controlSummaryById = useMemo(
+    () => new Map(moduleSummaries?.control.map((item) => [item.id, item]) ?? []),
+    [moduleSummaries?.control],
+  );
+  const researchSummaryById = useMemo(
+    () => new Map(moduleSummaries?.research.map((item) => [item.id, item]) ?? []),
+    [moduleSummaries?.research],
+  );
 
   const evaluationById = useMemo(
     () => new Map(liveEvaluations.map((item) => [item.id, item])),
@@ -95,7 +112,7 @@ export function StrategyOverviewDashboard() {
             {lastSyncAt ? (
               <span className="text-[10px] text-slate-500">
                 synced {new Date(lastSyncAt).toLocaleTimeString()}
-                {refreshing ? ' · updating…' : ''}
+                {refreshing || modulesRefreshing ? ' · updating…' : ''}
               </span>
             ) : null}
           </div>
@@ -153,6 +170,74 @@ export function StrategyOverviewDashboard() {
                     <p className={cn('mt-3 text-sm', toneBody(strategy.tone))}>{strategy.description}</p>
                     <p className={cn('mt-2 text-[11px] font-mono', toneMuted(strategy.tone))}>{strategy.algorithm}</p>
                   </Link>
+                );
+              })}
+            </CardContent>
+          </Card>
+
+          <Card className={cn('border shadow-sm', toneCard('slate'))}>
+            <CardHeader className={toneCardHeader('slate')}>
+              <CardTitle className={cn('flex items-center gap-2', toneTitle('slate'))}>
+                <Sparkles className="h-4 w-4" />
+                Strategy Control
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              {STRATEGY_CONTROL_MODULES.map((module) => {
+                const summary = controlSummaryById.get(module.id);
+                const signalTone = summary ? decisionTone(summary.decision) : 'slate';
+                return (
+                <Link
+                  key={module.id}
+                  href={`/institutional-strategy-intelligence/strategy-control/${module.id}`}
+                  className={cn('rounded-xl border p-3 transition hover:shadow-md', toneCard(module.tone))}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-semibold text-slate-900">{module.label}</p>
+                    {summary ? (
+                      <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase', toneBadge(signalTone))}>
+                        {summary.decision} · {summary.confidence}%
+                      </span>
+                    ) : modulesLoading ? (
+                      <span className="text-[10px] text-slate-400">loading…</span>
+                    ) : null}
+                  </div>
+                  <p className={cn('mt-1 text-xs', toneBody(module.tone))}>{summary?.summary ?? module.description}</p>
+                </Link>
+                );
+              })}
+            </CardContent>
+          </Card>
+
+          <Card className={cn('border shadow-sm', toneCard('violet'))}>
+            <CardHeader className={toneCardHeader('violet')}>
+              <CardTitle className={cn('flex items-center gap-2', toneTitle('violet'))}>
+                <Sparkles className="h-4 w-4" />
+                Research & Evolution
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              {RESEARCH_EVOLUTION_MODULES.map((module) => {
+                const summary = researchSummaryById.get(module.id);
+                const signalTone = summary ? decisionTone(summary.decision) : 'slate';
+                return (
+                <Link
+                  key={module.id}
+                  href={`/institutional-strategy-intelligence/research-and-evolution/${module.id}`}
+                  className={cn('rounded-xl border p-3 transition hover:shadow-md', toneCard(module.tone))}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="font-semibold text-slate-900">{module.label}</p>
+                    {summary ? (
+                      <span className={cn('shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase', toneBadge(signalTone))}>
+                        {summary.decision} · {summary.confidence}%
+                      </span>
+                    ) : modulesLoading ? (
+                      <span className="text-[10px] text-slate-400">loading…</span>
+                    ) : null}
+                  </div>
+                  <p className={cn('mt-1 text-xs', toneBody(module.tone))}>{summary?.summary ?? module.description}</p>
+                </Link>
                 );
               })}
             </CardContent>

@@ -345,3 +345,19 @@ export function ichimoku(
 
   return { tenkan, kijun, senkouA, senkouB };
 }
+
+/** Session VWAP using candle range as volume proxy when tick volume is unavailable. */
+export function vwap(candles: StrategyPriceCandle[]): Array<number | null> {
+  const series: Array<number | null> = Array.from({ length: candles.length }, () => null);
+  let cumulativeVolumePrice = 0;
+  let cumulativeVolume = 0;
+  for (let index = 0; index < candles.length; index += 1) {
+    const candle = candles[index]!;
+    const typicalPrice = (candle.high + candle.low + candle.close) / 3;
+    const volumeProxy = Math.max(candle.high - candle.low, 0.00001);
+    cumulativeVolumePrice += typicalPrice * volumeProxy;
+    cumulativeVolume += volumeProxy;
+    series[index] = cumulativeVolume > 0 ? cumulativeVolumePrice / cumulativeVolume : typicalPrice;
+  }
+  return series;
+}

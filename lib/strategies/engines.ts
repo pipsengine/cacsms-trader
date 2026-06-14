@@ -2,7 +2,9 @@ import type { StrategyPriceCandle } from './strategy-candle-loader';
 import { strategyCandlesToReconstructed } from './strategy-candle-adapter';
 import { analyzeTrendlines, type TrendlineDetection } from '@/lib/trendline-detection-engine';
 import { analyzeSwingPoints } from '@/lib/swing-point-engine';
+import { analyzeMarketStructure } from '@/lib/structure-analysis-engine';
 import { analyzeSupportResistance, type SupportResistanceZone } from '@/lib/support-resistance-engine';
+import { analyzeChannels, type ChannelDetection } from '@/lib/channel-detection-engine';
 import {
   analyzeMultiTimeframe,
   MTF_TIMEFRAMES,
@@ -29,6 +31,303 @@ import {
   type StrategyBias,
   type StrategySignalSide,
 } from './evaluation';
+import {
+  evaluate1MinuteScalpingEngine,
+  evaluate5MinuteScalpingEngine,
+  evaluateTickScalpingEngine,
+  evaluateSpreadScalpingEngine,
+  evaluateOrderFlowScalpingEngine,
+  evaluateDomScalpingEngine,
+  evaluateMomentumScalpingEngine,
+  evaluateEmaScalpingEngine,
+  evaluateVwapScalpingEngine,
+  evaluateRsiScalpingEngine,
+  evaluateStochasticScalpingEngine,
+  evaluatePriceActionScalpingEngine,
+  evaluateLiquidityGrabScalpingEngine,
+  evaluateNewsScalpingEngine,
+  evaluateSessionScalpingEngine,
+  evaluateHighFrequencyScalpingEngine,
+  evaluateAlgorithmicScalpingEngine,
+} from './scalping-engines';
+import {
+  evaluateIntradayTrendTradingEngine,
+  evaluateIntradayBreakoutEngine,
+  evaluateMomentumDayTradingEngine,
+  evaluateVwapDayTradingEngine,
+  evaluateOpeningSessionTradingEngine,
+  evaluateMeanReversionDayTradingEngine,
+  evaluateGapTradingEngine,
+  evaluateReversalDayTradingEngine,
+  evaluateNewsBasedDayTradingEngine,
+  evaluateCorrelationDayTradingEngine,
+  evaluatePivotPointDayTradingEngine,
+  evaluateRangeDayTradingEngine,
+  evaluateSmartMoneyDayTradingEngine,
+} from './day-trading-engines';
+import {
+  evaluateSwingPullbackStrategyEngine,
+  evaluateFibonacciSwingTradingEngine,
+  evaluateSwingReversalStrategyEngine,
+  evaluateTrendSwingTradingEngine,
+  evaluateChannelSwingTradingEngine,
+  evaluateHarmonicSwingTradingEngine,
+  evaluateElliottWaveSwingTradingEngine,
+  evaluateMacdSwingTradingEngine,
+  evaluateRsiSwingTradingEngine,
+  evaluateSupportAndResistanceSwingTradingEngine,
+  evaluateCandlestickSwingTradingEngine,
+  evaluateWeeklySwingTradingEngine,
+  evaluatePositionSwingTradingEngine,
+} from './swing-trading-engines';
+import {
+  evaluateSupportAndResistanceEngine,
+  evaluateSupplyAndDemandEngine,
+  evaluateCandlestickTradingEngine,
+  evaluateEngulfingPatternEngine,
+  evaluateInsideBarStrategyEngine,
+  evaluateFakeyPatternEngine,
+  evaluateMarketStructureTradingEngine,
+  evaluateLiquiditySweepStrategyEngine,
+  evaluateMitigationBlockStrategyEngine,
+  evaluateBreakerBlockStrategyEngine,
+  evaluateInstitutionalCandleTradingEngine,
+  evaluateIctTradingStrategyEngine,
+  evaluateBosBreakOfStructureEngine,
+  evaluateChochChangeOfCharacterEngine,
+} from './price-action-engines';
+import {
+  evaluateMacdStrategyEngine,
+  evaluateBollingerBandsStrategyEngine,
+  evaluateAtrStrategyEngine,
+  evaluateAdxStrategyEngine,
+  evaluateCciStrategyEngine,
+  evaluateParabolicSarStrategyEngine,
+  evaluateIchimokuStrategyEngine,
+  evaluateMovingAverageStrategyEngine,
+  evaluateKeltnerChannelStrategyEngine,
+  evaluateDonchianChannelStrategyEngine,
+  evaluateMomentumIndicatorStrategyEngine,
+  evaluateWilliamsRStrategyEngine,
+  evaluateTdiStrategyEngine,
+  evaluateAlligatorIndicatorStrategyEngine,
+} from './indicator-based-engines';
+import {
+  evaluateRsiOverboughtOversoldEngine,
+  evaluateVwapReversionEngine,
+  evaluateStatisticalReversionEngine,
+  evaluateRangeReversalEngine,
+  evaluateChannelReversionEngine,
+  evaluateZScoreReversionEngine,
+  evaluateDeviationReversionEngine,
+  evaluateReversionScalpingEngine,
+} from './mean-reversion-engines';
+import {
+  evaluateMomentumBreakoutEngine,
+  evaluateVolumeMomentumEngine,
+  evaluateNewsMomentumEngine,
+  evaluateMacdMomentumEngine,
+  evaluateRsiMomentumEngine,
+  evaluateVolatilityMomentumEngine,
+  evaluateCurrencyStrengthMomentumEngine,
+  evaluateRelativeStrengthMomentumEngine,
+} from './momentum-trading-engines';
+import {
+  evaluateDoubleTopBottomEngine,
+  evaluateHeadAndShouldersEngine,
+  evaluateRsiDivergenceEngine,
+  evaluateMacdDivergenceEngine,
+  evaluateExhaustionReversalEngine,
+  evaluateClimacticReversalEngine,
+  evaluateTrendlineReversalEngine,
+  evaluateFibonacciReversalEngine,
+  evaluateHarmonicReversalEngine,
+  evaluateSupplyDemandReversalEngine,
+  evaluateVReversalEngine,
+  evaluateCountertrendTradingEngine,
+} from './reversal-trading-engines';
+import {
+  evaluateHorizontalRangeTradingEngine,
+  evaluateBollingerRangeStrategyEngine,
+  evaluateOscillatorRangeTradingEngine,
+  evaluateChannelTradingEngine,
+  evaluateSupportAndResistanceRangeEngine,
+  evaluateAsianSessionRangeTradingEngine,
+  evaluateMeanReversionRangeEngine,
+  evaluateVwapRangeTradingEngine,
+} from './range-trading-engines';
+import {
+  evaluateSmartMoneyConceptsSmcEngine,
+  evaluateIctMethodologyEngine,
+  evaluateOrderFlowTradingEngine,
+  evaluateFootprintTradingEngine,
+  evaluateLiquidityTradingEngine,
+  evaluateMarketMakerModelEngine,
+  evaluateWyckoffMethodEngine,
+  evaluateAccumulationDistributionEngine,
+  evaluateManipulationDistributionEngine,
+  evaluateStopHuntStrategyEngine,
+  evaluateInstitutionalCandleModelEngine,
+  evaluatePremiumAndDiscountZonesEngine,
+  evaluateSmtDivergenceEngine,
+  evaluateKillZonesEngine,
+  evaluateJudasSwingEngine,
+  evaluatePowerOf3Po3Engine,
+} from './smart-money-engines';
+import {
+  evaluateAlgorithmicTradingEngine,
+  evaluateQuantitativeTradingEngine,
+  evaluateHighFrequencyTradingHftEngine,
+  evaluateStatisticalArbitrageEngine,
+  evaluateMachineLearningTradingEngine,
+  evaluateAiBasedTradingEngine,
+  evaluateNeuralNetworkTradingEngine,
+  evaluateSentimentAiTradingEngine,
+  evaluateReinforcementLearningTradingEngine,
+  evaluateGridAlgorithmsEngine,
+  evaluateMartingaleSystemsEngine,
+  evaluateAntiMartingaleSystemsEngine,
+  evaluateVolatilityAlgorithmsEngine,
+} from './quantitative-algorithmic-engines';
+import {
+  evaluateInterestRateTradingEngine,
+  evaluateCentralBankTradingEngine,
+  evaluateCpiTradingEngine,
+  evaluateNfpTradingEngine,
+  evaluateGdpTradingEngine,
+  evaluateInflationTradingEngine,
+  evaluateEmploymentDataTradingEngine,
+  evaluateGeopoliticalTradingEngine,
+  evaluateTradeBalanceTradingEngine,
+  evaluateYieldDifferentialTradingEngine,
+  evaluateMonetaryPolicyStrategyEngine,
+  evaluateRiskOnRiskOffTradingEngine,
+} from './fundamental-trading-engines';
+import {
+  evaluateNfpStrategyEngine,
+  evaluateFomcStrategyEngine,
+  evaluateCpiStrategyEngine,
+  evaluateEcbStrategyEngine,
+  evaluateBoeStrategyEngine,
+  evaluateBojStrategyEngine,
+  evaluateRateDecisionTradingEngine,
+  evaluateFlashNewsTradingEngine,
+  evaluateVolatilitySpikeTradingEngine,
+  evaluateNewsFadeStrategyEngine,
+} from './news-trading-engines';
+import {
+  evaluateCurrencyCorrelationTradingEngine,
+  evaluateGoldForexCorrelationEngine,
+  evaluateOilCadCorrelationEngine,
+  evaluateBondYieldCorrelationEngine,
+  evaluateDollarIndexDxyStrategyEngine,
+  evaluateRiskSentimentCorrelationEngine,
+  evaluateEquityForexCorrelationEngine,
+} from './correlation-intermarket-engines';
+import {
+  evaluateAtrBreakoutEngine,
+  evaluateVolatilityCompressionEngine,
+  evaluateVolatilityExpansionEngine,
+  evaluateVolatilityBollingerSqueezeEngine,
+  evaluateImpliedVolatilityTradingEngine,
+  evaluateNewsVolatilityStrategyEngine,
+} from './volatility-based-engines';
+import {
+  evaluateDirectHedgeEngine,
+  evaluateMultipleCurrencyHedgeEngine,
+  evaluateCorrelationHedgeEngine,
+  evaluateOptionsHedgeEngine,
+  evaluateSyntheticHedgeEngine,
+  evaluatePartialHedgeEngine,
+} from './hedging-strategies-engines';
+import {
+  evaluateTriangularArbitrageEngine,
+  evaluateLatencyArbitrageEngine,
+  evaluateCrossBrokerArbitrageEngine,
+  evaluateInterestArbitrageEngine,
+  evaluateSwapArbitrageEngine,
+} from './arbitrage-strategies-engines';
+import {
+  evaluateAsianSessionStrategyEngine,
+  evaluateLondonSessionStrategyEngine,
+  evaluateNewYorkSessionStrategyEngine,
+  evaluateLondonNewYorkOverlapEngine,
+  evaluateTokyoBreakoutEngine,
+  evaluateSessionMomentumEngine,
+  evaluateSessionReversalEngine,
+} from './session-based-strategies-engines';
+import {
+  evaluateTrianglePatternsEngine,
+  evaluateWedgePatternsEngine,
+  evaluateFlagPatternsEngine,
+  evaluatePennantPatternsEngine,
+  evaluateCupAndHandleEngine,
+  evaluateHarmonicPatternsEngine,
+  evaluateButterflyPatternEngine,
+  evaluateBatPatternEngine,
+  evaluateCrabPatternEngine,
+  evaluateGartleyPatternEngine,
+  evaluateCypherPatternEngine,
+} from './pattern-trading-strategies-engines';
+import {
+  evaluateDojiEngine,
+  evaluateMorningStarEngine,
+  evaluateEveningStarEngine,
+  evaluateHammerEngine,
+  evaluateShootingStarEngine,
+  evaluateHaramiEngine,
+  evaluateTweezerTopBottomEngine,
+  evaluateThreeSoldiersEngine,
+  evaluateThreeCrowsEngine,
+} from './candlestick-trading-strategies-engines';
+import {
+  evaluateFixedLotStrategyEngine,
+  evaluatePercentageRiskModelEngine,
+  evaluateKellyCriterionEngine,
+  evaluateVolatilityPositionSizingEngine,
+  evaluateDynamicRiskAllocationEngine,
+  evaluateEquityCurveManagementEngine,
+  evaluatePortfolioRiskBalancingEngine,
+  evaluateDrawdownProtectionEngine,
+  evaluateDailyLossLimitStrategyEngine,
+} from './risk-management-strategies-engines';
+import {
+  evaluateWyckoffTradingEngine,
+  evaluateMarketProfileTradingEngine,
+  evaluateVolumeProfileTradingEngine,
+  evaluateAuctionMarketTheoryEngine,
+  evaluateOrderBookTradingEngine,
+  evaluateFootprintChartsEngine,
+  evaluateLiquidityEngineeringEngine,
+  evaluateQuantMacroTradingEngine,
+  evaluateStatisticalModelingEngine,
+  evaluateAiPredictiveTradingEngine,
+  evaluateNeuralForecastingEngine,
+  evaluateInstitutionalFlowAnalysisEngine,
+  evaluateDarkPoolAnalysisEngine,
+  evaluateSentimentEngineTradingEngine,
+  evaluateCrossAssetFlowTradingEngine,
+} from './advanced-professional-institutional-engines';
+import {
+  evaluateTrendMomentumEngine,
+  evaluateSmcPriceActionEngine,
+  evaluateFundamentalTechnicalEngine,
+  evaluateAiTechnicalAnalysisEngine,
+  evaluateNewsLiquidityEngine,
+  evaluateScalpingOrderFlowEngine,
+  evaluateSwingMacroAnalysisEngine,
+} from './hybrid-strategies-engines';
+import {
+  evaluateMacroTrendTradingEngine,
+  evaluateFundamentalPositionTradingEngine,
+  evaluateCarryTradeStrategyEngine,
+  evaluateLongTermTrendFollowingEngine,
+  evaluateEconomicCycleTradingEngine,
+  evaluateCentralBankPolicyTradingEngine,
+  evaluateInterestRateDifferentialStrategyEngine,
+  evaluateInflationBasedPositionTradingEngine,
+  evaluateCommodityCurrencyPositionTradingEngine,
+} from './position-trading-engines';
 
 const DEFAULTS = {
   symbol: 'EURUSD',
@@ -386,6 +685,92 @@ export const evaluateLondonBreakoutEngine: StrategyEngine = (candles, config, co
   });
 };
 
+export const evaluateNewYorkBreakoutEngine: StrategyEngine = (candles, config, context) => {
+  const lookback = Math.max(15, parseNumber(config.lookback, 30));
+  const bufferPct = parseNumber(config.bufferPct, 0.04);
+  const expansionRatio = parseNumber(config.expansionRatio, 1.1);
+  const window = candles.slice(-lookback);
+  const sliceStart = Math.max(1, Math.floor(window.length / 3));
+  const sliceEnd = Math.max(sliceStart + 2, Math.floor((window.length * 2) / 3));
+  const preNyWindow = window.slice(sliceStart, sliceEnd);
+  const nyWindow = window.slice(sliceEnd);
+  const sessionHigh = Math.max(...preNyWindow.map((item) => item.high));
+  const sessionLow = Math.min(...preNyWindow.map((item) => item.low));
+  const sessionRange = Math.max(sessionHigh - sessionLow, 0.00001);
+  const last = candles[candles.length - 1]!;
+  const buffer = last.close * (bufferPct / 100);
+  const preNyAvgRange = averageCandleRange(preNyWindow);
+  const nyAvgRange = nyWindow.length ? averageCandleRange(nyWindow) : averageCandleRange(window.slice(-3));
+  const nyExpanding = preNyAvgRange > 0 && nyAvgRange / preNyAvgRange >= expansionRatio;
+  const lastRange = last.high - last.low;
+  const displacementBar = preNyAvgRange > 0 && lastRange >= preNyAvgRange * expansionRatio;
+
+  let bias: 'bullish' | 'bearish' | 'neutral' = 'neutral';
+  let decision: 'buy' | 'sell' | 'wait' = 'wait';
+  const brokeUp = last.close > sessionHigh + buffer;
+  const brokeDown = last.close < sessionLow - buffer;
+
+  if (last.close > sessionHigh - buffer) {
+    bias = 'bullish';
+    if (brokeUp && (nyExpanding || displacementBar)) decision = 'buy';
+    else if (brokeUp) decision = 'buy';
+  } else if (last.close < sessionLow + buffer) {
+    bias = 'bearish';
+    if (brokeDown && (nyExpanding || displacementBar)) decision = 'sell';
+    else if (brokeDown) decision = 'sell';
+  }
+
+  const compressionPct = window.length > 0
+    ? Number(((sessionRange / Math.max(averageCandleRange(window), 0.00001)) * 100).toFixed(1))
+    : 0;
+
+  return buildEvaluationResult({
+    strategyId: 'new-york-breakout',
+    context,
+    config: { ...config, lookback, bufferPct, expansionRatio },
+    candles,
+    decision,
+    bias,
+    confidence: 36
+      + (decision !== 'wait' ? 32 : 8)
+      + (nyExpanding ? 10 : 0)
+      + (displacementBar ? 8 : 0)
+      + Math.min(12, (nyAvgRange / Math.max(preNyAvgRange, 0.00001)) * 4),
+    reasons: [
+      `New York breakout — pre-NY box from middle third (bars ${sliceStart}-${sliceEnd}) of ${lookback}-bar window`,
+      `Consolidation high ${sessionHigh.toFixed(5)} / low ${sessionLow.toFixed(5)} · range ${sessionRange.toFixed(5)}`,
+      nyExpanding
+        ? `NY-window volatility expanding ${(nyAvgRange / Math.max(preNyAvgRange, 0.00001)).toFixed(2)}x vs pre-NY consolidation`
+        : 'NY-window expansion muted — breakout lacks volatility confirmation',
+      decision === 'buy'
+        ? 'Close broke above pre-NY high with institutional buffer'
+        : decision === 'sell'
+          ? 'Close broke below pre-NY low with institutional buffer'
+          : brokeUp || brokeDown
+            ? 'Break outside box but awaiting stronger NY expansion confirmation'
+            : 'Price inside pre-NY range — no New York breakout',
+    ],
+    metrics: {
+      sessionHigh: Number(sessionHigh.toFixed(5)),
+      sessionLow: Number(sessionLow.toFixed(5)),
+      sessionRange: Number(sessionRange.toFixed(5)),
+      preNyBars: preNyWindow.length,
+      nyBars: nyWindow.length,
+      compressionPct,
+      nyExpansion: Number((nyAvgRange / Math.max(preNyAvgRange, 0.00001)).toFixed(2)),
+      displacementBar: displacementBar ? 'yes' : 'no',
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: decision === 'buy' ? 'ny breakout long' : 'ny breakout short',
+        detail: `Break of pre-NY ${decision === 'buy' ? 'high' : 'low'} ${decision === 'buy' ? sessionHigh.toFixed(5) : sessionLow.toFixed(5)}`,
+        tone: decision === 'buy' ? 'emerald' as const : 'rose' as const,
+        barIndex: last.candleIndex,
+      }]
+      : [],
+  });
+};
+
 export const evaluateBollingerSqueezeEngine: StrategyEngine = (candles, config, context) => {
   const period = Math.max(10, parseNumber(config.period, 20));
   const stdDev = parseNumber(config.stdDev, 2);
@@ -673,6 +1058,624 @@ export const evaluateOpeningRangeBreakoutEngine: StrategyEngine = (candles, conf
       orbLow: Number(orbLow.toFixed(5)),
       orbBars: orbWindow.length,
     },
+  });
+};
+
+function evaluatePriorExtremeBreakoutEngine(
+  strategyId: string,
+  candles: StrategyPriceCandle[],
+  config: Record<string, unknown>,
+  context: StrategyEngineContext,
+  defaults: { lookback: number; minLookback: number; bufferPct: number; periodLabel: string },
+): StrategyEvaluationResult {
+  const lookback = Math.max(defaults.minLookback, parseNumber(config.lookback, defaults.lookback));
+  const bufferPct = parseNumber(config.bufferPct, defaults.bufferPct);
+  const priorWindow = candles.slice(-lookback - 1, -1);
+  const rangeHigh = priorWindow.length ? Math.max(...priorWindow.map((item) => item.high)) : 0;
+  const rangeLow = priorWindow.length ? Math.min(...priorWindow.map((item) => item.low)) : 0;
+  const last = candles[candles.length - 1]!;
+  const buffer = last.close * (bufferPct / 100);
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  if (last.close > rangeHigh - buffer) {
+    bias = 'bullish';
+    if (last.close > rangeHigh + buffer) decision = 'buy';
+  } else if (last.close < rangeLow + buffer) {
+    bias = 'bearish';
+    if (last.close < rangeLow - buffer) decision = 'sell';
+  }
+
+  return buildEvaluationResult({
+    strategyId,
+    context,
+    config: { ...config, lookback, bufferPct },
+    candles,
+    decision,
+    bias,
+    confidence: 38 + (decision !== 'wait' ? 34 : 6),
+    reasons: [
+      `${defaults.periodLabel} high/low breakout over prior ${priorWindow.length} bars (excluding latest)`,
+      `Range high ${rangeHigh.toFixed(5)} / low ${rangeLow.toFixed(5)}`,
+      decision === 'buy'
+        ? `Close confirmed above ${defaults.periodLabel.toLowerCase()} high with buffer`
+        : decision === 'sell'
+          ? `Close confirmed below ${defaults.periodLabel.toLowerCase()} low with buffer`
+          : `Price inside ${defaults.periodLabel.toLowerCase()} range — no breakout`,
+    ],
+    metrics: {
+      rangeHigh: Number(rangeHigh.toFixed(5)),
+      rangeLow: Number(rangeLow.toFixed(5)),
+      range: Number((rangeHigh - rangeLow).toFixed(5)),
+      priorBars: priorWindow.length,
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: decision === 'buy' ? `${defaults.periodLabel.toLowerCase()} breakout long` : `${defaults.periodLabel.toLowerCase()} breakout short`,
+        detail: `Break of ${decision === 'buy' ? 'high' : 'low'} ${decision === 'buy' ? rangeHigh.toFixed(5) : rangeLow.toFixed(5)}`,
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: last.candleIndex,
+      }]
+      : [],
+  });
+}
+
+export const evaluateDailyHighLowBreakoutEngine: StrategyEngine = (candles, config, context) =>
+  evaluatePriorExtremeBreakoutEngine('daily-high-low-breakout', candles, config, context, {
+    lookback: 24,
+    minLookback: 12,
+    bufferPct: 0.04,
+    periodLabel: 'Daily',
+  });
+
+export const evaluateWeeklyBreakoutEngine: StrategyEngine = (candles, config, context) =>
+  evaluatePriorExtremeBreakoutEngine('weekly-breakout', candles, config, context, {
+    lookback: 100,
+    minLookback: 40,
+    bufferPct: 0.05,
+    periodLabel: 'Weekly',
+  });
+
+export const evaluateTriangleBreakoutEngine: StrategyEngine = (candles, config, context) => {
+  const lookback = Math.max(24, parseNumber(config.lookback, 45));
+  const bufferPct = parseNumber(config.bufferPct, 0.03);
+  const window = candles.slice(-lookback);
+  const third = Math.max(3, Math.floor(window.length / 3));
+  const early = window.slice(0, third);
+  const mid = window.slice(third, third * 2);
+  const late = window.slice(third * 2, -1);
+  const patternWindow = late.length >= 3 ? late : window.slice(-Math.max(3, Math.floor(window.length / 4)), -1);
+  const earlyHigh = Math.max(...early.map((item) => item.high));
+  const midHigh = Math.max(...mid.map((item) => item.high));
+  const lateHigh = patternWindow.length ? Math.max(...patternWindow.map((item) => item.high)) : midHigh;
+  const earlyLow = Math.min(...early.map((item) => item.low));
+  const midLow = Math.min(...mid.map((item) => item.low));
+  const lateLow = patternWindow.length ? Math.min(...patternWindow.map((item) => item.low)) : midLow;
+  const convergingHighs = earlyHigh > midHigh && midHigh >= lateHigh * 0.998;
+  const convergingLows = earlyLow < midLow && midLow <= lateLow * 1.002;
+  const symmetrical = convergingHighs && convergingLows;
+  const ascending = convergingLows && !convergingHighs && Math.abs(earlyHigh - lateHigh) / Math.max(earlyHigh, 0.00001) < 0.004;
+  const descending = convergingHighs && !convergingLows && Math.abs(earlyLow - lateLow) / Math.max(earlyLow, 0.00001) < 0.004;
+  const patternKind = symmetrical ? 'symmetrical' : ascending ? 'ascending' : descending ? 'descending' : 'unconfirmed';
+  const apexHigh = Math.max(lateHigh, midHigh);
+  const apexLow = Math.min(lateLow, midLow);
+  const last = candles[candles.length - 1]!;
+  const buffer = last.close * (bufferPct / 100);
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  const patternValid = symmetrical || ascending || descending;
+  if (patternValid && last.close > apexHigh - buffer) {
+    bias = 'bullish';
+    if (last.close > apexHigh + buffer) decision = 'buy';
+  } else if (patternValid && last.close < apexLow + buffer) {
+    bias = 'bearish';
+    if (last.close < apexLow - buffer) decision = 'sell';
+  }
+
+  return buildEvaluationResult({
+    strategyId: 'triangle-breakout',
+    context,
+    config: { ...config, lookback, bufferPct },
+    candles,
+    decision,
+    bias,
+    confidence: 30 + (patternValid ? 14 : 0) + (decision !== 'wait' ? 32 : 6),
+    reasons: [
+      `Triangle pattern scan over ${lookback} bars (${patternKind})`,
+      patternValid
+        ? `Converging structure — apex high ${apexHigh.toFixed(5)} / low ${apexLow.toFixed(5)}`
+        : 'No converging triangle structure detected in lookback window',
+      decision === 'buy'
+        ? 'Close confirmed above triangle apex high'
+        : decision === 'sell'
+          ? 'Close confirmed below triangle apex low'
+          : patternValid
+            ? 'Pattern staged — awaiting apex breakout confirmation'
+            : 'No triangle breakout signal',
+    ],
+    metrics: {
+      patternKind,
+      apexHigh: Number(apexHigh.toFixed(5)),
+      apexLow: Number(apexLow.toFixed(5)),
+      convergingHighs: convergingHighs ? 'yes' : 'no',
+      convergingLows: convergingLows ? 'yes' : 'no',
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: `${patternKind} triangle breakout`,
+        detail: decision === 'buy' ? 'Break above apex high' : 'Break below apex low',
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: last.candleIndex,
+      }]
+      : [],
+  });
+};
+
+export const evaluateRectangleBreakoutEngine: StrategyEngine = (candles, config, context) => {
+  const lookback = Math.max(15, parseNumber(config.lookback, 30));
+  const bufferPct = parseNumber(config.bufferPct, 0.03);
+  const flatnessPct = parseNumber(config.flatnessPct, 18);
+  const window = candles.slice(-lookback, -1);
+  const rangeHigh = Math.max(...window.map((item) => item.high));
+  const rangeLow = Math.min(...window.map((item) => item.low));
+  const rangeSize = Math.max(rangeHigh - rangeLow, 0.00001);
+  const highSpread = Math.max(...window.map((item) => item.high)) - Math.min(...window.map((item) => item.high));
+  const lowSpread = Math.max(...window.map((item) => item.low)) - Math.min(...window.map((item) => item.low));
+  const flatTop = (highSpread / rangeSize) * 100 <= flatnessPct;
+  const flatBottom = (lowSpread / rangeSize) * 100 <= flatnessPct;
+  const isRectangle = flatTop && flatBottom;
+  const last = candles[candles.length - 1]!;
+  const buffer = last.close * (bufferPct / 100);
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  if (isRectangle && last.close > rangeHigh + buffer) {
+    bias = 'bullish';
+    decision = 'buy';
+  } else if (isRectangle && last.close < rangeLow - buffer) {
+    bias = 'bearish';
+    decision = 'sell';
+  } else if (isRectangle && last.close > rangeHigh - buffer) {
+    bias = 'bullish';
+  } else if (isRectangle && last.close < rangeLow + buffer) {
+    bias = 'bearish';
+  }
+
+  return buildEvaluationResult({
+    strategyId: 'rectangle-breakout',
+    context,
+    config: { ...config, lookback, bufferPct, flatnessPct },
+    candles,
+    decision,
+    bias,
+    confidence: 32 + (isRectangle ? 12 : 0) + (decision !== 'wait' ? 34 : 4),
+    reasons: [
+      `Rectangle range scan over ${window.length} bars (flatness threshold ${flatnessPct}%)`,
+      isRectangle
+        ? `Flat box high ${rangeHigh.toFixed(5)} / low ${rangeLow.toFixed(5)} · width ${rangeSize.toFixed(5)}`
+        : `Range not flat enough — top spread ${((highSpread / rangeSize) * 100).toFixed(1)}% / bottom ${((lowSpread / rangeSize) * 100).toFixed(1)}%`,
+      decision === 'buy'
+        ? 'Close confirmed above rectangle high'
+        : decision === 'sell'
+          ? 'Close confirmed below rectangle low'
+          : isRectangle
+            ? 'Rectangle formed — awaiting boundary breakout'
+            : 'No rectangle breakout setup',
+    ],
+    metrics: {
+      rangeHigh: Number(rangeHigh.toFixed(5)),
+      rangeLow: Number(rangeLow.toFixed(5)),
+      rangeSize: Number(rangeSize.toFixed(5)),
+      flatTop: flatTop ? 'yes' : 'no',
+      flatBottom: flatBottom ? 'yes' : 'no',
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: 'rectangle breakout',
+        detail: decision === 'buy' ? 'Upside break of flat range' : 'Downside break of flat range',
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: last.candleIndex,
+      }]
+      : [],
+  });
+};
+
+export const evaluateVolatilityBreakoutEngine: StrategyEngine = (candles, config, context) => {
+  const atrPeriod = Math.max(7, parseNumber(config.atrPeriod, 14));
+  const compressionRatio = parseNumber(config.compressionRatio, 0.75);
+  const expansionMultiple = parseNumber(config.expansionMultiple, 1.4);
+  const atrSeries = atr(candles, atrPeriod);
+  const lastIndex = candles.length - 1;
+  const last = candles[lastIndex]!;
+  const baseline = candles.slice(Math.max(0, lastIndex - atrPeriod * 2), lastIndex);
+  const baselineAvgRange = averageCandleRange(baseline);
+  const recent = candles.slice(Math.max(0, lastIndex - 5), lastIndex);
+  const recentAvgRange = averageCandleRange(recent);
+  const atrNow = atrSeries[lastIndex] ?? baselineAvgRange;
+  const compressed = baselineAvgRange > 0 && recentAvgRange / baselineAvgRange <= compressionRatio;
+  const lastRange = last.high - last.low;
+  const expanding = atrNow > 0 && lastRange >= atrNow * expansionMultiple;
+  const bullishBar = last.close > last.open && last.close >= last.low + lastRange * 0.65;
+  const bearishBar = last.close < last.open && last.close <= last.high - lastRange * 0.65;
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  if (compressed && expanding && bullishBar) {
+    bias = 'bullish';
+    decision = 'buy';
+  } else if (compressed && expanding && bearishBar) {
+    bias = 'bearish';
+    decision = 'sell';
+  } else if (expanding && bullishBar) {
+    bias = 'bullish';
+  } else if (expanding && bearishBar) {
+    bias = 'bearish';
+  }
+
+  return buildEvaluationResult({
+    strategyId: 'volatility-breakout',
+    context,
+    config: { ...config, atrPeriod, compressionRatio, expansionMultiple },
+    candles,
+    decision,
+    bias,
+    confidence: 30 + (compressed ? 12 : 0) + (expanding ? 14 : 0) + (decision !== 'wait' ? 28 : 0),
+    reasons: [
+      `Volatility breakout — ATR(${atrPeriod}) compression → expansion model`,
+      compressed
+        ? `Recent range compressed to ${((recentAvgRange / Math.max(baselineAvgRange, 0.00001)) * 100).toFixed(0)}% of baseline`
+        : 'No clear compression phase in recent window',
+      expanding
+        ? `Latest bar range ${lastRange.toFixed(5)} expands ${(lastRange / Math.max(atrNow, 0.00001)).toFixed(2)}× ATR`
+        : `Latest bar not expanding beyond ${expansionMultiple}× ATR threshold`,
+      decision === 'buy'
+        ? 'Bullish expansion bar closing near high'
+        : decision === 'sell'
+          ? 'Bearish expansion bar closing near low'
+          : 'Awaiting volatility expansion breakout',
+    ],
+    metrics: {
+      atr: atrNow != null ? Number(atrNow.toFixed(5)) : null,
+      lastRange: Number(lastRange.toFixed(5)),
+      expansionAtrMultiple: Number((lastRange / Math.max(atrNow, 0.00001)).toFixed(2)),
+      compressionPct: Number(((recentAvgRange / Math.max(baselineAvgRange, 0.00001)) * 100).toFixed(1)),
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: 'volatility expansion',
+        detail: decision === 'buy' ? 'Bullish ATR expansion breakout' : 'Bearish ATR expansion breakout',
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: last.candleIndex,
+      }]
+      : [],
+  });
+};
+
+export const evaluateNewsBreakoutEngine: StrategyEngine = (candles, config, context) => {
+  const quietBars = Math.max(6, parseNumber(config.quietBars, 12));
+  const impulseRatio = parseNumber(config.impulseRatio, 2.2);
+  const lastIndex = candles.length - 1;
+  const last = candles[lastIndex]!;
+  const quietWindow = candles.slice(Math.max(0, lastIndex - quietBars), lastIndex);
+  const quietAvgRange = averageCandleRange(quietWindow);
+  const lastRange = last.high - last.low;
+  const impulse = quietAvgRange > 0 && lastRange >= quietAvgRange * impulseRatio;
+  const bullishImpulse = impulse && last.close > last.open && last.close >= last.low + lastRange * 0.7;
+  const bearishImpulse = impulse && last.close < last.open && last.close <= last.high - lastRange * 0.7;
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  if (bullishImpulse) {
+    bias = 'bullish';
+    decision = 'buy';
+  } else if (bearishImpulse) {
+    bias = 'bearish';
+    decision = 'sell';
+  } else if (impulse && last.close > last.open) {
+    bias = 'bullish';
+  } else if (impulse && last.close < last.open) {
+    bias = 'bearish';
+  }
+
+  return buildEvaluationResult({
+    strategyId: 'news-breakout',
+    context,
+    config: { ...config, quietBars, impulseRatio },
+    candles,
+    decision,
+    bias,
+    confidence: 28 + (quietAvgRange > 0 ? 10 : 0) + (impulse ? 18 : 0) + (decision !== 'wait' ? 30 : 0),
+    reasons: [
+      `News-style impulse breakout after ${quietWindow.length}-bar quiet baseline`,
+      quietAvgRange > 0
+        ? `Quiet average range ${quietAvgRange.toFixed(5)} vs impulse bar ${lastRange.toFixed(5)} (${(lastRange / quietAvgRange).toFixed(2)}×)`
+        : 'Quiet baseline unavailable',
+      decision === 'buy'
+        ? 'Bullish displacement bar — event expansion long'
+        : decision === 'sell'
+          ? 'Bearish displacement bar — event expansion short'
+          : impulse
+            ? 'Impulse detected but close location not decisive'
+            : 'No news-style displacement on latest bar',
+    ],
+    metrics: {
+      quietAvgRange: Number(quietAvgRange.toFixed(5)),
+      impulseRange: Number(lastRange.toFixed(5)),
+      impulseMultiple: Number((lastRange / Math.max(quietAvgRange, 0.00001)).toFixed(2)),
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: 'news impulse',
+        detail: decision === 'buy' ? 'Bullish event displacement' : 'Bearish event displacement',
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: last.candleIndex,
+      }]
+      : [],
+  });
+};
+
+export const evaluateRangeExpansionBreakoutEngine: StrategyEngine = (candles, config, context) => {
+  const baselineBars = Math.max(10, parseNumber(config.baselineBars, 20));
+  const expansionRatio = parseNumber(config.expansionRatio, 1.35);
+  const bufferPct = parseNumber(config.bufferPct, 0.03);
+  const lastIndex = candles.length - 1;
+  const last = candles[lastIndex]!;
+  const baseline = candles.slice(Math.max(0, lastIndex - baselineBars - 3), lastIndex - 3);
+  const recent = candles.slice(Math.max(0, lastIndex - 3), lastIndex);
+  const baselineAvg = averageCandleRange(baseline);
+  const recentAvg = averageCandleRange(recent.length ? recent : [last]);
+  const expanding = baselineAvg > 0 && recentAvg / baselineAvg >= expansionRatio;
+  const recentHigh = recent.length ? Math.max(...recent.map((item) => item.high)) : last.high;
+  const recentLow = recent.length ? Math.min(...recent.map((item) => item.low)) : last.low;
+  const buffer = last.close * (bufferPct / 100);
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  if (expanding && last.close > recentHigh - buffer) {
+    bias = 'bullish';
+    if (last.close > recentHigh + buffer) decision = 'buy';
+  } else if (expanding && last.close < recentLow + buffer) {
+    bias = 'bearish';
+    if (last.close < recentLow - buffer) decision = 'sell';
+  }
+
+  return buildEvaluationResult({
+    strategyId: 'range-expansion-breakout',
+    context,
+    config: { ...config, baselineBars, expansionRatio, bufferPct },
+    candles,
+    decision,
+    bias,
+    confidence: 32 + (expanding ? 16 : 0) + (decision !== 'wait' ? 32 : 6),
+    reasons: [
+      `Range expansion breakout — baseline ${baseline.length} bars vs recent ${recent.length || 1} bars`,
+      expanding
+        ? `Recent range expanded ${(recentAvg / Math.max(baselineAvg, 0.00001)).toFixed(2)}× vs baseline (threshold ${expansionRatio}×)`
+        : `Expansion ratio ${(recentAvg / Math.max(baselineAvg, 0.00001)).toFixed(2)}× below ${expansionRatio}× threshold`,
+      decision === 'buy'
+        ? 'Close confirmed above expansion window high'
+        : decision === 'sell'
+          ? 'Close confirmed below expansion window low'
+          : expanding
+            ? 'Expansion active — awaiting directional close beyond window'
+            : 'No range expansion breakout',
+    ],
+    metrics: {
+      baselineAvgRange: Number(baselineAvg.toFixed(5)),
+      recentAvgRange: Number(recentAvg.toFixed(5)),
+      expansionMultiple: Number((recentAvg / Math.max(baselineAvg, 0.00001)).toFixed(2)),
+      windowHigh: Number(recentHigh.toFixed(5)),
+      windowLow: Number(recentLow.toFixed(5)),
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: 'range expansion',
+        detail: decision === 'buy' ? 'Upside range expansion breakout' : 'Downside range expansion breakout',
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: last.candleIndex,
+      }]
+      : [],
+  });
+};
+
+export const evaluateLiquidityBreakoutEngine: StrategyEngine = (candles, config, context) => {
+  const lookback = Math.max(15, parseNumber(config.lookback, 30));
+  const bufferPct = parseNumber(config.bufferPct, 0.02);
+  const window = candles.slice(-lookback - 1, -1);
+  const poolHigh = Math.max(...window.map((item) => item.high));
+  const poolLow = Math.min(...window.map((item) => item.low));
+  const last = candles[candles.length - 1]!;
+  const buffer = last.close * (bufferPct / 100);
+  const bullishContinuation = last.high > poolHigh + buffer && last.close > poolHigh + buffer;
+  const bearishContinuation = last.low < poolLow - buffer && last.close < poolLow - buffer;
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  if (bullishContinuation) {
+    bias = 'bullish';
+    decision = 'buy';
+  } else if (bearishContinuation) {
+    bias = 'bearish';
+    decision = 'sell';
+  } else if (last.close > poolHigh - buffer) {
+    bias = 'bullish';
+  } else if (last.close < poolLow + buffer) {
+    bias = 'bearish';
+  }
+
+  return buildEvaluationResult({
+    strategyId: 'liquidity-breakout',
+    context,
+    config: { ...config, lookback, bufferPct },
+    candles,
+    decision,
+    bias,
+    confidence: 34 + (decision !== 'wait' ? 36 : 6),
+    reasons: [
+      `Liquidity pool breakout over ${lookback}-bar lookback`,
+      `Pool high ${poolHigh.toFixed(5)} / low ${poolLow.toFixed(5)}`,
+      bullishContinuation
+        ? 'Buy-side liquidity swept with continuation close above pool high'
+        : bearishContinuation
+          ? 'Sell-side liquidity swept with continuation close below pool low'
+          : 'No liquidity continuation breakout on latest bar',
+    ],
+    metrics: {
+      poolHigh: Number(poolHigh.toFixed(5)),
+      poolLow: Number(poolLow.toFixed(5)),
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: 'liquidity continuation',
+        detail: decision === 'buy' ? 'Continuation above liquidity pool' : 'Continuation below liquidity pool',
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: last.candleIndex,
+      }]
+      : [],
+  });
+};
+
+export const evaluateFakeBreakoutReversalEngine: StrategyEngine = (candles, config, context) => {
+  const lookback = Math.max(15, parseNumber(config.lookback, 30));
+  const bufferPct = parseNumber(config.bufferPct, 0.02);
+  const window = candles.slice(-lookback - 2, -2);
+  const rangeHigh = Math.max(...window.map((item) => item.high));
+  const rangeLow = Math.min(...window.map((item) => item.low));
+  const trapBar = candles[candles.length - 2];
+  const confirmBar = candles[candles.length - 1]!;
+  if (!trapBar) {
+    return buildEvaluationResult({
+      strategyId: 'fake-breakout-reversal',
+      context,
+      config: { ...config, lookback, bufferPct },
+      candles,
+      decision: 'wait',
+      bias: 'neutral',
+      confidence: 20,
+      reasons: ['Insufficient bars for fake breakout trap detection'],
+      metrics: {},
+    });
+  }
+  const buffer = confirmBar.close * (bufferPct / 100);
+  const bearTrap = trapBar.high > rangeHigh + buffer && trapBar.close < rangeHigh;
+  const bullTrap = trapBar.low < rangeLow - buffer && trapBar.close > rangeLow;
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  if (bearTrap && confirmBar.close < rangeHigh - buffer && confirmBar.close < confirmBar.open) {
+    bias = 'bearish';
+    decision = 'sell';
+  } else if (bullTrap && confirmBar.close > rangeLow + buffer && confirmBar.close > confirmBar.open) {
+    bias = 'bullish';
+    decision = 'buy';
+  } else if (bearTrap) {
+    bias = 'bearish';
+  } else if (bullTrap) {
+    bias = 'bullish';
+  }
+
+  return buildEvaluationResult({
+    strategyId: 'fake-breakout-reversal',
+    context,
+    config: { ...config, lookback, bufferPct },
+    candles,
+    decision,
+    bias,
+    confidence: 30 + ((bearTrap || bullTrap) ? 16 : 0) + (decision !== 'wait' ? 32 : 0),
+    reasons: [
+      `Fake breakout reversal — ${lookback}-bar range trap detection`,
+      `Range high ${rangeHigh.toFixed(5)} / low ${rangeLow.toFixed(5)}`,
+      bearTrap
+        ? 'Bear trap: prior bar swept above range high then closed back inside'
+        : bullTrap
+          ? 'Bull trap: prior bar swept below range low then closed back inside'
+          : 'No trap wick on prior bar',
+      decision === 'sell'
+        ? 'Fade confirmed — bearish reversal after bull trap'
+        : decision === 'buy'
+          ? 'Fade confirmed — bullish reversal after bear trap'
+          : (bearTrap || bullTrap)
+            ? 'Trap detected — awaiting confirmation close'
+            : 'No fake breakout reversal signal',
+    ],
+    metrics: {
+      rangeHigh: Number(rangeHigh.toFixed(5)),
+      rangeLow: Number(rangeLow.toFixed(5)),
+      bearTrap: bearTrap ? 'yes' : 'no',
+      bullTrap: bullTrap ? 'yes' : 'no',
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: 'fake breakout fade',
+        detail: decision === 'buy' ? 'Fade bull trap — long reversal' : 'Fade bear trap — short reversal',
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: confirmBar.candleIndex,
+      }]
+      : [],
+  });
+};
+
+export const evaluateConsolidationBreakoutEngine: StrategyEngine = (candles, config, context) => {
+  const lookback = Math.max(18, parseNumber(config.lookback, 36));
+  const bufferPct = parseNumber(config.bufferPct, 0.04);
+  const compressionRatio = parseNumber(config.compressionRatio, 0.7);
+  const expansionRatio = parseNumber(config.expansionRatio, 1.15);
+  const window = candles.slice(-lookback);
+  const sliceStart = Math.max(1, Math.floor(window.length / 3));
+  const sliceEnd = Math.max(sliceStart + 2, Math.floor((window.length * 2) / 3));
+  const consolidation = window.slice(sliceStart, sliceEnd);
+  const postWindow = window.slice(sliceEnd);
+  const boxHigh = Math.max(...consolidation.map((item) => item.high));
+  const boxLow = Math.min(...consolidation.map((item) => item.low));
+  const fullAvgRange = averageCandleRange(window);
+  const boxAvgRange = averageCandleRange(consolidation);
+  const postAvgRange = postWindow.length ? averageCandleRange(postWindow) : averageCandleRange(window.slice(-3));
+  const compressed = fullAvgRange > 0 && boxAvgRange / fullAvgRange <= compressionRatio;
+  const expanding = boxAvgRange > 0 && postAvgRange / boxAvgRange >= expansionRatio;
+  const last = candles[candles.length - 1]!;
+  const buffer = last.close * (bufferPct / 100);
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  const brokeUp = last.close > boxHigh + buffer;
+  const brokeDown = last.close < boxLow - buffer;
+  if (last.close > boxHigh - buffer) {
+    bias = 'bullish';
+    if (compressed && brokeUp && (expanding || postAvgRange >= boxAvgRange)) decision = 'buy';
+  } else if (last.close < boxLow + buffer) {
+    bias = 'bearish';
+    if (compressed && brokeDown && (expanding || postAvgRange >= boxAvgRange)) decision = 'sell';
+  }
+
+  return buildEvaluationResult({
+    strategyId: 'consolidation-breakout',
+    context,
+    config: { ...config, lookback, bufferPct, compressionRatio, expansionRatio },
+    candles,
+    decision,
+    bias,
+    confidence: 32 + (compressed ? 12 : 0) + (expanding ? 10 : 0) + (decision !== 'wait' ? 30 : 4),
+    reasons: [
+      `Consolidation breakout — middle-third box (bars ${sliceStart}-${sliceEnd}) of ${lookback}-bar window`,
+      compressed
+        ? `Box compressed to ${((boxAvgRange / Math.max(fullAvgRange, 0.00001)) * 100).toFixed(0)}% of window average range`
+        : 'Consolidation box not sufficiently compressed',
+      `Box high ${boxHigh.toFixed(5)} / low ${boxLow.toFixed(5)}`,
+      expanding
+        ? `Post-consolidation expansion ${(postAvgRange / Math.max(boxAvgRange, 0.00001)).toFixed(2)}× vs box baseline`
+        : 'Expansion confirmation muted',
+      decision === 'buy'
+        ? 'Close broke above consolidation high with expansion'
+        : decision === 'sell'
+          ? 'Close broke below consolidation low with expansion'
+          : 'Inside consolidation or awaiting expansion breakout',
+    ],
+    metrics: {
+      boxHigh: Number(boxHigh.toFixed(5)),
+      boxLow: Number(boxLow.toFixed(5)),
+      compressionPct: Number(((boxAvgRange / Math.max(fullAvgRange, 0.00001)) * 100).toFixed(1)),
+      expansionMultiple: Number((postAvgRange / Math.max(boxAvgRange, 0.00001)).toFixed(2)),
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: 'consolidation breakout',
+        detail: decision === 'buy' ? 'Break above consolidation box' : 'Break below consolidation box',
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: last.candleIndex,
+      }]
+      : [],
   });
 };
 
@@ -1642,6 +2645,549 @@ export const evaluateFibonacciTrendContinuationEngine: StrategyEngine = (candles
   });
 };
 
+function projectChannelLine(startIndex: number, startPrice: number, endIndex: number, endPrice: number, index: number): number {
+  if (endIndex === startIndex) return startPrice;
+  const ratio = (index - startIndex) / (endIndex - startIndex);
+  return startPrice + (endPrice - startPrice) * ratio;
+}
+
+function mapChannelAction(action: ChannelDetection['recommendedAction']): StrategySignalSide {
+  if (action === 'BUY') return 'buy';
+  if (action === 'SELL') return 'sell';
+  return 'wait';
+}
+
+export const evaluateChannelTrendTradingEngine: StrategyEngine = (candles, config, context) => {
+  const minQuality = parseNumber(config.minQuality, 0.36);
+  const boundaryBufferPct = parseNumber(config.boundaryBufferPct, 0.04);
+  const minBreakoutProbability = parseNumber(config.minBreakoutProbability, 0.56);
+  const reconstructed = strategyCandlesToReconstructed(candles);
+  const analysis = analyzeChannels(reconstructed);
+  const lastIndex = candles.length - 1;
+  const last = candles[lastIndex]!;
+  const lastBarIndex = last.candleIndex;
+  const atrSeries = atr(candles, 14);
+  const atrNow = atrSeries[lastIndex] ?? averageCandleRange(candles.slice(-14));
+  const buffer = last.close * (boundaryBufferPct / 100);
+  const range = Math.max(last.high - last.low, 0.00001);
+  const lowerWick = Math.min(last.open, last.close) - last.low;
+  const upperWick = last.high - Math.max(last.open, last.close);
+
+  const channel = analysis.channels.find((item) => item.qualityScore >= minQuality) ?? analysis.channels[0] ?? null;
+  const topPressure = [...analysis.breakoutPressure]
+    .filter((item) => item.boundary === 'upper')
+    .sort((a, b) => b.pressureScore - a.pressureScore)[0] ?? null;
+  const bottomPressure = [...analysis.breakoutPressure]
+    .filter((item) => item.boundary === 'lower')
+    .sort((a, b) => b.pressureScore - a.pressureScore)[0] ?? null;
+
+  const upperBound = channel
+    ? projectChannelLine(channel.startCandleIndex, channel.upperStartPrice, channel.endCandleIndex, channel.upperEndPrice, lastBarIndex)
+    : null;
+  const lowerBound = channel
+    ? projectChannelLine(channel.startCandleIndex, channel.lowerStartPrice, channel.endCandleIndex, channel.lowerEndPrice, lastBarIndex)
+    : null;
+
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  let entrySource = 'none';
+
+  if (channel && upperBound != null && lowerBound != null) {
+    const channelSpan = Math.max(upperBound - lowerBound, 0.00001);
+    const positionInChannel = (last.close - lowerBound) / channelSpan;
+    const nearLower = last.low <= lowerBound + atrNow * 0.35;
+    const nearUpper = last.high >= upperBound - atrNow * 0.35;
+    const brokeUpper = last.close > upperBound + buffer;
+    const brokeLower = last.close < lowerBound - buffer;
+    const bullishRejection = nearLower && last.close > lowerBound && (last.close >= last.open || lowerWick / range >= 0.35);
+    const bearishRejection = nearUpper && last.close < upperBound && (last.close <= last.open || upperWick / range >= 0.35);
+
+    if (channel.liquidityRisk >= 0.74) {
+      entrySource = 'liquidity trap risk elevated';
+    } else if (channel.direction === 'ascending') {
+      bias = 'bullish';
+      if (brokeUpper && channel.breakoutProbability >= minBreakoutProbability) {
+        decision = 'buy';
+        entrySource = 'ascending channel upper breakout';
+      } else if (bullishRejection) {
+        decision = 'buy';
+        entrySource = 'lower boundary rejection in ascending channel';
+      } else if (nearLower && last.close > (lowerBound + upperBound) / 2) {
+        decision = 'buy';
+        entrySource = 'demand-side channel pullback';
+      } else if (brokeLower) {
+        decision = 'sell';
+        entrySource = 'ascending channel failure break';
+        bias = 'bearish';
+      }
+    } else if (channel.direction === 'descending') {
+      bias = 'bearish';
+      if (brokeLower && channel.breakoutProbability >= minBreakoutProbability) {
+        decision = 'sell';
+        entrySource = 'descending channel lower breakout';
+      } else if (bearishRejection) {
+        decision = 'sell';
+        entrySource = 'upper boundary rejection in descending channel';
+      } else if (nearUpper && last.close < (lowerBound + upperBound) / 2) {
+        decision = 'sell';
+        entrySource = 'supply-side channel pullback';
+      } else if (brokeUpper) {
+        decision = 'buy';
+        entrySource = 'descending channel failure break';
+        bias = 'bullish';
+      }
+    } else {
+      bias = positionInChannel > 0.58 ? 'bullish' : positionInChannel < 0.42 ? 'bearish' : 'neutral';
+      if (bullishRejection && positionInChannel <= 0.35) {
+        decision = 'buy';
+        entrySource = 'horizontal channel lower boundary bounce';
+      } else if (bearishRejection && positionInChannel >= 0.65) {
+        decision = 'sell';
+        entrySource = 'horizontal channel upper boundary fade';
+      } else if (brokeUpper && (topPressure?.pressureScore ?? 0) >= 0.5) {
+        decision = 'buy';
+        entrySource = 'horizontal channel upside breakout';
+      } else if (brokeLower && (bottomPressure?.pressureScore ?? 0) >= 0.5) {
+        decision = 'sell';
+        entrySource = 'horizontal channel downside breakout';
+      }
+    }
+
+    if (decision === 'wait') {
+      const mapped = mapChannelAction(channel.recommendedAction);
+      if (mapped !== 'wait' && channel.breakoutProbability >= minBreakoutProbability && channel.liquidityRisk < 0.74) {
+        decision = mapped;
+        entrySource = `institutional channel action ${channel.recommendedAction}`;
+        bias = mapped === 'buy' ? 'bullish' : 'bearish';
+      }
+    }
+  }
+
+  const rejectionScore = decision === 'buy'
+    ? lowerWick / range
+    : decision === 'sell'
+      ? upperWick / range
+      : Math.max(lowerWick, upperWick) / range;
+
+  const events = decision !== 'wait'
+    ? [{
+      label: decision === 'buy' ? 'channel trend long' : 'channel trend short',
+      detail: entrySource,
+      tone: decision === 'buy' ? 'emerald' as const : 'rose' as const,
+      barIndex: lastBarIndex,
+    }]
+    : channel && (nearLowerBoundary(last, lowerBound, atrNow) || nearUpperBoundary(last, upperBound, atrNow))
+      ? [{
+        label: channel.direction === 'ascending' ? 'channel pullback' : channel.direction === 'descending' ? 'channel retest' : 'channel boundary touch',
+        detail: channel.institutionalInterpretation,
+        tone: 'violet' as const,
+        barIndex: lastBarIndex,
+      }]
+      : [];
+
+  return buildEvaluationResult({
+    strategyId: 'channel-trend-trading',
+    context,
+    config: { ...config, minQuality, boundaryBufferPct, minBreakoutProbability },
+    candles,
+    decision,
+    bias,
+    confidence: 28
+      + (channel ? Math.round(channel.qualityScore * 24) : 0)
+      + (decision !== 'wait' ? 22 : 0)
+      + Math.round((channel?.breakoutProbability ?? 0) * 16)
+      + Math.min(14, rejectionScore * 14)
+      + (channel && channel.liquidityRisk >= 0.74 ? -12 : 0),
+    reasons: [
+      'Institutional channel engine: swing parallel + regression corridor + breakout pressure scoring',
+      channel
+        ? `${channel.channelType.replace(/_/g, ' ')} (${channel.direction}) quality ${(channel.qualityScore * 100).toFixed(0)}%`
+        : analysis.summary.explanation,
+      channel
+        ? `Containment ${(channel.containmentScore * 100).toFixed(0)}% · breakout probability ${(channel.breakoutProbability * 100).toFixed(0)}% · liquidity risk ${(channel.liquidityRisk * 100).toFixed(0)}%`
+        : 'No institutional-quality channel detected on latest capture',
+      channel?.institutionalInterpretation ?? 'Awaiting valid parallel channel formation',
+      decision === 'buy'
+        ? `Long channel trend confirmed: ${entrySource}`
+        : decision === 'sell'
+          ? `Short channel trend confirmed: ${entrySource}`
+          : entrySource === 'none'
+            ? 'No qualified boundary retest or breakout on latest bar'
+            : `${entrySource}; standing aside until confirmation improves`,
+    ],
+    metrics: {
+      channelType: channel?.channelType ?? null,
+      channelDirection: channel?.direction ?? null,
+      qualityScore: channel ? Number((channel.qualityScore * 100).toFixed(1)) : null,
+      containmentPct: channel ? Number((channel.containmentScore * 100).toFixed(1)) : null,
+      breakoutProbability: channel ? Number((channel.breakoutProbability * 100).toFixed(1)) : null,
+      liquidityRisk: channel ? Number((channel.liquidityRisk * 100).toFixed(1)) : null,
+      upperBound: upperBound != null ? Number(upperBound.toFixed(5)) : null,
+      lowerBound: lowerBound != null ? Number(lowerBound.toFixed(5)) : null,
+      positionInChannel: channel && upperBound != null && lowerBound != null
+        ? Number((((last.close - lowerBound) / Math.max(upperBound - lowerBound, 0.00001)) * 100).toFixed(1))
+        : null,
+      entrySource,
+      touchCount: channel?.touchCount ?? null,
+      falseBreakCount: channel?.falseBreakCount ?? null,
+    },
+    events,
+  });
+};
+
+function nearLowerBoundary(candle: StrategyPriceCandle, lowerBound: number | null, atrNow: number): boolean {
+  return lowerBound != null && candle.low <= lowerBound + atrNow * 0.35;
+}
+
+function nearUpperBoundary(candle: StrategyPriceCandle, upperBound: number | null, atrNow: number): boolean {
+  return upperBound != null && candle.high >= upperBound - atrNow * 0.35;
+}
+
+export const evaluateTrendAccelerationEngine: StrategyEngine = (candles, config, context) => {
+  const trendPeriod = Math.max(10, parseNumber(config.trendPeriod, 21));
+  const slopeLookback = Math.max(3, parseNumber(config.slopeLookback, 5));
+  const adxPeriod = Math.max(7, parseNumber(config.adxPeriod, 14));
+  const minAdx = parseNumber(config.minAdx, 20);
+  const expansionRatio = parseNumber(config.expansionRatio, 1.15);
+  const closes = candles.map((item) => item.close);
+  const trendEma = ema(closes, trendPeriod);
+  const atrSeries = atr(candles, 14);
+  const { adx: adxSeries, plusDi, minusDi } = adx(candles, adxPeriod);
+  const { histogram } = macd(closes, 12, 26, 9);
+  const lastIndex = candles.length - 1;
+  const last = candles[lastIndex]!;
+  const lb = slopeLookback;
+  const lb2 = Math.min(lastIndex, lb * 2);
+
+  const emaNow = trendEma[lastIndex];
+  const emaLb = trendEma[lastIndex - lb];
+  const emaLb2 = trendEma[lastIndex - lb2];
+  const slopeNow = emaNow != null && emaLb != null && emaLb !== 0
+    ? ((emaNow - emaLb) / emaLb) * 100
+    : 0;
+  const slopePrev = emaLb != null && emaLb2 != null && emaLb2 !== 0
+    ? ((emaLb - emaLb2) / emaLb2) * 100
+    : 0;
+  const slopeAccel = slopeNow - slopePrev;
+
+  const adxNow = adxSeries[lastIndex];
+  const adxPrev = adxSeries[Math.max(0, lastIndex - lb)];
+  const adxRising = adxNow != null && adxPrev != null && adxNow > adxPrev;
+  const adxStrong = adxNow != null && adxNow >= minAdx;
+
+  const histNow = histogram[lastIndex];
+  const histPrev = histogram[lastIndex - lb];
+  const histExpandingBull = histNow != null && histPrev != null && histNow > 0 && histNow > histPrev;
+  const histExpandingBear = histNow != null && histPrev != null && histNow < 0 && histNow < histPrev;
+
+  const recentAvg = averageCandleRange(candles.slice(-lb));
+  const priorAvg = averageCandleRange(candles.slice(-lb2, -lb));
+  const rangeExpanding = priorAvg > 0 && recentAvg / priorAvg >= expansionRatio;
+
+  const atrNow = atrSeries[lastIndex] ?? averageCandleRange(candles.slice(-14));
+  const lastRange = last.high - last.low;
+  const displacementBar = atrNow > 0 && lastRange >= atrNow * 1.2;
+  const closeVelocity = lb > 0 ? (closes[lastIndex] - closes[lastIndex - lb]) / lb : 0;
+
+  const pdi = plusDi[lastIndex];
+  const mdi = minusDi[lastIndex];
+  const bullishTrend = emaNow != null && last.close > emaNow && slopeNow > 0;
+  const bearishTrend = emaNow != null && last.close < emaNow && slopeNow < 0;
+  const bullishAccel = bullishTrend && slopeAccel > 0;
+  const bearishAccel = bearishTrend && slopeAccel < 0;
+  const decelerating = (bullishTrend && slopeAccel <= 0) || (bearishTrend && slopeAccel >= 0);
+
+  const bullishSignals = [
+    bullishAccel,
+    adxRising && adxStrong,
+    pdi != null && mdi != null && pdi > mdi,
+    histExpandingBull,
+    rangeExpanding || displacementBar,
+    closeVelocity > 0,
+  ];
+  const bearishSignals = [
+    bearishAccel,
+    adxRising && adxStrong,
+    pdi != null && mdi != null && pdi < mdi,
+    histExpandingBear,
+    rangeExpanding || displacementBar,
+    closeVelocity < 0,
+  ];
+  const bullishScore = bullishSignals.filter(Boolean).length;
+  const bearishScore = bearishSignals.filter(Boolean).length;
+
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  let phase = 'neutral';
+
+  if (bullishScore >= 4 && !decelerating) {
+    bias = 'bullish';
+    decision = 'buy';
+    phase = 'bullish acceleration';
+  } else if (bearishScore >= 4 && !decelerating) {
+    bias = 'bearish';
+    decision = 'sell';
+    phase = 'bearish acceleration';
+  } else if (bullishScore >= 3 && bullishAccel) {
+    bias = 'bullish';
+    decision = rangeExpanding || displacementBar ? 'buy' : 'wait';
+    phase = decision === 'buy' ? 'bullish acceleration forming' : 'bullish acceleration pending burst';
+  } else if (bearishScore >= 3 && bearishAccel) {
+    bias = 'bearish';
+    decision = rangeExpanding || displacementBar ? 'sell' : 'wait';
+    phase = decision === 'sell' ? 'bearish acceleration forming' : 'bearish acceleration pending burst';
+  } else if (bullishTrend) {
+    bias = 'bullish';
+    phase = decelerating ? 'bullish trend decelerating' : 'bullish trend without acceleration';
+  } else if (bearishTrend) {
+    bias = 'bearish';
+    phase = decelerating ? 'bearish trend decelerating' : 'bearish trend without acceleration';
+  } else {
+    phase = 'no directional acceleration';
+  }
+
+  if (decelerating && decision !== 'wait') {
+    decision = 'wait';
+    phase = `${bias} trend deceleration — stand aside`;
+  }
+
+  const accelScore = Math.max(bullishScore, bearishScore);
+
+  return buildEvaluationResult({
+    strategyId: 'trend-acceleration-strategy',
+    context,
+    config: { ...config, trendPeriod, slopeLookback, adxPeriod, minAdx, expansionRatio },
+    candles,
+    decision,
+    bias,
+    confidence: 26
+      + accelScore * 9
+      + (decision !== 'wait' ? 16 : 0)
+      + (adxStrong ? Math.min(14, (adxNow ?? 0) / 3) : 0)
+      + (displacementBar ? 8 : 0)
+      - (decelerating ? 10 : 0),
+    reasons: [
+      `Trend acceleration engine: EMA(${trendPeriod}) slope delta + ADX(${adxPeriod}) rise + MACD histogram expansion`,
+      `EMA slope ${slopeNow.toFixed(3)}% · acceleration ${slopeAccel.toFixed(3)}% · phase: ${phase}`,
+      adxNow != null
+        ? `ADX ${adxNow.toFixed(1)} ${adxRising ? 'rising' : 'flat/falling'} · +DI ${pdi?.toFixed(1) ?? '—'} vs -DI ${mdi?.toFixed(1) ?? '—'}`
+        : 'ADX unavailable',
+      histNow != null
+        ? `MACD histogram ${histNow.toFixed(6)} ${histExpandingBull || histExpandingBear ? 'expanding' : 'contracting'}`
+        : 'MACD histogram unavailable',
+      rangeExpanding || displacementBar
+        ? `Volatility burst confirmed — recent range ${(recentAvg / Math.max(priorAvg, 0.00001)).toFixed(2)}x prior${displacementBar ? ' with displacement bar' : ''}`
+        : 'Awaiting volatility expansion to confirm institutional acceleration',
+      decision === 'buy'
+        ? 'Bullish trend acceleration — institutional momentum speed-up'
+        : decision === 'sell'
+          ? 'Bearish trend acceleration — institutional momentum speed-up'
+          : decelerating
+            ? 'Trend deceleration detected — no acceleration entry'
+            : 'Acceleration criteria incomplete on latest bar',
+    ],
+    metrics: {
+      phase,
+      emaSlopePct: Number(slopeNow.toFixed(4)),
+      slopeAccelerationPct: Number(slopeAccel.toFixed(4)),
+      adx: adxNow != null ? Number(adxNow.toFixed(2)) : null,
+      adxRising: adxRising ? 'yes' : 'no',
+      plusDi: pdi != null ? Number(pdi.toFixed(2)) : null,
+      minusDi: mdi != null ? Number(mdi.toFixed(2)) : null,
+      histogram: histNow != null ? Number(histNow.toFixed(6)) : null,
+      rangeExpansion: priorAvg > 0 ? Number((recentAvg / priorAvg).toFixed(2)) : null,
+      closeVelocity: Number(closeVelocity.toFixed(5)),
+      accelerationScore: accelScore,
+      displacementBar: displacementBar ? 'yes' : 'no',
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: decision === 'buy' ? 'trend acceleration long' : 'trend acceleration short',
+        detail: `${phase} · score ${accelScore}/6 · ADX ${adxNow?.toFixed(1) ?? '—'}`,
+        tone: decision === 'buy' ? 'emerald' as const : 'rose' as const,
+        barIndex: last.candleIndex,
+      }]
+      : (bullishAccel || bearishAccel) && accelScore >= 2
+        ? [{
+          label: 'acceleration forming',
+          detail: phase,
+          tone: 'violet' as const,
+          barIndex: last.candleIndex,
+        }]
+        : [],
+  });
+};
+
+function institutionalTextBias(text: string): StrategyBias {
+  const lower = text.toLowerCase();
+  if (lower.includes('bullish') || lower.includes('buy')) return 'bullish';
+  if (lower.includes('bearish') || lower.includes('sell')) return 'bearish';
+  return 'neutral';
+}
+
+export const evaluateInstitutionalTrendFollowingEngine: StrategyEngine = (candles, config, context) => {
+  const fastTrendPeriod = Math.max(20, parseNumber(config.fastTrendPeriod, 50));
+  const slowTrendPeriod = Math.max(fastTrendPeriod + 1, parseNumber(config.slowTrendPeriod, 100));
+  const adxPeriod = Math.max(7, parseNumber(config.adxPeriod, 14));
+  const minAdx = parseNumber(config.minAdx, 22);
+  const minConsensus = Math.max(3, Math.min(5, parseNumber(config.minConsensus, 4)));
+  const maxTrapRisk = parseNumber(config.maxTrapRisk, 0.65);
+
+  const reconstructed = strategyCandlesToReconstructed(candles);
+  const structure = analyzeMarketStructure(reconstructed, String(config.timeframe ?? context.timeframe));
+  const swings = analyzeSwingPoints(reconstructed, { depths: [1, 2, 4], zigzagPercent: 0.08 });
+  const closes = candles.map((item) => item.close);
+  const effectiveSlowPeriod = Math.min(slowTrendPeriod, Math.max(fastTrendPeriod + 1, candles.length - 10));
+  const fastEma = ema(closes, fastTrendPeriod);
+  const slowEma = ema(closes, effectiveSlowPeriod);
+  const { adx: adxSeries, plusDi, minusDi } = adx(candles, adxPeriod);
+  const { trend: supertrendTrend } = supertrend(candles, 10, 2);
+
+  const lastIndex = candles.length - 1;
+  const last = candles[lastIndex]!;
+  const fastNow = fastEma[lastIndex];
+  const slowNow = slowEma[lastIndex];
+  const adxNow = adxSeries[lastIndex];
+  const pdi = plusDi[lastIndex];
+  const mdi = minusDi[lastIndex];
+  const stTrend = supertrendTrend[lastIndex];
+
+  const structureBias = institutionalTextBias(structure.finalBias.institutionalBias);
+  const structureBull = structureBias === 'bullish' || structure.finalBias.tradeDecision === 'BUY';
+  const structureBear = structureBias === 'bearish' || structure.finalBias.tradeDecision === 'SELL';
+  const trapRisk = structure.finalBias.retailTrapRisk;
+
+  const swingBull = swings.summary.trendState === 'bullish' || swings.summary.structuralBias === 'BUY_CONTEXT';
+  const swingBear = swings.summary.trendState === 'bearish' || swings.summary.structuralBias === 'SELL_CONTEXT';
+
+  const emaStackBull = fastNow != null && slowNow != null && last.close > fastNow && fastNow > slowNow;
+  const emaStackBear = fastNow != null && slowNow != null && last.close < fastNow && fastNow < slowNow;
+
+  const adxRegimeBull = adxNow != null && adxNow >= minAdx && pdi != null && mdi != null && pdi > mdi;
+  const adxRegimeBear = adxNow != null && adxNow >= minAdx && pdi != null && mdi != null && pdi < mdi;
+
+  const supertrendBull = stTrend === 'bullish';
+  const supertrendBear = stTrend === 'bearish';
+
+  const pillars = [
+    { id: 'structure', bull: structureBull, bear: structureBear, label: 'Market structure' },
+    { id: 'swings', bull: swingBull, bear: swingBear, label: 'Swing sequence' },
+    { id: 'emaStack', bull: emaStackBull, bear: emaStackBear, label: `EMA(${fastTrendPeriod}/${effectiveSlowPeriod}) stack` },
+    { id: 'adx', bull: adxRegimeBull, bear: adxRegimeBear, label: `ADX(${adxPeriod}) regime` },
+    { id: 'supertrend', bull: supertrendBull, bear: supertrendBear, label: 'SuperTrend alignment' },
+  ];
+
+  const bullishScore = pillars.filter((pillar) => pillar.bull).length;
+  const bearishScore = pillars.filter((pillar) => pillar.bear).length;
+  const alignedPillars = pillars.filter((pillar) => pillar.bull || pillar.bear);
+  const conflicted = bullishScore > 0 && bearishScore > 0 && Math.abs(bullishScore - bearishScore) <= 1;
+
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  let regime = 'transitional';
+
+  if (trapRisk > maxTrapRisk) {
+    regime = 'liquidity trap risk elevated';
+  } else if (bullishScore >= minConsensus && bullishScore > bearishScore) {
+    bias = 'bullish';
+    decision = 'buy';
+    regime = 'institutional bullish consensus';
+  } else if (bearishScore >= minConsensus && bearishScore > bullishScore) {
+    bias = 'bearish';
+    decision = 'sell';
+    regime = 'institutional bearish consensus';
+  } else if (bullishScore >= minConsensus - 1 && bullishScore > bearishScore + 1) {
+    bias = 'bullish';
+    regime = 'bullish consensus forming';
+  } else if (bearishScore >= minConsensus - 1 && bearishScore > bullishScore + 1) {
+    bias = 'bearish';
+    regime = 'bearish consensus forming';
+  } else if (conflicted) {
+    regime = 'mixed institutional signals';
+  } else {
+    regime = 'insufficient consensus';
+  }
+
+  if (trapRisk > maxTrapRisk) {
+    decision = 'wait';
+  }
+
+  const consensusScore = Math.max(bullishScore, bearishScore);
+  const structureConfidence = Math.round((structure.finalBias.confidenceScore ?? 0) * 100);
+
+  return buildEvaluationResult({
+    strategyId: 'institutional-trend-following',
+    context,
+    config: {
+      ...config,
+      fastTrendPeriod,
+      slowTrendPeriod: effectiveSlowPeriod,
+      adxPeriod,
+      minAdx,
+      minConsensus,
+      maxTrapRisk,
+    },
+    candles,
+    decision,
+    bias,
+    confidence: 24
+      + consensusScore * 11
+      + (decision !== 'wait' ? 18 : 0)
+      + Math.min(16, structureConfidence / 6)
+      + (trapRisk <= maxTrapRisk ? 8 : -12),
+    reasons: [
+      `Institutional trend fusion — ${consensusScore}/5 pillars aligned · regime: ${regime}`,
+      structure.finalBias.reasoningText,
+      `Swing structure ${swings.summary.trendState} · ${swings.summary.explanation}`,
+      emaStackBull
+        ? `Dual EMA stack bullish — price above EMA(${fastTrendPeriod}) above EMA(${effectiveSlowPeriod})`
+        : emaStackBear
+          ? `Dual EMA stack bearish — price below EMA(${fastTrendPeriod}) below EMA(${effectiveSlowPeriod})`
+          : 'EMA stack mixed — no clean institutional value ladder',
+      adxNow != null
+        ? `ADX ${adxNow.toFixed(1)} · +DI ${pdi?.toFixed(1) ?? '—'} / -DI ${mdi?.toFixed(1) ?? '—'} · SuperTrend ${stTrend ?? '—'}`
+        : 'ADX regime unavailable',
+      trapRisk > maxTrapRisk
+        ? `Retail trap risk ${(trapRisk * 100).toFixed(0)}% exceeds threshold — no entry`
+        : decision === 'buy'
+          ? 'Full institutional bullish consensus — trend-following long bias'
+          : decision === 'sell'
+            ? 'Full institutional bearish consensus — trend-following short bias'
+            : 'Awaiting stronger multi-pillar institutional agreement',
+    ],
+    metrics: {
+      regime,
+      consensusScore,
+      bullishPillars: bullishScore,
+      bearishPillars: bearishScore,
+      structureBias: structure.finalBias.institutionalBias,
+      swingTrend: swings.summary.trendState,
+      trapRiskPct: Number((trapRisk * 100).toFixed(1)),
+      fastEma: fastNow != null ? Number(fastNow.toFixed(5)) : null,
+      slowEma: slowNow != null ? Number(slowNow.toFixed(5)) : null,
+      adx: adxNow != null ? Number(adxNow.toFixed(2)) : null,
+      supertrend: stTrend ?? null,
+      structureConfidence,
+      pillars: pillars.map((pillar) => `${pillar.id}:${pillar.bull ? 'bull' : pillar.bear ? 'bear' : 'neutral'}`).join(','),
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: decision === 'buy' ? 'institutional trend long' : 'institutional trend short',
+        detail: `${consensusScore}/5 pillars · ${regime}`,
+        tone: decision === 'buy' ? 'emerald' as const : 'rose' as const,
+        barIndex: last.candleIndex,
+      }]
+      : alignedPillars.length >= 3
+        ? [{
+          label: 'consensus forming',
+          detail: pillars.filter((pillar) => pillar.bull || pillar.bear).map((pillar) => pillar.label).join(' · '),
+          tone: 'violet' as const,
+          barIndex: last.candleIndex,
+        }]
+        : [],
+  });
+};
+
 function mapMtfFinalDecision(finalDecision: string): StrategySignalSide {
   const text = finalDecision.toUpperCase();
   if (text.includes('BUY')) return 'buy';
@@ -1736,22 +3282,285 @@ export const STRATEGY_ENGINES: Record<string, StrategyEngine> = {
   'trend-continuation-pattern-strategy': evaluateTrendContinuationPatternEngine,
   'dynamic-support-and-resistance-trend-trading': evaluateDynamicSupportResistanceTrendEngine,
   'fibonacci-trend-continuation': evaluateFibonacciTrendContinuationEngine,
+  'channel-trend-trading': evaluateChannelTrendTradingEngine,
+  'trend-acceleration-strategy': evaluateTrendAccelerationEngine,
+  'institutional-trend-following': evaluateInstitutionalTrendFollowingEngine,
   'macd-trend-strategy': evaluateMacdTrendEngine,
   'ichimoku-trend-strategy': evaluateIchimokuTrendEngine,
   'supertrend-strategy': evaluateSupertrendEngine,
   'rsi-strategy': evaluateRsiEngine,
   'london-breakout': evaluateLondonBreakoutEngine,
+  'new-york-breakout': evaluateNewYorkBreakoutEngine,
   'bollinger-band-squeeze-breakout': evaluateBollingerSqueezeEngine,
   'order-block-trading': evaluateOrderBlockEngine,
   'adx-trend-strategy': evaluateAdxTrendEngine,
   '200-ema-trend-strategy': evaluate200EmaTrendEngine,
   'asian-session-breakout': evaluateAsianSessionBreakoutEngine,
   'opening-range-breakout-orb': evaluateOpeningRangeBreakoutEngine,
+  'daily-high-low-breakout': evaluateDailyHighLowBreakoutEngine,
+  'weekly-breakout': evaluateWeeklyBreakoutEngine,
+  'triangle-breakout': evaluateTriangleBreakoutEngine,
+  'rectangle-breakout': evaluateRectangleBreakoutEngine,
+  'volatility-breakout': evaluateVolatilityBreakoutEngine,
+  'news-breakout': evaluateNewsBreakoutEngine,
+  'range-expansion-breakout': evaluateRangeExpansionBreakoutEngine,
+  'liquidity-breakout': evaluateLiquidityBreakoutEngine,
+  'fake-breakout-reversal': evaluateFakeBreakoutReversalEngine,
+  'consolidation-breakout': evaluateConsolidationBreakoutEngine,
+  '1-minute-scalping': evaluate1MinuteScalpingEngine,
+  '5-minute-scalping': evaluate5MinuteScalpingEngine,
+  'tick-scalping': evaluateTickScalpingEngine,
+  'spread-scalping': evaluateSpreadScalpingEngine,
+  'order-flow-scalping': evaluateOrderFlowScalpingEngine,
+  'dom-scalping': evaluateDomScalpingEngine,
+  'momentum-scalping': evaluateMomentumScalpingEngine,
+  'ema-scalping': evaluateEmaScalpingEngine,
+  'vwap-scalping': evaluateVwapScalpingEngine,
+  'rsi-scalping': evaluateRsiScalpingEngine,
+  'stochastic-scalping': evaluateStochasticScalpingEngine,
+  'price-action-scalping': evaluatePriceActionScalpingEngine,
+  'liquidity-grab-scalping': evaluateLiquidityGrabScalpingEngine,
+  'news-scalping': evaluateNewsScalpingEngine,
+  'session-scalping': evaluateSessionScalpingEngine,
+  'high-frequency-scalping': evaluateHighFrequencyScalpingEngine,
+  'algorithmic-scalping': evaluateAlgorithmicScalpingEngine,
+  'intraday-trend-trading': evaluateIntradayTrendTradingEngine,
+  'intraday-breakout': evaluateIntradayBreakoutEngine,
+  'momentum-day-trading': evaluateMomentumDayTradingEngine,
+  'vwap-day-trading': evaluateVwapDayTradingEngine,
+  'opening-session-trading': evaluateOpeningSessionTradingEngine,
+  'mean-reversion-day-trading': evaluateMeanReversionDayTradingEngine,
+  'gap-trading': evaluateGapTradingEngine,
+  'reversal-day-trading': evaluateReversalDayTradingEngine,
+  'news-based-day-trading': evaluateNewsBasedDayTradingEngine,
+  'correlation-day-trading': evaluateCorrelationDayTradingEngine,
+  'pivot-point-day-trading': evaluatePivotPointDayTradingEngine,
+  'range-day-trading': evaluateRangeDayTradingEngine,
+  'smart-money-day-trading': evaluateSmartMoneyDayTradingEngine,
+  'swing-pullback-strategy': evaluateSwingPullbackStrategyEngine,
+  'fibonacci-swing-trading': evaluateFibonacciSwingTradingEngine,
+  'swing-reversal-strategy': evaluateSwingReversalStrategyEngine,
+  'trend-swing-trading': evaluateTrendSwingTradingEngine,
+  'channel-swing-trading': evaluateChannelSwingTradingEngine,
+  'harmonic-swing-trading': evaluateHarmonicSwingTradingEngine,
+  'elliott-wave-swing-trading': evaluateElliottWaveSwingTradingEngine,
+  'macd-swing-trading': evaluateMacdSwingTradingEngine,
+  'rsi-swing-trading': evaluateRsiSwingTradingEngine,
+  'support-and-resistance-swing-trading': evaluateSupportAndResistanceSwingTradingEngine,
+  'candlestick-swing-trading': evaluateCandlestickSwingTradingEngine,
+  'weekly-swing-trading': evaluateWeeklySwingTradingEngine,
+  'position-swing-trading': evaluatePositionSwingTradingEngine,
+  'macro-trend-trading': evaluateMacroTrendTradingEngine,
+  'fundamental-position-trading': evaluateFundamentalPositionTradingEngine,
+  'carry-trade-strategy': evaluateCarryTradeStrategyEngine,
+  'long-term-trend-following': evaluateLongTermTrendFollowingEngine,
+  'economic-cycle-trading': evaluateEconomicCycleTradingEngine,
+  'central-bank-policy-trading': evaluateCentralBankPolicyTradingEngine,
+  'interest-rate-differential-strategy': evaluateInterestRateDifferentialStrategyEngine,
+  'inflation-based-position-trading': evaluateInflationBasedPositionTradingEngine,
+  'commodity-currency-position-trading': evaluateCommodityCurrencyPositionTradingEngine,
   'fair-value-gap-fvg': evaluateFairValueGapEngine,
   'pin-bar-strategy': evaluatePinBarEngine,
   'break-and-retest': evaluateBreakAndRetestEngine,
+  'support-and-resistance': evaluateSupportAndResistanceEngine,
+  'supply-and-demand': evaluateSupplyAndDemandEngine,
+  'candlestick-trading': evaluateCandlestickTradingEngine,
+  'engulfing-pattern': evaluateEngulfingPatternEngine,
+  'inside-bar-strategy': evaluateInsideBarStrategyEngine,
+  'fakey-pattern': evaluateFakeyPatternEngine,
+  'market-structure-trading': evaluateMarketStructureTradingEngine,
+  'liquidity-sweep-strategy': evaluateLiquiditySweepStrategyEngine,
+  'mitigation-block-strategy': evaluateMitigationBlockStrategyEngine,
+  'breaker-block-strategy': evaluateBreakerBlockStrategyEngine,
+  'institutional-candle-trading': evaluateInstitutionalCandleTradingEngine,
+  'ict-trading-strategy': evaluateIctTradingStrategyEngine,
+  'bos-break-of-structure': evaluateBosBreakOfStructureEngine,
+  'choch-change-of-character': evaluateChochChangeOfCharacterEngine,
   'bollinger-mean-reversion': evaluateBollingerMeanReversionEngine,
+  'rsi-overbought-oversold': evaluateRsiOverboughtOversoldEngine,
+  'vwap-reversion': evaluateVwapReversionEngine,
+  'statistical-reversion': evaluateStatisticalReversionEngine,
+  'range-reversal': evaluateRangeReversalEngine,
+  'channel-reversion': evaluateChannelReversionEngine,
+  'z-score-reversion': evaluateZScoreReversionEngine,
+  'deviation-reversion': evaluateDeviationReversionEngine,
+  'reversion-scalping': evaluateReversionScalpingEngine,
+  'momentum-breakout': evaluateMomentumBreakoutEngine,
+  'volume-momentum': evaluateVolumeMomentumEngine,
+  'news-momentum': evaluateNewsMomentumEngine,
+  'macd-momentum': evaluateMacdMomentumEngine,
+  'rsi-momentum': evaluateRsiMomentumEngine,
+  'volatility-momentum': evaluateVolatilityMomentumEngine,
+  'currency-strength-momentum': evaluateCurrencyStrengthMomentumEngine,
+  'relative-strength-momentum': evaluateRelativeStrengthMomentumEngine,
+  'double-top-bottom': evaluateDoubleTopBottomEngine,
+  'head-and-shoulders': evaluateHeadAndShouldersEngine,
+  'rsi-divergence': evaluateRsiDivergenceEngine,
+  'macd-divergence': evaluateMacdDivergenceEngine,
+  'exhaustion-reversal': evaluateExhaustionReversalEngine,
+  'climactic-reversal': evaluateClimacticReversalEngine,
+  'trendline-reversal': evaluateTrendlineReversalEngine,
+  'fibonacci-reversal': evaluateFibonacciReversalEngine,
+  'harmonic-reversal': evaluateHarmonicReversalEngine,
+  'supply-demand-reversal': evaluateSupplyDemandReversalEngine,
+  'v-reversal': evaluateVReversalEngine,
+  'countertrend-trading': evaluateCountertrendTradingEngine,
+  'horizontal-range-trading': evaluateHorizontalRangeTradingEngine,
+  'bollinger-range-strategy': evaluateBollingerRangeStrategyEngine,
+  'oscillator-range-trading': evaluateOscillatorRangeTradingEngine,
+  'channel-trading': evaluateChannelTradingEngine,
+  'support-and-resistance-range': evaluateSupportAndResistanceRangeEngine,
+  'asian-session-range-trading': evaluateAsianSessionRangeTradingEngine,
+  'mean-reversion-range': evaluateMeanReversionRangeEngine,
+  'vwap-range-trading': evaluateVwapRangeTradingEngine,
+  'smart-money-concepts-smc': evaluateSmartMoneyConceptsSmcEngine,
+  'ict-methodology': evaluateIctMethodologyEngine,
+  'order-flow-trading': evaluateOrderFlowTradingEngine,
+  'footprint-trading': evaluateFootprintTradingEngine,
+  'liquidity-trading': evaluateLiquidityTradingEngine,
+  'market-maker-model': evaluateMarketMakerModelEngine,
+  'wyckoff-method': evaluateWyckoffMethodEngine,
+  'accumulation-distribution': evaluateAccumulationDistributionEngine,
+  'manipulation-distribution': evaluateManipulationDistributionEngine,
+  'stop-hunt-strategy': evaluateStopHuntStrategyEngine,
+  'institutional-candle-model': evaluateInstitutionalCandleModelEngine,
+  'premium-and-discount-zones': evaluatePremiumAndDiscountZonesEngine,
+  'smt-divergence': evaluateSmtDivergenceEngine,
+  'kill-zones': evaluateKillZonesEngine,
+  'judas-swing': evaluateJudasSwingEngine,
+  'power-of-3-po3': evaluatePowerOf3Po3Engine,
+  'algorithmic-trading': evaluateAlgorithmicTradingEngine,
+  'quantitative-trading': evaluateQuantitativeTradingEngine,
+  'high-frequency-trading-hft': evaluateHighFrequencyTradingHftEngine,
+  'statistical-arbitrage': evaluateStatisticalArbitrageEngine,
+  'machine-learning-trading': evaluateMachineLearningTradingEngine,
+  'ai-based-trading': evaluateAiBasedTradingEngine,
+  'neural-network-trading': evaluateNeuralNetworkTradingEngine,
+  'sentiment-ai-trading': evaluateSentimentAiTradingEngine,
+  'reinforcement-learning-trading': evaluateReinforcementLearningTradingEngine,
+  'grid-algorithms': evaluateGridAlgorithmsEngine,
+  'martingale-systems': evaluateMartingaleSystemsEngine,
+  'anti-martingale-systems': evaluateAntiMartingaleSystemsEngine,
+  'volatility-algorithms': evaluateVolatilityAlgorithmsEngine,
+  'interest-rate-trading': evaluateInterestRateTradingEngine,
+  'central-bank-trading': evaluateCentralBankTradingEngine,
+  'cpi-trading': evaluateCpiTradingEngine,
+  'nfp-trading': evaluateNfpTradingEngine,
+  'gdp-trading': evaluateGdpTradingEngine,
+  'inflation-trading': evaluateInflationTradingEngine,
+  'employment-data-trading': evaluateEmploymentDataTradingEngine,
+  'geopolitical-trading': evaluateGeopoliticalTradingEngine,
+  'trade-balance-trading': evaluateTradeBalanceTradingEngine,
+  'yield-differential-trading': evaluateYieldDifferentialTradingEngine,
+  'monetary-policy-strategy': evaluateMonetaryPolicyStrategyEngine,
+  'risk-on-risk-off-trading': evaluateRiskOnRiskOffTradingEngine,
+  'nfp-strategy': evaluateNfpStrategyEngine,
+  'fomc-strategy': evaluateFomcStrategyEngine,
+  'cpi-strategy': evaluateCpiStrategyEngine,
+  'ecb-strategy': evaluateEcbStrategyEngine,
+  'boe-strategy': evaluateBoeStrategyEngine,
+  'boj-strategy': evaluateBojStrategyEngine,
+  'rate-decision-trading': evaluateRateDecisionTradingEngine,
+  'flash-news-trading': evaluateFlashNewsTradingEngine,
+  'volatility-spike-trading': evaluateVolatilitySpikeTradingEngine,
+  'news-fade-strategy': evaluateNewsFadeStrategyEngine,
+  'currency-correlation-trading': evaluateCurrencyCorrelationTradingEngine,
+  'gold-forex-correlation': evaluateGoldForexCorrelationEngine,
+  'oil-cad-correlation': evaluateOilCadCorrelationEngine,
+  'bond-yield-correlation': evaluateBondYieldCorrelationEngine,
+  'dollar-index-dxy-strategy': evaluateDollarIndexDxyStrategyEngine,
+  'risk-sentiment-correlation': evaluateRiskSentimentCorrelationEngine,
+  'equity-forex-correlation': evaluateEquityForexCorrelationEngine,
+  'atr-breakout': evaluateAtrBreakoutEngine,
+  'volatility-compression': evaluateVolatilityCompressionEngine,
+  'volatility-expansion': evaluateVolatilityExpansionEngine,
+  'bollinger-squeeze': evaluateVolatilityBollingerSqueezeEngine,
+  'implied-volatility-trading': evaluateImpliedVolatilityTradingEngine,
+  'news-volatility-strategy': evaluateNewsVolatilityStrategyEngine,
+  'direct-hedge': evaluateDirectHedgeEngine,
+  'multiple-currency-hedge': evaluateMultipleCurrencyHedgeEngine,
+  'correlation-hedge': evaluateCorrelationHedgeEngine,
+  'options-hedge': evaluateOptionsHedgeEngine,
+  'synthetic-hedge': evaluateSyntheticHedgeEngine,
+  'partial-hedge': evaluatePartialHedgeEngine,
+  'triangular-arbitrage': evaluateTriangularArbitrageEngine,
+  'latency-arbitrage': evaluateLatencyArbitrageEngine,
+  'cross-broker-arbitrage': evaluateCrossBrokerArbitrageEngine,
+  'interest-arbitrage': evaluateInterestArbitrageEngine,
+  'swap-arbitrage': evaluateSwapArbitrageEngine,
+  'asian-session-strategy': evaluateAsianSessionStrategyEngine,
+  'london-session-strategy': evaluateLondonSessionStrategyEngine,
+  'new-york-session-strategy': evaluateNewYorkSessionStrategyEngine,
+  'london-new-york-overlap': evaluateLondonNewYorkOverlapEngine,
+  'tokyo-breakout': evaluateTokyoBreakoutEngine,
+  'session-momentum': evaluateSessionMomentumEngine,
+  'session-reversal': evaluateSessionReversalEngine,
+  'triangle-patterns': evaluateTrianglePatternsEngine,
+  'wedge-patterns': evaluateWedgePatternsEngine,
+  'flag-patterns': evaluateFlagPatternsEngine,
+  'pennant-patterns': evaluatePennantPatternsEngine,
+  'cup-and-handle': evaluateCupAndHandleEngine,
+  'harmonic-patterns': evaluateHarmonicPatternsEngine,
+  'butterfly-pattern': evaluateButterflyPatternEngine,
+  'bat-pattern': evaluateBatPatternEngine,
+  'crab-pattern': evaluateCrabPatternEngine,
+  'gartley-pattern': evaluateGartleyPatternEngine,
+  'cypher-pattern': evaluateCypherPatternEngine,
+  'doji': evaluateDojiEngine,
+  'morning-star': evaluateMorningStarEngine,
+  'evening-star': evaluateEveningStarEngine,
+  'hammer': evaluateHammerEngine,
+  'shooting-star': evaluateShootingStarEngine,
+  'harami': evaluateHaramiEngine,
+  'tweezer-top-bottom': evaluateTweezerTopBottomEngine,
+  'three-soldiers': evaluateThreeSoldiersEngine,
+  'three-crows': evaluateThreeCrowsEngine,
+  'fixed-lot-strategy': evaluateFixedLotStrategyEngine,
+  'percentage-risk-model': evaluatePercentageRiskModelEngine,
+  'kelly-criterion': evaluateKellyCriterionEngine,
+  'volatility-position-sizing': evaluateVolatilityPositionSizingEngine,
+  'dynamic-risk-allocation': evaluateDynamicRiskAllocationEngine,
+  'equity-curve-management': evaluateEquityCurveManagementEngine,
+  'portfolio-risk-balancing': evaluatePortfolioRiskBalancingEngine,
+  'drawdown-protection': evaluateDrawdownProtectionEngine,
+  'daily-loss-limit-strategy': evaluateDailyLossLimitStrategyEngine,
+  'wyckoff-trading': evaluateWyckoffTradingEngine,
+  'market-profile-trading': evaluateMarketProfileTradingEngine,
+  'volume-profile-trading': evaluateVolumeProfileTradingEngine,
+  'auction-market-theory': evaluateAuctionMarketTheoryEngine,
+  'order-book-trading': evaluateOrderBookTradingEngine,
+  'footprint-charts': evaluateFootprintChartsEngine,
+  'liquidity-engineering': evaluateLiquidityEngineeringEngine,
+  'quant-macro-trading': evaluateQuantMacroTradingEngine,
+  'statistical-modeling': evaluateStatisticalModelingEngine,
+  'ai-predictive-trading': evaluateAiPredictiveTradingEngine,
+  'neural-forecasting': evaluateNeuralForecastingEngine,
+  'institutional-flow-analysis': evaluateInstitutionalFlowAnalysisEngine,
+  'dark-pool-analysis': evaluateDarkPoolAnalysisEngine,
+  'sentiment-engine-trading': evaluateSentimentEngineTradingEngine,
+  'cross-asset-flow-trading': evaluateCrossAssetFlowTradingEngine,
+  'trend-momentum': evaluateTrendMomentumEngine,
+  'smc-price-action': evaluateSmcPriceActionEngine,
+  'fundamental-technical': evaluateFundamentalTechnicalEngine,
+  'ai-technical-analysis': evaluateAiTechnicalAnalysisEngine,
+  'news-liquidity': evaluateNewsLiquidityEngine,
+  'scalping-order-flow': evaluateScalpingOrderFlowEngine,
+  'swing-macro-analysis': evaluateSwingMacroAnalysisEngine,
   'liquidity-grab-strategy': evaluateLiquidityGrabEngine,
+  'macd-strategy': evaluateMacdStrategyEngine,
+  'bollinger-bands-strategy': evaluateBollingerBandsStrategyEngine,
+  'atr-strategy': evaluateAtrStrategyEngine,
+  'adx-strategy': evaluateAdxStrategyEngine,
+  'cci-strategy': evaluateCciStrategyEngine,
+  'parabolic-sar-strategy': evaluateParabolicSarStrategyEngine,
+  'ichimoku-strategy': evaluateIchimokuStrategyEngine,
+  'moving-average-strategy': evaluateMovingAverageStrategyEngine,
+  'keltner-channel-strategy': evaluateKeltnerChannelStrategyEngine,
+  'donchian-channel-strategy': evaluateDonchianChannelStrategyEngine,
+  'momentum-indicator-strategy': evaluateMomentumIndicatorStrategyEngine,
+  'williams-r-strategy': evaluateWilliamsRStrategyEngine,
+  'tdi-strategy': evaluateTdiStrategyEngine,
+  'alligator-indicator-strategy': evaluateAlligatorIndicatorStrategyEngine,
   'stochastic-strategy': evaluateStochasticEngine,
 };
 

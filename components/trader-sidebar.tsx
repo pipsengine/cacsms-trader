@@ -924,7 +924,7 @@ function strategyNavigationItems(): NavigationItem[] {
       "Scalping + Order Flow",
       "Swing + Macro Analysis",
     ]),
-    group("Strategy Control", [
+    strategyGroup("Strategy Control", [
       "AI strategy selector",
       "Autonomous strategy rotation",
       "Strategy scoring engine",
@@ -934,7 +934,7 @@ function strategyNavigationItems(): NavigationItem[] {
       "Strategy risk profiler",
       "Multi-strategy orchestration",
     ], "control"),
-    group("Research & Evolution", [
+    strategyGroup("Research & Evolution", [
       "Strategy behavioral analysis",
       "Strategy correlation analysis",
       "Strategy performance monitor",

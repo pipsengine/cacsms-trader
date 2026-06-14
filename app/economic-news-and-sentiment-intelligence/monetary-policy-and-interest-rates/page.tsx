@@ -173,8 +173,10 @@ export default function MonetaryPolicyInterestRatesPage() {
   const [bias, setBias] = useState<BiasPayload | null>(null);
   const [diffs, setDiffs] = useState<DifferentialsPayload | null>(null);
   const [logs, setLogs] = useState<SyncLogsPayload | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState('');
 
-  const [historyCurrency, setHistoryCurrency] = useState('All');
+  const [historyCurrency, setHistoryCurrency] = useState('USD');
   const [historyFrom, setHistoryFrom] = useState('');
   const [historyTo, setHistoryTo] = useState('');
   const [chartCurrency, setChartCurrency] = useState('USD');
@@ -222,11 +224,12 @@ export default function MonetaryPolicyInterestRatesPage() {
     }
   };
 
-  const loadHistory = async () => {
+  const loadHistory = async (currencyOverride?: string) => {
+    const currency = currencyOverride ?? historyCurrency;
     setLoading((p) => ({ ...p, history: true }));
     try {
       const params = new URLSearchParams();
-      if (historyCurrency !== 'All') params.set('currency', historyCurrency);
+      if (currency !== 'All') params.set('currency', currency);
       if (historyFrom) params.set('from', historyFrom);
       if (historyTo) params.set('to', historyTo);
       params.set('limit', '800');
@@ -239,6 +242,11 @@ export default function MonetaryPolicyInterestRatesPage() {
     } finally {
       setLoading((p) => ({ ...p, history: false }));
     }
+  };
+
+  const selectHistoryCurrency = (currency: string) => {
+    setHistoryCurrency(currency);
+    void loadHistory(currency);
   };
 
   const loadLogs = async () => {
@@ -269,6 +277,38 @@ export default function MonetaryPolicyInterestRatesPage() {
       setError(e instanceof Error ? e.message : 'Failed to load chart history.');
     } finally {
       setLoading((p) => ({ ...p, chart: false }));
+    }
+  };
+
+  const refreshAll = async () => {
+    setError('');
+    await Promise.all([loadCurrent(), loadBias(), loadDiffs(), loadHistory(), loadLogs(), loadChart(chartCurrency)]);
+  };
+
+  const runRatesSync = async (mode: 'seed' | 'latest' | 'full') => {
+    setSyncing(true);
+    setSyncMessage('');
+    setError('');
+    try {
+      const body =
+        mode === 'seed'
+          ? { mode: 'seed' }
+          : mode === 'full'
+            ? { mode: 'full' }
+            : { mode: 'latest' };
+      const res = await fetch('/api/rates/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const payload = await readJson<{ ok?: boolean; error?: string; message?: string }>(res);
+      if (!payload.ok) throw new Error(payload.error ?? payload.message ?? `Rates sync failed (HTTP ${res.status}).`);
+      setSyncMessage(payload.message ?? (mode === 'seed' ? 'Seed import completed.' : 'Investing.com page sync completed.'));
+      await refreshAll();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Rates sync failed.');
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -345,11 +385,30 @@ export default function MonetaryPolicyInterestRatesPage() {
               </p>
             </div>
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button variant="outline" size="sm" className="gap-2" disabled={syncing} onClick={() => void runRatesSync('seed')}>
+              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Database className="h-4 w-4" />}
+              Import seed rates
+            </Button>
+            <Button variant="default" size="sm" className="gap-2" disabled={syncing} onClick={() => void runRatesSync('latest')}>
+              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              Sync latest (8 pages)
+            </Button>
+            <Button variant="outline" size="sm" className="gap-2" disabled={syncing} onClick={() => void runRatesSync('full')}>
+              {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              Full sync (3y)
+            </Button>
+          </div>
         </header>
 
         <div className="min-h-0 flex-1 overflow-hidden">
           <ScrollArea className="h-full min-h-0">
             <main className="space-y-5 p-4 md:p-6 lg:p-8">
+              {syncMessage ? (
+                <Card className="border-emerald-200 bg-emerald-50">
+                  <CardContent className="p-4 text-sm text-emerald-900">{syncMessage}</CardContent>
+                </Card>
+              ) : null}
               {error ? (
                 <Card className="border-rose-200 bg-rose-50">
                   <CardContent className="flex items-start gap-3 p-4 text-rose-800">
@@ -490,10 +549,10 @@ export default function MonetaryPolicyInterestRatesPage() {
                                         Loading current rates…
                                       </TableCell>
                                     </TableRow>
-                                  ) : currentRows.length === 0 ? (
+                                  ) : currentRows.every((row) => row.actualRate == null) ? (
                                     <TableRow className="hover:bg-transparent">
                                       <TableCell colSpan={10} className="h-24 text-center text-sm text-slate-600">
-                                        No rate history rows collected yet.
+                                        No rate history rows collected yet. Use <strong>Import seed rates</strong> for immediate bootstrap, or <strong>Sync latest (8 pages)</strong> to pull recent decisions from each central bank&apos;s Investing.com event page (Playwright/Chrome required on the host).
                                       </TableCell>
                                     </TableRow>
                                   ) : (
@@ -662,16 +721,19 @@ export default function MonetaryPolicyInterestRatesPage() {
                           <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
                             <div>
                               <div className="text-sm font-semibold text-slate-950">Rate History Table</div>
-                              <div className="mt-1 text-xs text-slate-500">Historical rate decisions stored in PostgreSQL.</div>
+                              <div className="mt-1 text-xs text-slate-500">
+                                Historical rate decisions stored in PostgreSQL.
+                                {historyCurrency !== 'All' ? (
+                                  <span className="ml-1 font-medium text-slate-700">
+                                    Showing {historyCurrency}
+                                    {history?.total != null ? ` · ${history.total} rows` : ''}
+                                  </span>
+                                ) : history?.total != null ? (
+                                  <span className="ml-1 font-medium text-slate-700">· {history.total} rows (all currencies)</span>
+                                ) : null}
+                              </div>
                             </div>
                             <div className="flex flex-wrap items-center gap-2">
-                              <select className="h-9 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-700" value={historyCurrency} onChange={(e) => setHistoryCurrency(e.target.value)}>
-                                {['All', 'USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF'].map((cur) => (
-                                  <option key={cur} value={cur}>
-                                    {cur}
-                                  </option>
-                                ))}
-                              </select>
                               <input className="h-9 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-700" type="date" value={historyFrom} onChange={(e) => setHistoryFrom(e.target.value)} />
                               <input className="h-9 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-700" type="date" value={historyTo} onChange={(e) => setHistoryTo(e.target.value)} />
                               <Button variant="outline" size="sm" className="gap-2" onClick={() => void loadHistory()} disabled={loading.history}>
@@ -680,7 +742,45 @@ export default function MonetaryPolicyInterestRatesPage() {
                             </div>
                           </div>
                         </CardHeader>
-                        <CardContent className="p-0">
+                        <CardContent className="space-y-0 p-0">
+                          <div className="border-b border-slate-200 bg-slate-50/60 px-4 py-3">
+                            <div className="mb-2 text-[11px] font-medium uppercase tracking-wider text-slate-500">Select currency</div>
+                            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-9">
+                              <button
+                                type="button"
+                                onClick={() => selectHistoryCurrency('All')}
+                                className={cn(
+                                  'rounded-lg border border-slate-200 bg-white px-3 py-2 text-left shadow-sm shadow-slate-900/5 transition',
+                                  historyCurrency === 'All' ? 'ring-2 ring-indigo-500 ring-offset-2' : 'hover:bg-slate-50',
+                                )}
+                              >
+                                <div className="text-sm font-semibold text-slate-950">All</div>
+                                <div className="mt-1 text-xs text-slate-600">Every major</div>
+                              </button>
+                              {currencyCards.map((c) => {
+                                const selected = c.currency === historyCurrency;
+                                return (
+                                  <button
+                                    key={`history-${c.currency}`}
+                                    type="button"
+                                    onClick={() => selectHistoryCurrency(c.currency)}
+                                    className={cn(
+                                      'rounded-lg border px-3 py-2 text-left shadow-sm shadow-slate-900/5 transition',
+                                      toneCardClass(c.tone),
+                                      selected ? 'ring-2 ring-indigo-500 ring-offset-2' : 'hover:brightness-[0.98]',
+                                    )}
+                                  >
+                                    <div className="flex items-center justify-between gap-1">
+                                      <div className="text-sm font-semibold text-slate-950">{c.currency}</div>
+                                      <ToneBadge tone={c.tone}>{c.stance.replace('Rate ', '')}</ToneBadge>
+                                    </div>
+                                    <div className="mt-1 truncate text-[11px] text-slate-700">{c.centralBank ?? '—'}</div>
+                                    <div className="mt-0.5 font-mono text-xs text-slate-900">{fmtRate(c.actualRate)}</div>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
                           <div className="w-full overflow-x-auto">
                             <Table>
                               <TableHeader className="bg-slate-50">
@@ -702,7 +802,7 @@ export default function MonetaryPolicyInterestRatesPage() {
                                 ) : historyRows.length === 0 ? (
                                   <TableRow className="hover:bg-transparent">
                                     <TableCell colSpan={10} className="h-24 text-center text-sm text-slate-600">
-                                      No historical rows yet.
+                                      {historyCurrency === 'All' ? 'No historical rows yet.' : `No historical rows for ${historyCurrency} yet.`}
                                     </TableCell>
                                   </TableRow>
                                 ) : (

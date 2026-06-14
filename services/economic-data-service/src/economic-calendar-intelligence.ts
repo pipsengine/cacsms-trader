@@ -106,6 +106,9 @@ export type EconomicCalendarDashboard = {
     sourceCollectionHealth: number;
     strongestBullishCurrencyToday: string | null;
     strongestBearishCurrencyToday: string | null;
+    calendarStale?: boolean;
+    latestEventDate?: string | null;
+    lastSyncAt?: string | null;
   };
   currencyBias: Array<{ currency: string; score: number; bias: EconomicBias; eventCount: number }>;
   conflicts: Array<{ id: string; eventId: string | null; conflictType: string; fieldName: string; sourceA: string; sourceB: string; valueA: string | null; valueB: string | null; createdAt: string }>;
@@ -257,8 +260,8 @@ export class EconomicCalendarIntelligenceService {
 
   async recordAction(action: string): Promise<{ ok: boolean; message: string }> {
     const knownActions: Record<string, { jobType: string; message: string }> = {
-      discover: { jobType: 'weekly_calendar_discovery', message: 'Discovery job requested. Enabled sources will be collected by the scheduler/worker.' },
-      refresh: { jobType: 'daily_calendar_refresh', message: 'Calendar refresh requested for today and tomorrow.' },
+      discover: { jobType: 'weekly_calendar_discovery', message: 'Discovery job requested for this week and next week.' },
+      refresh: { jobType: 'daily_calendar_refresh', message: 'Calendar refresh requested for this week and next week.' },
       'monitor/start': { jobType: 'monitoring_start', message: 'Monitoring start requested for eligible high-impact events.' },
       'monitor/stop': { jobType: 'monitoring_stop', message: 'Monitoring stop requested.' },
       analyze: { jobType: 'post_release_analyzer', message: 'Released-event analysis requested.' },
@@ -275,9 +278,15 @@ export class EconomicCalendarIntelligenceService {
     try {
       if (action === 'discover' || action === 'refresh' || action === 'failed/retry' || action === 'monitor/start') {
         const collection = await this.collectForexFactoryThisWeek(resolved.jobType);
+        if (collection.stored <= 0) {
+          return {
+            ok: false,
+            message: `${resolved.message} No events were collected. If the app runs in Docker without outbound network access, run "npm run calendar:refresh" on the host (uses port ${process.env.POSTGRES_HOST_PORT ?? '5433'}). Last error: ${collection.error ?? 'investing_calendar_empty'}.`,
+          };
+        }
         return {
           ok: true,
-          message: `${resolved.message} Investing.com calendar collector stored ${collection.stored} required-currency event(s). ${collection.lifecycle.watching} released event(s) without actual values are being watched, ${collection.lifecycle.failed} stale missing releases are marked failed for retry, and ${collection.lifecycle.watcherJobsQueued} watcher job(s) are queued.`,
+          message: `${resolved.message} Investing.com calendar collector stored ${collection.stored} required-currency event(s) across ${collection.rangesSynced} week range(s). ${collection.lifecycle.watching} released event(s) without actual values are being watched, ${collection.lifecycle.failed} stale missing releases are marked failed for retry, and ${collection.lifecycle.watcherJobsQueued} watcher job(s) are queued.`,
         };
       }
 
@@ -445,17 +454,53 @@ export class EconomicCalendarIntelligenceService {
     return { ok: true, message: 'Captured.', captured: true, actualValue: actual, actualSource: 'INVESTING', actualCaptureStatus: 'CAPTURED' };
   }
 
+  async isCalendarStale(): Promise<boolean> {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      const result = await queryPostgres(
+        `
+          SELECT
+            MAX(event_date)::text AS max_date,
+            COUNT(*) FILTER (WHERE event_date >= $1::date)::int AS from_today
+          FROM economic_events
+          WHERE currency = ANY($2::text[])
+            AND source_name <> 'ForexFactory'
+        `,
+        [today, [...REQUIRED_CURRENCIES]],
+      );
+      const maxDate = String(result.rows[0]?.max_date ?? '').trim();
+      const fromToday = Number(result.rows[0]?.from_today ?? 0);
+      if (!maxDate || maxDate < today || fromToday === 0) return true;
+      return false;
+    } catch {
+      return true;
+    }
+  }
+
   private async collectForexFactoryThisWeek(jobType: string): Promise<{ stored: number; lifecycle: LifecycleReconciliation }> {
-    const today = new Date().toISOString().slice(0, 10);
-    const range = weekRangeForIsoDate(today);
-    const result = await this.runInvestingCalendarSync({ jobType, range });
-    return { stored: result.stored, lifecycle: result.lifecycle };
+    let stored = 0;
+    let lifecycle: LifecycleReconciliation = { preMonitoring: 0, watching: 0, failed: 0, watcherJobsQueued: 0 };
+    for (const range of calendarSyncRangesForToday()) {
+      const result = await this.runInvestingCalendarSync({ jobType, range });
+      stored += result.stored;
+      lifecycle = result.lifecycle;
+    }
+    return { stored, lifecycle };
   }
 
   private async runForexFactoryHybridSync(props: { jobType: string; mode: 'json' | 'xml' | 'browser' | 'hybrid' }) {
-    const today = new Date().toISOString().slice(0, 10);
-    const range = weekRangeForIsoDate(today);
-    return this.runInvestingCalendarSync({ jobType: props.jobType, range });
+    let stored = 0;
+    let lifecycle: LifecycleReconciliation = { preMonitoring: 0, watching: 0, failed: 0, watcherJobsQueued: 0 };
+    let investingCount = 0;
+    let capturedActuals = 0;
+    for (const range of calendarSyncRangesForToday()) {
+      const result = await this.runInvestingCalendarSync({ jobType: props.jobType, range });
+      stored += result.stored;
+      lifecycle = result.lifecycle;
+      investingCount += result.investingCount;
+      capturedActuals += result.capturedActuals;
+    }
+    return { stored, lifecycle, investingCount, capturedActuals };
   }
 
   private async runInvestingCalendarSync(props: { jobType: string; range: { fromDate: string; toDate: string } }): Promise<{ stored: number; lifecycle: LifecycleReconciliation; investingCount: number; capturedActuals: number }> {

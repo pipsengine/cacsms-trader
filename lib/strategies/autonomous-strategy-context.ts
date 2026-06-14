@@ -19,8 +19,19 @@ const GROUP_TIMEFRAME_PREFERENCE: Record<string, Timeframe> = {
   'reversal-trading-strategies': 'H1',
   'range-trading-strategies': 'H1',
   'smart-money-and-institutional-strategies': 'H1',
-  'session-based-strategies': 'M15',
+  'quantitative-and-algorithmic-strategies': 'H1',
+  'fundamental-trading-strategies': 'H4',
+  'news-trading-strategies': 'M15',
   'volatility-based-strategies': 'H1',
+  'correlation-and-intermarket-strategies': 'H1',
+  'hedging-strategies': 'H4',
+  'arbitrage-strategies': 'M15',
+  'session-based-strategies': 'M15',
+  'pattern-trading-strategies': 'H4',
+  'candlestick-trading-strategies': 'H1',
+  'risk-management-strategies': 'H4',
+  'advanced-professional-and-institutional-models': 'H4',
+  'hybrid-strategies': 'H1',
 };
 
 export interface AutonomousStrategyContext {

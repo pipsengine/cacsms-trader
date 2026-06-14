@@ -1,4 +1,10 @@
 import { queryPostgres } from '@/lib/postgres';
+import { CENTRAL_BANK_RATE_SEED } from '@/lib/rates/central-bank-rate-seed-data';
+import {
+  CENTRAL_BANK_RATE_EVENT_PAGES,
+  CENTRAL_BANK_RATE_PAGE_IDS,
+  centralBankEventIdByCurrency,
+} from '@/lib/rates/central-bank-rate-event-pages';
 import crypto from 'crypto';
 
 type RateDecisionHistoryRow = {
@@ -41,23 +47,7 @@ async function getEconomicCalendarIntelligenceService() {
 
 const investingCalendarServiceUrl = 'https://www.investing.com/economic-calendar/Service/getCalendarFilteredData';
 
-const centralBankRateEventPages: Record<
-  number,
-  { currency: string; country: string; centralBank: string; eventName: string; investingUrl: string }
-> = {
-  164: { currency: 'EUR', country: 'Eurozone', centralBank: 'European Central Bank (ECB)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-164' },
-  165: { currency: 'JPY', country: 'Japan', centralBank: 'Bank of Japan (BoJ)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-165' },
-  166: { currency: 'CAD', country: 'Canada', centralBank: 'Bank of Canada (BoC)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-166' },
-  167: { currency: 'NZD', country: 'New Zealand', centralBank: 'Reserve Bank of New Zealand (RBNZ)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-167' },
-  168: { currency: 'USD', country: 'United States', centralBank: 'Federal Reserve (FOMC)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-168' },
-  169: { currency: 'CHF', country: 'Switzerland', centralBank: 'Swiss National Bank (SNB)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-169' },
-  170: { currency: 'GBP', country: 'United Kingdom', centralBank: 'Bank of England (BoE)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-170' },
-  171: { currency: 'AUD', country: 'Australia', centralBank: 'Reserve Bank of Australia (RBA)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-171' },
-};
-
-const centralBankEventIdByCurrency = Object.fromEntries(
-  Object.entries(centralBankRateEventPages).map(([id, meta]) => [String(meta.currency).toUpperCase(), Number(id)]),
-) as Record<string, number>;
+const centralBankRateEventPages = CENTRAL_BANK_RATE_EVENT_PAGES;
 
 function isBotProtectionError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error ?? '');
@@ -1238,7 +1228,7 @@ type CentralBankRateHistoryRow = {
 };
 
 export class CentralBankRateHistoryCollectorService {
-  private readonly pageIds = [164, 165, 166, 167, 168, 169, 170, 171];
+  private readonly pageIds = [...CENTRAL_BANK_RATE_PAGE_IDS];
 
   async syncAllLast3Years(jobType: string): Promise<CentralBankRateSyncResult> {
     return this.syncPages({ pageIds: this.pageIds, jobType, years: 3 });
@@ -1256,13 +1246,129 @@ export class CentralBankRateHistoryCollectorService {
     return this.syncPagesLatest({ pageIds: [pageId], jobType, lookbackDays: 120 });
   }
 
-  async syncFromEconomicCalendar(props: { jobType: string; lookbackHours: number }): Promise<CentralBankRateSyncResult> {
+  async registerAllEventPages(): Promise<void> {
+    await ensureCentralBankRateTables();
+    for (const eventId of this.pageIds) {
+      const meta = centralBankRateEventPages[eventId];
+      if (!meta) continue;
+      await this.upsertEvent({
+        eventId,
+        currency: meta.currency,
+        country: meta.country,
+        centralBank: meta.centralBank,
+        eventName: meta.eventName,
+        sourceUrl: meta.investingUrl,
+      });
+    }
+  }
+
+  async bootstrapFromSeedIfEmpty(force = false): Promise<CentralBankRateSyncResult> {
+    await ensureCentralBankRateTables();
+    const countResult = await queryPostgres('SELECT COUNT(*)::int AS count FROM central_bank_rate_history');
+    const existing = Number(countResult.rows[0]?.count ?? 0);
+    if (!force && existing > 0) {
+      return {
+        ok: true,
+        inserted: 0,
+        updated: 0,
+        pages: [],
+        rowsFetched: 0,
+        failedPages: 0,
+        message: `Skipped seed bootstrap — ${existing} rows already stored.`,
+      };
+    }
+
+    const startedAtIso = nowIso();
+    let inserted = 0;
+    let updated = 0;
+    let rowsFetched = 0;
+    const fetchedAtIso = nowIso();
+
+    for (const entry of CENTRAL_BANK_RATE_SEED) {
+      await this.upsertEvent({
+        eventId: entry.eventId,
+        currency: entry.currency,
+        country: entry.country,
+        centralBank: entry.centralBank,
+        eventName: entry.eventName,
+        sourceUrl: entry.sourceUrl,
+      });
+
+      for (const row of entry.history) {
+        rowsFetched += 1;
+        const prepared: CentralBankRateHistoryRow = {
+          eventId: entry.eventId,
+          currency: entry.currency,
+          country: entry.country,
+          centralBank: entry.centralBank,
+          eventName: entry.eventName,
+          sourceUrl: entry.sourceUrl,
+          releaseDate: row.releaseDate,
+          releaseTime: row.releaseTime,
+          actualRate: row.actualRate,
+          forecastRate: row.forecastRate,
+          previousRate: row.previousRate,
+          fetchedAtIso,
+        };
+        const upserted = await this.upsertHistory(prepared);
+        if (upserted.inserted) inserted += 1;
+        else updated += 1;
+      }
+    }
+
+    await appendRateSyncLog({
+      eventId: null,
+      currency: null,
+      startedAtIso,
+      completedAtIso: nowIso(),
+      status: 'BOOTSTRAP_SEED',
+      rowsFetched,
+      rowsInserted: inserted,
+      rowsUpdated: updated,
+      errorMessage: null,
+    });
+
+    return {
+      ok: true,
+      inserted,
+      updated,
+      pages: CENTRAL_BANK_RATE_SEED.map((entry) => entry.eventId),
+      rowsFetched,
+      failedPages: 0,
+      message: `Seeded ${inserted} inserted / ${updated} updated central-bank rate rows.`,
+    };
+  }
+
+  async syncFromEconomicCalendar(props: { jobType: string; lookbackHours: number; includeAllHistory?: boolean }): Promise<CentralBankRateSyncResult> {
     await ensureCentralBankRateTables();
     const startedAtIso = nowIso();
     const interval = `${Math.max(1, Math.floor(props.lookbackHours))} hours`;
 
     const rows = await queryPostgres(
+      props.includeAllHistory
+        ? `
+        SELECT
+          id,
+          currency,
+          event_name,
+          event_date::text AS event_date,
+          COALESCE(event_time::text, '') AS event_time,
+          utc_event_time::text AS utc_event_time,
+          actual_value,
+          forecast_value,
+          previous_value,
+          source_url,
+          actual_captured_at::text AS actual_captured_at,
+          updated_at::text AS updated_at
+        FROM economic_events
+        WHERE currency IS NOT NULL
+          AND event_name ILIKE '%interest rate decision%'
+          AND actual_value IS NOT NULL
+          AND btrim(actual_value) <> ''
+        ORDER BY COALESCE(actual_captured_at, updated_at) DESC
+        LIMIT 500
       `
+        : `
         SELECT
           id,
           currency,
@@ -1288,7 +1394,7 @@ export class CentralBankRateHistoryCollectorService {
         ORDER BY COALESCE(actual_captured_at, updated_at) DESC
         LIMIT 500
       `,
-      [interval],
+      props.includeAllHistory ? [] : [interval],
     )
       .then((r) => r.rows as Array<{
         id: string;
@@ -1565,14 +1671,17 @@ export class CentralBankRateHistoryCollectorService {
       }
     }
 
-    const ok = rowsFetched > 0 && failedPages === 0;
-    const message = `Synced central bank rate history pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}, failedPages ${failedPages}).`;
+    const ok = rowsFetched > 0;
+    const message =
+      failedPages > 0
+        ? `Synced central bank rate history pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}, failedPages ${failedPages}).`
+        : `Synced central bank rate history pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}).`;
     await appendRateSyncLog({
       eventId: null,
       currency: null,
       startedAtIso: startedAt,
       completedAtIso: nowIso(),
-      status: 'DONE',
+      status: failedPages > 0 ? 'DONE_PARTIAL' : 'DONE',
       rowsFetched,
       rowsInserted: inserted,
       rowsUpdated: updated,
@@ -1737,14 +1846,17 @@ export class CentralBankRateHistoryCollectorService {
       }
     }
 
-    const ok = rowsFetched > 0 && failedPages === 0;
-    const message = `Synced latest central bank rate rows for pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}, failedPages ${failedPages}).`;
+    const ok = rowsFetched > 0;
+    const message =
+      failedPages > 0
+        ? `Synced latest central bank rate rows for pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}, failedPages ${failedPages}).`
+        : `Synced latest central bank rate rows for pages ${props.pageIds.join(', ')} (inserted ${inserted}, updated ${updated}, rows ${rowsFetched}).`;
     await appendRateSyncLog({
       eventId: null,
       currency: null,
       startedAtIso: startedAt,
       completedAtIso: nowIso(),
-      status: 'DONE_LATEST',
+      status: failedPages > 0 ? 'DONE_LATEST_PARTIAL' : 'DONE_LATEST',
       rowsFetched,
       rowsInserted: inserted,
       rowsUpdated: updated,
@@ -1928,9 +2040,48 @@ export class CentralBankRateSchedulerService {
   ensureStarted(): void {
     if (globalThis.__cacsmsCentralBankRateSchedulerStarted) return;
     globalThis.__cacsmsCentralBankRateSchedulerStarted = true;
+    void new CentralBankRateHistoryCollectorService().registerAllEventPages().catch(() => null);
+    void new CentralBankRateHistoryCollectorService().bootstrapFromSeedIfEmpty(false).catch(() => null);
     globalThis.__cacsmsCentralBankRateSchedulerTimer = setInterval(() => {
       this.tick().catch(() => null);
     }, 60_000);
+  }
+
+  private async runPageSync(props: {
+    jobType: string;
+    scope: 'latest' | 'full';
+    logStatus: { success: string; failed: string };
+  }): Promise<void> {
+    const startedAtIso = nowIso();
+    try {
+      const result =
+        props.scope === 'full'
+          ? await this.collector.syncAllLast3Years(props.jobType)
+          : await this.collector.syncAllLatest(props.jobType);
+      await appendRateSyncLog({
+        eventId: null,
+        currency: null,
+        startedAtIso,
+        completedAtIso: nowIso(),
+        status: result.ok ? props.logStatus.success : `${props.logStatus.failed}_PARTIAL`,
+        rowsFetched: result.rowsFetched,
+        rowsInserted: result.inserted,
+        rowsUpdated: result.updated,
+        errorMessage: result.ok ? null : result.message,
+      });
+    } catch (error) {
+      await appendRateSyncLog({
+        eventId: null,
+        currency: null,
+        startedAtIso,
+        completedAtIso: nowIso(),
+        status: props.logStatus.failed,
+        rowsFetched: 0,
+        rowsInserted: 0,
+        rowsUpdated: 0,
+        errorMessage: error instanceof Error ? error.message : 'page_sync_failed',
+      });
+    }
   }
 
   private async tick(): Promise<void> {
@@ -1943,7 +2094,7 @@ export class CentralBankRateSchedulerService {
         `
           SELECT 1
           FROM rate_sync_logs
-          WHERE status LIKE 'DAILY_%'
+          WHERE status LIKE 'DAILY_PAGE_%'
             AND DATE(sync_started_at AT TIME ZONE 'Africa/Lagos') = $1::date
           LIMIT 1
         `,
@@ -1951,32 +2102,11 @@ export class CentralBankRateSchedulerService {
       ).then((r) => (r.rows?.length ?? 0) > 0).catch(() => false);
 
       if (!already) {
-        const startedAtIso = nowIso();
-        try {
-          const result = await this.collector.syncFromEconomicCalendar({ jobType: 'daily_calendar_mirror', lookbackHours: 48 });
-          await appendRateSyncLog({
-            eventId: null,
-            currency: null,
-            startedAtIso,
-            completedAtIso: nowIso(),
-            status: 'DAILY_SUCCESS',
-            rowsFetched: result.rowsFetched,
-            rowsInserted: result.inserted,
-            rowsUpdated: result.updated,
-          });
-        } catch (error) {
-          await appendRateSyncLog({
-            eventId: null,
-            currency: null,
-            startedAtIso,
-            completedAtIso: nowIso(),
-            status: 'DAILY_FAILED',
-            rowsFetched: 0,
-            rowsInserted: 0,
-            rowsUpdated: 0,
-            errorMessage: error instanceof Error ? error.message : 'daily_failed',
-          });
-        }
+        await this.runPageSync({
+          jobType: 'daily_page_sync',
+          scope: 'latest',
+          logStatus: { success: 'DAILY_PAGE_SUCCESS', failed: 'DAILY_PAGE_FAILED' },
+        });
       }
     }
 
@@ -1986,7 +2116,7 @@ export class CentralBankRateSchedulerService {
         `
           SELECT 1
           FROM rate_sync_logs
-          WHERE status LIKE 'WEEKLY_%'
+          WHERE status LIKE 'WEEKLY_PAGE_%'
             AND DATE(sync_started_at AT TIME ZONE 'Africa/Lagos') = $1::date
           LIMIT 1
         `,
@@ -1994,32 +2124,11 @@ export class CentralBankRateSchedulerService {
       ).then((r) => (r.rows?.length ?? 0) > 0).catch(() => false);
 
       if (!already) {
-        const startedAtIso = nowIso();
-        try {
-          const result = await this.collector.syncFromEconomicCalendar({ jobType: 'weekly_calendar_mirror', lookbackHours: 24 * 90 });
-          await appendRateSyncLog({
-            eventId: null,
-            currency: null,
-            startedAtIso,
-            completedAtIso: nowIso(),
-            status: 'WEEKLY_SUCCESS',
-            rowsFetched: result.rowsFetched,
-            rowsInserted: result.inserted,
-            rowsUpdated: result.updated,
-          });
-        } catch (error) {
-          await appendRateSyncLog({
-            eventId: null,
-            currency: null,
-            startedAtIso,
-            completedAtIso: nowIso(),
-            status: 'WEEKLY_FAILED',
-            rowsFetched: 0,
-            rowsInserted: 0,
-            rowsUpdated: 0,
-            errorMessage: error instanceof Error ? error.message : 'weekly_failed',
-          });
-        }
+        await this.runPageSync({
+          jobType: 'weekly_page_sync',
+          scope: 'full',
+          logStatus: { success: 'WEEKLY_PAGE_SUCCESS', failed: 'WEEKLY_PAGE_FAILED' },
+        });
       }
     }
 
@@ -2027,33 +2136,11 @@ export class CentralBankRateSchedulerService {
       const bucket = `${lagosDateKey(now)}:${Math.floor(now.getUTCHours() / 6)}`;
       if (globalThis.__cacsmsCentralBankRatePreEventKey !== bucket) {
         globalThis.__cacsmsCentralBankRatePreEventKey = bucket;
-        const startedAtIso = nowIso();
-        try {
-          const result = await this.collector.syncFromEconomicCalendar({ jobType: 'pre_event_calendar_mirror', lookbackHours: 72 });
-
-          await appendRateSyncLog({
-            eventId: null,
-            currency: null,
-            startedAtIso,
-            completedAtIso: nowIso(),
-            status: 'PRE_EVENT_SUCCESS',
-            rowsFetched: result.rowsFetched,
-            rowsInserted: result.inserted,
-            rowsUpdated: result.updated,
-          });
-        } catch (error) {
-          await appendRateSyncLog({
-            eventId: null,
-            currency: null,
-            startedAtIso,
-            completedAtIso: nowIso(),
-            status: 'PRE_EVENT_FAILED',
-            rowsFetched: 0,
-            rowsInserted: 0,
-            rowsUpdated: 0,
-            errorMessage: error instanceof Error ? error.message : 'pre_event_failed',
-          });
-        }
+        await this.runPageSync({
+          jobType: 'pre_event_page_sync',
+          scope: 'latest',
+          logStatus: { success: 'PRE_EVENT_PAGE_SUCCESS', failed: 'PRE_EVENT_PAGE_FAILED' },
+        });
       }
     }
 
@@ -2086,17 +2173,18 @@ export class CentralBankRateSchedulerService {
             }
           }
 
-          const result = await this.collector.syncFromEconomicCalendar({ jobType: 'post_release_calendar_mirror', lookbackHours: 4 });
+          const result = await this.collector.syncAllLatest('post_release_page_sync');
 
           await appendRateSyncLog({
             eventId: null,
             currency: null,
             startedAtIso,
             completedAtIso: nowIso(),
-            status: 'POST_RELEASE_SUCCESS',
+            status: result.ok ? 'POST_RELEASE_PAGE_SUCCESS' : 'POST_RELEASE_PAGE_PARTIAL',
             rowsFetched: result.rowsFetched,
             rowsInserted: result.inserted,
             rowsUpdated: result.updated,
+            errorMessage: result.ok ? null : result.message,
           });
         } catch (error) {
           await appendRateSyncLog({
@@ -2104,7 +2192,7 @@ export class CentralBankRateSchedulerService {
             currency: null,
             startedAtIso,
             completedAtIso: nowIso(),
-            status: 'POST_RELEASE_FAILED',
+            status: 'POST_RELEASE_PAGE_FAILED',
             rowsFetched: 0,
             rowsInserted: 0,
             rowsUpdated: 0,

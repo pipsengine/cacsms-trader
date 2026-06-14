@@ -2,6 +2,7 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 import { queryPostgres } from '@/lib/postgres';
+import { bootstrapCentralBankRatesIfEmpty } from '@/lib/rates/bootstrap-central-bank-rates';
 import { ensureCentralBankRateTables, CentralBankRateSchedulerService } from '@/services/economic-data-service/src/investing-historical-rate-decision';
 
 const currencies = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'NZD', 'CHF'] as const;
@@ -10,6 +11,7 @@ export async function GET(): Promise<Response> {
   try {
     new CentralBankRateSchedulerService().ensureStarted();
     await ensureCentralBankRateTables();
+    await bootstrapCentralBankRatesIfEmpty();
 
     const rows = await queryPostgres(
       `
@@ -28,7 +30,7 @@ export async function GET(): Promise<Response> {
           h.fetched_at::text AS fetched_at
         FROM central_bank_rate_history h
         WHERE h.currency = ANY($1::text[])
-        ORDER BY h.currency, h.release_date DESC, h.release_time DESC, h.fetched_at DESC
+        ORDER BY h.currency, (h.actual_rate IS NULL) ASC, h.release_date DESC, h.release_time DESC, h.fetched_at DESC
       `,
       [[...currencies]],
     );

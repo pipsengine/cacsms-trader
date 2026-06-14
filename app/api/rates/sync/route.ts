@@ -2,20 +2,17 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 import { queryPostgres } from '@/lib/postgres';
+import { assertLocalToolAccess } from '@/lib/local-access';
+import { bootstrapCentralBankRatesFromSeed } from '@/lib/rates/bootstrap-central-bank-rates';
+import {
+  CENTRAL_BANK_RATE_EVENT_PAGES,
+  centralBankEventIdByCurrency,
+  resolveCentralBankRatePageId,
+} from '@/lib/rates/central-bank-rate-event-pages';
 import { ensureCentralBankRateTables, CentralBankRateHistoryCollectorService, CentralBankRateSchedulerService } from '@/services/economic-data-service/src/investing-historical-rate-decision';
 
-const eventMetaById: Record<number, { currency: string; country: string; centralBank: string; eventName: string; investingUrl: string }> = {
-  164: { currency: 'EUR', country: 'Eurozone', centralBank: 'European Central Bank (ECB)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-164' },
-  165: { currency: 'JPY', country: 'Japan', centralBank: 'Bank of Japan (BoJ)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-165' },
-  166: { currency: 'CAD', country: 'Canada', centralBank: 'Bank of Canada (BoC)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-166' },
-  167: { currency: 'NZD', country: 'New Zealand', centralBank: 'Reserve Bank of New Zealand (RBNZ)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-167' },
-  168: { currency: 'USD', country: 'United States', centralBank: 'Federal Reserve (FOMC)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-168' },
-  169: { currency: 'CHF', country: 'Switzerland', centralBank: 'Swiss National Bank (SNB)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-169' },
-  170: { currency: 'GBP', country: 'United Kingdom', centralBank: 'Bank of England (BoE)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-170' },
-  171: { currency: 'AUD', country: 'Australia', centralBank: 'Reserve Bank of Australia (RBA)', eventName: 'Interest Rate Decision', investingUrl: 'https://www.investing.com/economic-calendar/interest-rate-decision-171' },
-};
-
-const eventIdByCurrency: Record<string, number> = Object.fromEntries(Object.entries(eventMetaById).map(([id, m]) => [m.currency, Number(id)]));
+const eventMetaById = CENTRAL_BANK_RATE_EVENT_PAGES;
+const eventIdByCurrency = centralBankEventIdByCurrency;
 
 function parseRateText(value: unknown): number | null {
   const raw = String(value ?? '').trim();
@@ -77,7 +74,7 @@ function parsePastedHistoryRows(inputText: string): Array<{ releaseDate: string;
   const normalized = slice.replace(/\r\n/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n+/g, '\n');
 
   const rows: Array<{ releaseDate: string; releaseTime: string; actualRate: number | null; forecastRate: number | null; previousRate: number | null }> = [];
-  const re = /([A-Za-z]{3}\s+\d{1,2},\s+\d{4}(?:\s*\([^)]+\))?)\s+(\d{2}:\d{2})\s+((?:\d+(?:\.\d+)?%)|—|-|n\/a)?\s*((?:\d+(?:\.\d+)?%)|—|-|n\/a)?\s*((?:\d+(?:\.\d+)?%)|—|-|n\/a)?/gi;
+  const re = /([A-Za-z]{3}\s+\d{1,2},\s+\d{4}(?:\s*\([^)]+\))?)\s+(\d{2}:\d{2})\s+((?:-?\d+(?:\.\d+)?%)|—|-|n\/a)?\s+((?:-?\d+(?:\.\d+)?%)|—|-|n\/a)?\s+((?:-?\d+(?:\.\d+)?%)|—|-|n\/a)?/gi;
   for (const m of normalized.matchAll(re)) {
     const dateIso = parseMdyDateToIso(m[1] ?? '');
     const timeText = String(m[2] ?? '').trim();
@@ -94,21 +91,7 @@ function parsePastedHistoryRows(inputText: string): Array<{ releaseDate: string;
 }
 
 function assertLocalOnly(request: Request) {
-  const env = String(process.env.CACSMS_ENV ?? 'development').toLowerCase();
-  if (env !== 'development' && String(process.env.CACSMS_ENABLE_ECONOMIC_CALENDAR_TOOL ?? '').toLowerCase() !== 'true') {
-    throw new Error('Rates sync is disabled outside development.');
-  }
-
-  const url = new URL(request.url);
-  const host = url.hostname;
-  if (host === 'localhost' || host === '127.0.0.1') return;
-
-  const forwardedFor = request.headers.get('x-forwarded-for') ?? '';
-  const forwardedHost = request.headers.get('x-forwarded-host') ?? '';
-  const forwardedProto = request.headers.get('x-forwarded-proto') ?? '';
-  if (forwardedFor || forwardedHost || forwardedProto) {
-    throw new Error('Rates sync requires local machine access.');
-  }
+  assertLocalToolAccess(request, 'Rates sync requires local machine access.');
 }
 
 function assertRateLimit(key: string, windowMs: number) {
@@ -122,8 +105,11 @@ function assertRateLimit(key: string, windowMs: number) {
 
 export async function POST(request: Request): Promise<Response> {
   try {
+    const collector = new CentralBankRateHistoryCollectorService();
     new CentralBankRateSchedulerService().ensureStarted();
     await ensureCentralBankRateTables();
+    await collector.registerAllEventPages();
+
     const tablesOk = await queryPostgres(
       `
         SELECT 1
@@ -133,7 +119,9 @@ export async function POST(request: Request): Promise<Response> {
         GROUP BY table_schema
         HAVING COUNT(*) >= 3
       `,
-    ).then((r) => (r.rows?.length ?? 0) > 0).catch(() => false);
+    )
+      .then((r) => (r.rows?.length ?? 0) > 0)
+      .catch(() => false);
     if (!tablesOk) {
       return Response.json(
         { ok: false, error: 'Missing rate tables. Apply database migration 014_central_bank_rate_history.sql.' },
@@ -145,7 +133,12 @@ export async function POST(request: Request): Promise<Response> {
 
     const body = await request
       .json()
-      .catch(() => null as null | { mode?: string; currency?: string; eventId?: number; pastedText?: string; sourceUrl?: string });
+      .catch(() => null as null | { mode?: string; scope?: string; currency?: string; eventId?: number; pastedText?: string; sourceUrl?: string });
+
+    if (body && String(body.mode ?? '').toLowerCase() === 'seed') {
+      const result = await bootstrapCentralBankRatesFromSeed(Boolean((body as { force?: boolean }).force));
+      return Response.json({ mode: 'seed', ...result }, { status: 200, headers: { 'Cache-Control': 'no-store' } });
+    }
 
     if (body && String(body.mode ?? '').toLowerCase() === 'paste') {
       const currency = String(body.currency ?? '').trim().toUpperCase();
@@ -249,7 +242,7 @@ export async function POST(request: Request): Promise<Response> {
             fetchedAtIso,
           ],
         );
-        if (Boolean((result.rows?.[0] as any)?.inserted)) inserted += 1;
+        if (Boolean((result.rows?.[0] as { inserted?: boolean })?.inserted)) inserted += 1;
         else updated += 1;
       }
 
@@ -259,18 +252,66 @@ export async function POST(request: Request): Promise<Response> {
       );
     }
 
-    const result = await new CentralBankRateHistoryCollectorService().syncAllLast3Years('manual_sync');
-    if (!result.ok || (result.rowsFetched ?? 0) === 0) {
+    const pageId = resolveCentralBankRatePageId({ eventId: body?.eventId, currency: body?.currency });
+    const scope = String(body?.scope ?? body?.mode ?? 'latest').toLowerCase();
+    const jobType = pageId ? `manual_page_${pageId}` : 'manual_sync';
+
+    let result;
+    if (pageId) {
+      result =
+        scope === 'full'
+          ? await collector.syncPageLast3Years(pageId, jobType)
+          : await collector.syncPageLatest(pageId, jobType);
       return Response.json(
-        { ...result, ok: false, error: result.message || 'No rows fetched from Investing.com (likely blocked or table selector changed).' },
+        { ...result, ok: (result.rowsFetched ?? 0) > 0, mode: 'page', scope, eventId: pageId, currency: eventMetaById[pageId]?.currency ?? null },
+        { status: 202, headers: { 'Cache-Control': 'no-store' } },
+      );
+    }
+
+    result = scope === 'full' ? await collector.syncAllLast3Years(jobType) : await collector.syncAllLatest(jobType);
+
+    if ((result.rowsFetched ?? 0) === 0) {
+      return Response.json(
+        { ...result, ok: false, mode: scope === 'full' ? 'full' : 'latest', error: result.message || 'No rows fetched from Investing.com (likely blocked or table selector changed).' },
         { status: 200, headers: { 'Cache-Control': 'no-store' } },
       );
     }
-    return Response.json({ ...result }, { status: 202, headers: { 'Cache-Control': 'no-store' } });
+
+    return Response.json(
+      { ...result, ok: true, mode: scope === 'full' ? 'full' : 'latest' },
+      { status: 202, headers: { 'Cache-Control': 'no-store' } },
+    );
   } catch (error) {
     return Response.json(
       { ok: false, error: error instanceof Error ? error.message : 'rates_sync_failed' },
       { status: 200, headers: { 'Cache-Control': 'no-store' } },
     );
   }
+}
+
+export async function GET(): Promise<Response> {
+  const pages = Object.entries(CENTRAL_BANK_RATE_EVENT_PAGES).map(([eventId, meta]) => ({
+    eventId: Number(eventId),
+    ...meta,
+  }));
+  return Response.json(
+    {
+      ok: true,
+      pages,
+      syncModes: {
+        latest: 'Sync recent rows (120-day lookback) from all 8 Investing.com event pages',
+        full: 'Sync last 3 years from all 8 pages',
+        page: 'Sync one currency via eventId or currency query/body field',
+        paste: 'Import pasted table text for one currency',
+        seed: 'Bootstrap from bundled seed snapshots',
+      },
+      scheduler: {
+        daily: 'Latest page sync at midnight Africa/Lagos',
+        weekly: 'Full 3-year page sync Saturday midnight Africa/Lagos',
+        every6Hours: 'Latest page sync every 6 hours',
+        every5Minutes: 'Latest page sync every 5 minutes (post-release window)',
+      },
+    },
+    { headers: { 'Cache-Control': 'no-store' } },
+  );
 }

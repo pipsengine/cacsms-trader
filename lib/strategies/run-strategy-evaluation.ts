@@ -144,7 +144,33 @@ export async function runStrategyEvaluation(input: {
   };
 }
 
-export async function runAutonomousOverviewEvaluations() {
+export interface AutonomousOverviewStrategyEntry {
+  id: string;
+  label: string;
+  group: string;
+  tone: string;
+  decision: 'buy' | 'sell' | 'wait';
+  confidence: number;
+  bias: string;
+  evaluatedAt: string | null;
+  error: string | null;
+}
+
+export interface AutonomousOverviewResult {
+  symbol: string;
+  pipelineMode: string;
+  activeSymbols: string[];
+  bridgeOnline: boolean;
+  refreshIntervalMs: number;
+  evaluatedAt: string;
+  strategies: AutonomousOverviewStrategyEntry[];
+}
+
+const OVERVIEW_CACHE_TTL_MS = 15_000;
+let overviewCache: { at: number; data: AutonomousOverviewResult } | null = null;
+let overviewInflight: Promise<AutonomousOverviewResult> | null = null;
+
+async function computeAutonomousOverviewEvaluations(): Promise<AutonomousOverviewResult> {
   const { ACTIVE_STRATEGIES } = await import('@/lib/strategies/registry');
   const pipeline = await resolveAutonomousPipelineSymbol();
 
@@ -188,4 +214,26 @@ export async function runAutonomousOverviewEvaluations() {
     evaluatedAt: new Date().toISOString(),
     strategies,
   };
+}
+
+export async function runAutonomousOverviewEvaluations(options?: { force?: boolean }): Promise<AutonomousOverviewResult> {
+  const now = Date.now();
+  if (!options?.force && overviewCache && now - overviewCache.at < OVERVIEW_CACHE_TTL_MS) {
+    return overviewCache.data;
+  }
+
+  if (!options?.force && overviewInflight) {
+    return overviewInflight;
+  }
+
+  overviewInflight = computeAutonomousOverviewEvaluations()
+    .then((data) => {
+      overviewCache = { at: Date.now(), data };
+      return data;
+    })
+    .finally(() => {
+      overviewInflight = null;
+    });
+
+  return overviewInflight;
 }
