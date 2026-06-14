@@ -2,6 +2,7 @@ import type { StrategyPriceCandle } from './strategy-candle-loader';
 import { strategyCandlesToReconstructed } from './strategy-candle-adapter';
 import { analyzeTrendlines, type TrendlineDetection } from '@/lib/trendline-detection-engine';
 import { analyzeSwingPoints } from '@/lib/swing-point-engine';
+import { analyzeSupportResistance, type SupportResistanceZone } from '@/lib/support-resistance-engine';
 import {
   analyzeMultiTimeframe,
   MTF_TIMEFRAMES,
@@ -1162,6 +1163,485 @@ export const evaluateHigherHighsHigherLowsEngine: StrategyEngine = (candles, con
   });
 };
 
+function averageCandleRange(candles: StrategyPriceCandle[]): number {
+  if (candles.length === 0) return 0;
+  return candles.reduce((sum, candle) => sum + (candle.high - candle.low), 0) / candles.length;
+}
+
+export const evaluateTrendContinuationPatternEngine: StrategyEngine = (candles, config, context) => {
+  const trendPeriod = Math.max(20, parseNumber(config.trendPeriod, 50));
+  const impulseLookback = Math.max(12, parseNumber(config.impulseLookback, 24));
+  const patternBars = Math.max(6, parseNumber(config.patternBars, 12));
+  const compressionThreshold = parseNumber(config.compressionThreshold, 0.72);
+  const breakoutBufferPct = parseNumber(config.breakoutBufferPct, 0.03);
+  const closes = candles.map((item) => item.close);
+  const trendEma = ema(closes, trendPeriod);
+  const atrSeries = atr(candles, 14);
+  const lastIndex = candles.length - 1;
+  const last = candles[lastIndex]!;
+  const setupStart = Math.max(0, lastIndex - patternBars);
+  const impulseStart = Math.max(0, setupStart - impulseLookback);
+  const impulseWindow = candles.slice(impulseStart, setupStart);
+  const setupWindow = candles.slice(setupStart, lastIndex);
+  const fallbackSetup = setupWindow.length > 0 ? setupWindow : candles.slice(Math.max(0, lastIndex - patternBars), lastIndex);
+  const patternHigh = Math.max(...fallbackSetup.map((item) => item.high));
+  const patternLow = Math.min(...fallbackSetup.map((item) => item.low));
+  const patternRange = patternHigh - patternLow;
+  const impulseStartClose = impulseWindow[0]?.close ?? candles[0]?.close ?? last.close;
+  const impulseEndClose = impulseWindow.at(-1)?.close ?? fallbackSetup[0]?.close ?? last.close;
+  const impulseMove = impulseEndClose - impulseStartClose;
+  const impulseRange = Math.max(
+    Math.max(...(impulseWindow.length ? impulseWindow : candles.slice(0, setupStart || lastIndex)).map((item) => item.high))
+      - Math.min(...(impulseWindow.length ? impulseWindow : candles.slice(0, setupStart || lastIndex)).map((item) => item.low)),
+    averageCandleRange(candles.slice(Math.max(0, lastIndex - 30), lastIndex)),
+  );
+  const impulseAtr = atrSeries[setupStart - 1] ?? atrSeries[lastIndex - patternBars] ?? atrSeries[lastIndex] ?? averageCandleRange(candles.slice(-20));
+  const impulseAtrMultiple = impulseAtr > 0 ? Math.abs(impulseMove) / impulseAtr : 0;
+  const setupAverageRange = averageCandleRange(fallbackSetup);
+  const impulseAverageRange = averageCandleRange(impulseWindow.length ? impulseWindow : candles.slice(Math.max(0, setupStart - impulseLookback), setupStart));
+  const compressionRatio = impulseAverageRange > 0
+    ? setupAverageRange / impulseAverageRange
+    : patternRange > 0 && impulseRange > 0
+      ? patternRange / impulseRange
+      : 1;
+  const compressed = compressionRatio <= compressionThreshold;
+  const emaNow = trendEma[lastIndex];
+  const emaPrev = trendEma[Math.max(0, lastIndex - Math.min(patternBars, 10))];
+  const emaSlopePct = emaNow != null && emaPrev != null && emaPrev !== 0
+    ? ((emaNow - emaPrev) / emaPrev) * 100
+    : 0;
+  const trendBullish = emaNow != null && last.close > emaNow && emaSlopePct >= 0;
+  const trendBearish = emaNow != null && last.close < emaNow && emaSlopePct <= 0;
+  const impulseBullish = impulseMove > 0 && impulseAtrMultiple >= 1.1;
+  const impulseBearish = impulseMove < 0 && impulseAtrMultiple >= 1.1;
+  const setupSlope = fallbackSetup.length >= 2
+    ? fallbackSetup.at(-1)!.close - fallbackSetup[0]!.close
+    : 0;
+  const firstHalf = fallbackSetup.slice(0, Math.max(1, Math.floor(fallbackSetup.length / 2)));
+  const secondHalf = fallbackSetup.slice(Math.max(1, Math.floor(fallbackSetup.length / 2)));
+  const firstHalfRange = Math.max(...firstHalf.map((item) => item.high)) - Math.min(...firstHalf.map((item) => item.low));
+  const secondHalfRange = secondHalf.length
+    ? Math.max(...secondHalf.map((item) => item.high)) - Math.min(...secondHalf.map((item) => item.low))
+    : firstHalfRange;
+  const counterTrendFlag = (trendBullish && setupSlope < 0) || (trendBearish && setupSlope > 0);
+  const pennantCompression = firstHalfRange > 0 && secondHalfRange / firstHalfRange <= 0.85;
+  const patternKind = counterTrendFlag
+    ? 'flag'
+    : pennantCompression
+      ? 'pennant'
+      : compressed
+        ? 'range compression'
+        : 'unconfirmed';
+  const buffer = last.close * (breakoutBufferPct / 100);
+  const bullishBreakout = last.close > patternHigh + buffer && last.close > last.open;
+  const bearishBreakout = last.close < patternLow - buffer && last.close < last.open;
+
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  if (trendBullish && impulseBullish) {
+    bias = 'bullish';
+    if (compressed && bullishBreakout) decision = 'buy';
+  } else if (trendBearish && impulseBearish) {
+    bias = 'bearish';
+    if (compressed && bearishBreakout) decision = 'sell';
+  } else if (trendBullish || impulseBullish) {
+    bias = 'bullish';
+  } else if (trendBearish || impulseBearish) {
+    bias = 'bearish';
+  }
+
+  const institutionalScore = [
+    trendBullish || trendBearish,
+    impulseBullish || impulseBearish,
+    compressed,
+    counterTrendFlag || pennantCompression,
+    decision !== 'wait',
+  ].filter(Boolean).length;
+
+  return buildEvaluationResult({
+    strategyId: 'trend-continuation-pattern-strategy',
+    context,
+    config: { ...config, trendPeriod, impulseLookback, patternBars, compressionThreshold, breakoutBufferPct },
+    candles,
+    decision,
+    bias,
+    confidence: 28 + institutionalScore * 12 + (decision !== 'wait' ? 18 : 0) + Math.min(10, impulseAtrMultiple * 2),
+    reasons: [
+      `Continuation pattern engine: EMA(${trendPeriod}) regime + ${impulseLookback}-bar impulse + ${patternBars}-bar pattern box`,
+      trendBullish
+        ? 'Trend regime bullish: price above rising EMA'
+        : trendBearish
+          ? 'Trend regime bearish: price below falling EMA'
+          : 'Trend regime not fully aligned',
+      impulseBullish
+        ? `Bullish impulse leg validated at ${impulseAtrMultiple.toFixed(2)} ATR`
+        : impulseBearish
+          ? `Bearish impulse leg validated at ${impulseAtrMultiple.toFixed(2)} ATR`
+          : `Impulse leg weak at ${impulseAtrMultiple.toFixed(2)} ATR`,
+      compressed
+        ? `${patternKind} setup compressed to ${(compressionRatio * 100).toFixed(0)}% of impulse range behavior`
+        : `Pattern still too wide: compression ratio ${(compressionRatio * 100).toFixed(0)}%`,
+      decision === 'buy'
+        ? 'Trend-aligned bullish breakout closed above continuation boundary'
+        : decision === 'sell'
+          ? 'Trend-aligned bearish breakout closed below continuation boundary'
+          : 'Awaiting close-confirmed breakout in trend direction',
+    ],
+    metrics: {
+      patternKind,
+      trendEma: emaNow != null ? Number(emaNow.toFixed(5)) : null,
+      emaSlopePct: Number(emaSlopePct.toFixed(4)),
+      impulseAtrMultiple: Number(impulseAtrMultiple.toFixed(2)),
+      compressionRatio: Number(compressionRatio.toFixed(3)),
+      patternHigh: Number(patternHigh.toFixed(5)),
+      patternLow: Number(patternLow.toFixed(5)),
+      breakoutBufferPct,
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: `${patternKind} breakout`,
+        detail: decision === 'buy' ? 'Continuation break above consolidation high' : 'Continuation break below consolidation low',
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: lastIndex,
+      }]
+      : compressed && bias !== 'neutral'
+        ? [{
+          label: `${patternKind} setup`,
+          detail: 'Continuation structure is staged; breakout confirmation pending',
+          tone: 'violet',
+          barIndex: lastIndex,
+        }]
+        : [],
+  });
+};
+
+function distanceToZone(price: number, zone: SupportResistanceZone): number {
+  if (price >= zone.zoneLow && price <= zone.zoneHigh) return 0;
+  return Math.min(Math.abs(price - zone.zoneLow), Math.abs(price - zone.zoneHigh));
+}
+
+function nearestZone(
+  price: number,
+  zones: SupportResistanceZone[],
+  side: 'support' | 'resistance',
+): SupportResistanceZone | null {
+  const directional = zones.filter((zone) => {
+    if (side === 'support') return zone.zoneType === 'support' || zone.zoneType === 'dynamic' || zone.zoneType === 'psychological';
+    return zone.zoneType === 'resistance' || zone.zoneType === 'dynamic' || zone.zoneType === 'psychological';
+  });
+  return directional.sort((left, right) => distanceToZone(price, left) - distanceToZone(price, right))[0] ?? null;
+}
+
+export const evaluateDynamicSupportResistanceTrendEngine: StrategyEngine = (candles, config, context) => {
+  const trendPeriod = Math.max(20, parseNumber(config.trendPeriod, 50));
+  const valuePeriod = Math.max(8, parseNumber(config.valuePeriod, 21));
+  const zoneLookback = Math.max(30, parseNumber(config.zoneLookback, 80));
+  const atrTolerance = parseNumber(config.atrTolerance, 0.65);
+  const minZoneStrength = parseNumber(config.minZoneStrength, 0.38);
+  const closes = candles.map((item) => item.close);
+  const trendEma = ema(closes, trendPeriod);
+  const valueEma = ema(closes, valuePeriod);
+  const atrSeries = atr(candles, 14);
+  const lastIndex = candles.length - 1;
+  const last = candles[lastIndex]!;
+  const prior = candles[lastIndex - 1] ?? last;
+  const trendNow = trendEma[lastIndex];
+  const trendPrev = trendEma[Math.max(0, lastIndex - 8)];
+  const valueNow = valueEma[lastIndex];
+  const atrNow = atrSeries[lastIndex] ?? averageCandleRange(candles.slice(-20));
+  const tolerance = Math.max(last.close * 0.00015, atrNow * atrTolerance);
+  const emaSlopePct = trendNow != null && trendPrev != null && trendPrev !== 0
+    ? ((trendNow - trendPrev) / trendPrev) * 100
+    : 0;
+  const trendBullish = trendNow != null && last.close >= trendNow && emaSlopePct >= 0;
+  const trendBearish = trendNow != null && last.close <= trendNow && emaSlopePct <= 0;
+
+  const reconstructed = strategyCandlesToReconstructed(candles.slice(-zoneLookback));
+  const analysis = analyzeSupportResistance(reconstructed);
+  const qualifiedZones = analysis.zones.filter((zone) => zone.strengthScore >= minZoneStrength);
+  const supportZone = nearestZone(last.close, qualifiedZones, 'support');
+  const resistanceZone = nearestZone(last.close, qualifiedZones, 'resistance');
+  const supportDistance = supportZone ? distanceToZone(last.close, supportZone) : Number.POSITIVE_INFINITY;
+  const resistanceDistance = resistanceZone ? distanceToZone(last.close, resistanceZone) : Number.POSITIVE_INFINITY;
+  const valueDistance = valueNow != null ? Math.abs(last.close - valueNow) : Number.POSITIVE_INFINITY;
+  const nearSupport = supportZone != null && supportDistance <= tolerance;
+  const nearResistance = resistanceZone != null && resistanceDistance <= tolerance;
+  const nearValue = valueNow != null && valueDistance <= tolerance;
+  const range = Math.max(last.high - last.low, 0.00001);
+  const lowerWick = Math.min(last.open, last.close) - last.low;
+  const upperWick = last.high - Math.max(last.open, last.close);
+  const bullishRejection = lowerWick / range >= 0.34 && last.close >= Math.max(last.open, prior.close);
+  const bearishRejection = upperWick / range >= 0.34 && last.close <= Math.min(last.open, prior.close);
+  const reclaimedValue = valueNow != null && prior.close < valueNow && last.close >= valueNow;
+  const rejectedValue = valueNow != null && prior.close > valueNow && last.close <= valueNow;
+
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  let selectedZone: SupportResistanceZone | null = null;
+  let entrySource = 'none';
+
+  if (trendBullish) {
+    bias = 'bullish';
+    selectedZone = supportZone;
+    if ((nearSupport || nearValue) && (bullishRejection || reclaimedValue)) {
+      decision = 'buy';
+      entrySource = nearSupport ? 'institutional support retest' : 'dynamic EMA value retest';
+    } else if (nearSupport || nearValue) {
+      entrySource = nearSupport ? 'support retest pending rejection' : 'dynamic value retest pending rejection';
+    }
+  } else if (trendBearish) {
+    bias = 'bearish';
+    selectedZone = resistanceZone;
+    if ((nearResistance || nearValue) && (bearishRejection || rejectedValue)) {
+      decision = 'sell';
+      entrySource = nearResistance ? 'institutional resistance retest' : 'dynamic EMA value retest';
+    } else if (nearResistance || nearValue) {
+      entrySource = nearResistance ? 'resistance retest pending rejection' : 'dynamic value retest pending rejection';
+    }
+  } else if (last.close > (trendNow ?? last.close)) {
+    bias = 'bullish';
+  } else if (last.close < (trendNow ?? last.close)) {
+    bias = 'bearish';
+  }
+
+  const zoneStrength = selectedZone?.strengthScore ?? 0;
+  const rejectionScore = decision === 'buy'
+    ? Math.max(lowerWick / range, reclaimedValue ? 0.55 : 0)
+    : decision === 'sell'
+      ? Math.max(upperWick / range, rejectedValue ? 0.55 : 0)
+      : Math.max(lowerWick, upperWick) / range;
+
+  return buildEvaluationResult({
+    strategyId: 'dynamic-support-and-resistance-trend-trading',
+    context,
+    config: { ...config, trendPeriod, valuePeriod, zoneLookback, atrTolerance, minZoneStrength },
+    candles,
+    decision,
+    bias,
+    confidence: 30
+      + (trendBullish || trendBearish ? 18 : 0)
+      + (nearSupport || nearResistance || nearValue ? 16 : 0)
+      + Math.round(zoneStrength * 18)
+      + Math.min(16, rejectionScore * 18)
+      + (decision !== 'wait' ? 12 : 0),
+    reasons: [
+      `Dynamic S/R trend engine: EMA(${trendPeriod}) regime + EMA(${valuePeriod}) value band + institutional zone map`,
+      trendBullish
+        ? 'Bullish trend regime: price above rising trend EMA'
+        : trendBearish
+          ? 'Bearish trend regime: price below falling trend EMA'
+          : 'Trend regime is transitional; retest entries disabled',
+      selectedZone
+        ? `${selectedZone.zoneType} zone ${selectedZone.zoneLow.toFixed(5)}-${selectedZone.zoneHigh.toFixed(5)} strength ${(selectedZone.strengthScore * 100).toFixed(0)}%`
+        : 'No qualified institutional zone near current price',
+      nearValue
+        ? `Price is inside dynamic value tolerance around EMA(${valuePeriod})`
+        : valueNow != null
+          ? `Price is ${(valueDistance / Math.max(atrNow, 0.00001)).toFixed(2)} ATR from dynamic value`
+          : 'Dynamic value EMA unavailable',
+      decision === 'buy'
+        ? `Long continuation confirmed from ${entrySource}`
+        : decision === 'sell'
+          ? `Short continuation confirmed from ${entrySource}`
+          : entrySource === 'none'
+            ? 'No defended trend retest on the latest bar'
+            : `${entrySource}; awaiting stronger rejection close`,
+    ],
+    metrics: {
+      trendEma: trendNow != null ? Number(trendNow.toFixed(5)) : null,
+      valueEma: valueNow != null ? Number(valueNow.toFixed(5)) : null,
+      emaSlopePct: Number(emaSlopePct.toFixed(4)),
+      atr: Number(atrNow.toFixed(5)),
+      entrySource,
+      selectedZoneType: selectedZone?.zoneType ?? null,
+      selectedZoneMidpoint: selectedZone ? Number(selectedZone.midpointPrice.toFixed(5)) : null,
+      selectedZoneStrength: selectedZone ? Number((selectedZone.strengthScore * 100).toFixed(1)) : null,
+      zoneDistanceAtr: selectedZone ? Number((distanceToZone(last.close, selectedZone) / Math.max(atrNow, 0.00001)).toFixed(2)) : null,
+      valueDistanceAtr: valueNow != null ? Number((valueDistance / Math.max(atrNow, 0.00001)).toFixed(2)) : null,
+      rejectionScore: Number((rejectionScore * 100).toFixed(1)),
+      qualifiedZones: qualifiedZones.length,
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: decision === 'buy' ? 'support trend retest' : 'resistance trend retest',
+        detail: `${entrySource} with ${Math.round(rejectionScore * 100)}% rejection score`,
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: lastIndex,
+      }]
+      : selectedZone && (nearSupport || nearResistance || nearValue)
+        ? [{
+          label: 'trend retest watch',
+          detail: `${entrySource} at ${selectedZone.zoneType} zone`,
+          tone: 'violet',
+          barIndex: lastIndex,
+        }]
+        : [],
+  });
+};
+
+export const evaluateFibonacciTrendContinuationEngine: StrategyEngine = (candles, config, context) => {
+  const trendPeriod = Math.max(20, parseNumber(config.trendPeriod, 50));
+  const swingLookback = Math.max(30, parseNumber(config.swingLookback, 55));
+  const minRetracement = parseNumber(config.minRetracement, 0.382);
+  const maxRetracement = Math.max(minRetracement + 0.05, parseNumber(config.maxRetracement, 0.618));
+  const toleranceAtr = parseNumber(config.toleranceAtr, 0.25);
+  const closes = candles.map((item) => item.close);
+  const trendEma = ema(closes, trendPeriod);
+  const atrSeries = atr(candles, 14);
+  const lastIndex = candles.length - 1;
+  const last = candles[lastIndex]!;
+  const prior = candles[lastIndex - 1] ?? last;
+  const trendNow = trendEma[lastIndex];
+  const trendPrev = trendEma[Math.max(0, lastIndex - 10)];
+  const atrNow = atrSeries[lastIndex] ?? averageCandleRange(candles.slice(-20));
+  const emaSlopePct = trendNow != null && trendPrev != null && trendPrev !== 0
+    ? ((trendNow - trendPrev) / trendPrev) * 100
+    : 0;
+  const trendBullish = trendNow != null && last.close >= trendNow && emaSlopePct >= 0;
+  const trendBearish = trendNow != null && last.close <= trendNow && emaSlopePct <= 0;
+  const windowStart = Math.max(0, candles.length - swingLookback);
+  const window = candles.slice(windowStart);
+  const highPoint = window.reduce((best, candle, offset) => (
+    candle.high > best.price ? { price: candle.high, index: windowStart + offset } : best
+  ), { price: Number.NEGATIVE_INFINITY, index: windowStart });
+  const lowPoint = window.reduce((best, candle, offset) => (
+    candle.low < best.price ? { price: candle.low, index: windowStart + offset } : best
+  ), { price: Number.POSITIVE_INFINITY, index: windowStart });
+  const impulseBullish = lowPoint.index < highPoint.index;
+  const impulseBearish = highPoint.index < lowPoint.index;
+  const impulseLow = impulseBullish ? lowPoint.price : lowPoint.price;
+  const impulseHigh = impulseBearish ? highPoint.price : highPoint.price;
+  const impulseRange = Math.max(impulseHigh - impulseLow, 0.00001);
+  const impulseAtrMultiple = atrNow > 0 ? impulseRange / atrNow : 0;
+  const bullishRetracement = (impulseHigh - last.close) / impulseRange;
+  const bearishRetracement = (last.close - impulseLow) / impulseRange;
+  const activeRetracement = trendBullish && impulseBullish
+    ? bullishRetracement
+    : trendBearish && impulseBearish
+      ? bearishRetracement
+      : trendBullish
+        ? bullishRetracement
+        : bearishRetracement;
+  const fib382Bull = impulseHigh - impulseRange * 0.382;
+  const fib50Bull = impulseHigh - impulseRange * 0.5;
+  const fib618Bull = impulseHigh - impulseRange * 0.618;
+  const fib382Bear = impulseLow + impulseRange * 0.382;
+  const fib50Bear = impulseLow + impulseRange * 0.5;
+  const fib618Bear = impulseLow + impulseRange * 0.618;
+  const tolerance = Math.max(atrNow * toleranceAtr, last.close * 0.0001);
+  const inBullishPocket = activeRetracement >= minRetracement - tolerance / impulseRange
+    && activeRetracement <= maxRetracement + tolerance / impulseRange
+    && last.close <= fib382Bull + tolerance
+    && last.close >= fib618Bull - tolerance;
+  const inBearishPocket = activeRetracement >= minRetracement - tolerance / impulseRange
+    && activeRetracement <= maxRetracement + tolerance / impulseRange
+    && last.close >= fib382Bear - tolerance
+    && last.close <= fib618Bear + tolerance;
+  const range = Math.max(last.high - last.low, 0.00001);
+  const lowerWick = Math.min(last.open, last.close) - last.low;
+  const upperWick = last.high - Math.max(last.open, last.close);
+  const bullishRejection = lowerWick / range >= 0.32 && last.close >= Math.max(last.open, prior.close);
+  const bearishRejection = upperWick / range >= 0.32 && last.close <= Math.min(last.open, prior.close);
+  const reclaimedBullMid = prior.close < fib50Bull && last.close >= fib50Bull;
+  const rejectedBearMid = prior.close > fib50Bear && last.close <= fib50Bear;
+
+  let bias: StrategyBias = 'neutral';
+  let decision: StrategySignalSide = 'wait';
+  let setupState = 'no qualified Fibonacci trend setup';
+  if (trendBullish && impulseBullish && impulseAtrMultiple >= 1.2) {
+    bias = 'bullish';
+    setupState = inBullishPocket ? 'bullish Fibonacci value pocket' : 'bullish trend outside Fibonacci pocket';
+    if (inBullishPocket && (bullishRejection || reclaimedBullMid)) decision = 'buy';
+  } else if (trendBearish && impulseBearish && impulseAtrMultiple >= 1.2) {
+    bias = 'bearish';
+    setupState = inBearishPocket ? 'bearish Fibonacci value pocket' : 'bearish trend outside Fibonacci pocket';
+    if (inBearishPocket && (bearishRejection || rejectedBearMid)) decision = 'sell';
+  } else if (trendBullish || impulseBullish) {
+    bias = 'bullish';
+  } else if (trendBearish || impulseBearish) {
+    bias = 'bearish';
+  }
+
+  const retracementQuality = activeRetracement >= minRetracement && activeRetracement <= maxRetracement
+    ? 1
+    : Math.max(0, 1 - Math.min(Math.abs(activeRetracement - 0.5), 0.5) * 2);
+  const rejectionScore = decision === 'buy'
+    ? Math.max(lowerWick / range, reclaimedBullMid ? 0.55 : 0)
+    : decision === 'sell'
+      ? Math.max(upperWick / range, rejectedBearMid ? 0.55 : 0)
+      : Math.max(lowerWick, upperWick) / range;
+  const extension127 = decision === 'sell'
+    ? impulseLow - impulseRange * 0.272
+    : impulseHigh + impulseRange * 0.272;
+  const extension161 = decision === 'sell'
+    ? impulseLow - impulseRange * 0.618
+    : impulseHigh + impulseRange * 0.618;
+
+  return buildEvaluationResult({
+    strategyId: 'fibonacci-trend-continuation',
+    context,
+    config: { ...config, trendPeriod, swingLookback, minRetracement, maxRetracement, toleranceAtr },
+    candles,
+    decision,
+    bias,
+    confidence: 30
+      + (trendBullish || trendBearish ? 18 : 0)
+      + (impulseAtrMultiple >= 1.2 ? 16 : 0)
+      + Math.round(retracementQuality * 18)
+      + Math.min(14, rejectionScore * 16)
+      + (decision !== 'wait' ? 12 : 0),
+    reasons: [
+      `Fibonacci continuation engine: EMA(${trendPeriod}) trend filter + ${swingLookback}-bar impulse anchors`,
+      trendBullish
+        ? 'Bullish trend regime: price above rising EMA'
+        : trendBearish
+          ? 'Bearish trend regime: price below falling EMA'
+          : 'Trend regime transitional; Fibonacci entries disabled',
+      impulseBullish
+        ? `Bullish impulse anchored from ${impulseLow.toFixed(5)} to ${impulseHigh.toFixed(5)}`
+        : impulseBearish
+          ? `Bearish impulse anchored from ${impulseHigh.toFixed(5)} to ${impulseLow.toFixed(5)}`
+          : 'Impulse anchor order is not usable',
+      `Current retracement ${(activeRetracement * 100).toFixed(1)}% vs pocket ${(minRetracement * 100).toFixed(1)}%-${(maxRetracement * 100).toFixed(1)}%`,
+      decision === 'buy'
+        ? 'Bullish Fibonacci continuation confirmed by rejection/reclaim in value pocket'
+        : decision === 'sell'
+          ? 'Bearish Fibonacci continuation confirmed by rejection/reclaim in value pocket'
+          : `${setupState}; awaiting valid rejection close`,
+    ],
+    metrics: {
+      setupState,
+      trendEma: trendNow != null ? Number(trendNow.toFixed(5)) : null,
+      emaSlopePct: Number(emaSlopePct.toFixed(4)),
+      impulseLow: Number(impulseLow.toFixed(5)),
+      impulseHigh: Number(impulseHigh.toFixed(5)),
+      impulseAtrMultiple: Number(impulseAtrMultiple.toFixed(2)),
+      retracementPct: Number((activeRetracement * 100).toFixed(1)),
+      fib382: Number((bias === 'bearish' ? fib382Bear : fib382Bull).toFixed(5)),
+      fib50: Number((bias === 'bearish' ? fib50Bear : fib50Bull).toFixed(5)),
+      fib618: Number((bias === 'bearish' ? fib618Bear : fib618Bull).toFixed(5)),
+      extension127: Number(extension127.toFixed(5)),
+      extension161: Number(extension161.toFixed(5)),
+      rejectionScore: Number((rejectionScore * 100).toFixed(1)),
+    },
+    events: decision !== 'wait'
+      ? [{
+        label: decision === 'buy' ? 'fib continuation long' : 'fib continuation short',
+        detail: `${(activeRetracement * 100).toFixed(1)}% retracement reaction with ${Math.round(rejectionScore * 100)}% rejection score`,
+        tone: decision === 'buy' ? 'emerald' : 'rose',
+        barIndex: lastIndex,
+      }]
+      : (inBullishPocket || inBearishPocket) && bias !== 'neutral'
+        ? [{
+          label: 'fib value pocket',
+          detail: `Retracement ${(activeRetracement * 100).toFixed(1)}% inside continuation pocket`,
+          tone: 'violet',
+          barIndex: lastIndex,
+        }]
+        : [],
+  });
+};
+
 function mapMtfFinalDecision(finalDecision: string): StrategySignalSide {
   const text = finalDecision.toUpperCase();
   if (text.includes('BUY')) return 'buy';
@@ -1253,6 +1733,9 @@ export const STRATEGY_ENGINES: Record<string, StrategyEngine> = {
   'ema-pullback-strategy': evaluateEmaPullbackEngine,
   'trendline-breakout': evaluateTrendlineBreakoutEngine,
   'higher-highs-and-higher-lows': evaluateHigherHighsHigherLowsEngine,
+  'trend-continuation-pattern-strategy': evaluateTrendContinuationPatternEngine,
+  'dynamic-support-and-resistance-trend-trading': evaluateDynamicSupportResistanceTrendEngine,
+  'fibonacci-trend-continuation': evaluateFibonacciTrendContinuationEngine,
   'macd-trend-strategy': evaluateMacdTrendEngine,
   'ichimoku-trend-strategy': evaluateIchimokuTrendEngine,
   'supertrend-strategy': evaluateSupertrendEngine,
