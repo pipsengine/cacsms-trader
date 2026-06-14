@@ -2,57 +2,82 @@
 
 import Link from 'next/link';
 import { Menu } from 'lucide-react';
-
-import { MovingAverageCrossoverDashboard } from '@/components/strategies/moving-average-crossover-dashboard';
-import { DashboardPageFrame } from '@/components/dashboard-page-frame';
-import { Button, buttonVariants } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { toneBody, toneCard, toneCardHeader, toneMuted, toneTitle } from '@/lib/dashboard-card-tones';
-import { getStrategyDefinition } from '@/lib/strategies/registry';
-import { cn } from '@/lib/utils';
 import { useState } from 'react';
 
+import { GenericStrategyDashboard } from '@/components/strategies/generic-strategy-dashboard';
+import { DashboardPageFrame, DashboardPageScroll, DashboardPageShell } from '@/components/dashboard-page-frame';
+import { buttonVariants } from '@/components/ui/button';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  toneBody,
+  toneCard,
+  toneCardHeader,
+  toneInsetSurface,
+  toneMuted,
+  toneTitle,
+} from '@/lib/dashboard-card-tones';
+import { getGroupMeta, getStrategyDefinitionByRoute } from '@/lib/strategies/registry';
+import { cn } from '@/lib/utils';
+
 export function StrategyPageRouter({ group, strategy }: { group: string; strategy: string }) {
-  if (strategy === 'moving-average-crossover' && group === 'trend-following-strategies') {
-    return <MovingAverageCrossoverDashboard />;
+  const definition = getStrategyDefinitionByRoute(group, strategy);
+  if (definition?.status === 'active') {
+    return <GenericStrategyDashboard definition={definition} />;
   }
 
-  return <StrategyPlaceholderPage group={group} strategy={strategy} />;
+  return <StrategyPlaceholderPage group={group} strategy={strategy} label={definition?.label} />;
 }
 
-function StrategyPlaceholderPage({ group, strategy }: { group: string; strategy: string }) {
+function StrategyPlaceholderPage(props: { group: string; strategy: string; label?: string }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const definition = getStrategyDefinition(strategy);
-  const label = definition?.label ?? strategy.replace(/-/g, ' ');
+  const definition = getStrategyDefinitionByRoute(props.group, props.strategy);
+  const groupMeta = getGroupMeta(props.group);
+  const label = definition?.label ?? props.label ?? props.strategy.replace(/-/g, ' ');
+  const tone = definition?.tone ?? groupMeta?.tone ?? 'amber';
 
   return (
-    <DashboardPageFrame bridgeOnline mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} className="flex min-h-0 min-w-0 flex-1 flex-col bg-slate-50">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center border-b border-slate-200 bg-white px-4 lg:px-6">
+    <DashboardPageFrame
+      bridgeOnline
+      mobileOpen={mobileSidebarOpen}
+      onMobileOpenChange={setMobileSidebarOpen}
+      className="flex min-h-0 min-w-0 flex-1 flex-col bg-slate-50"
+    >
+      <DashboardPageShell className="bg-slate-50">
+        <header className="flex h-14 shrink-0 items-center border-b border-slate-200 bg-white px-4 lg:px-6">
           <button type="button" className="rounded-md border border-slate-200 p-2 lg:hidden" onClick={() => setMobileSidebarOpen(true)}>
             <Menu className="h-4 w-4" />
           </button>
-          <h1 className="ml-3 text-lg font-semibold capitalize text-slate-900">{label}</h1>
+          <div className="ml-3">
+            <p className={cn('text-[11px] font-semibold uppercase tracking-[0.18em]', toneBody(tone))}>
+              {groupMeta?.label ?? props.group.replace(/-/g, ' ')}
+            </p>
+            <h1 className="text-lg font-semibold text-slate-900">{label}</h1>
+          </div>
         </header>
-        <main className="p-4 lg:p-6">
-          <Card className={cn('max-w-2xl border shadow-sm', toneCard('amber'))}>
-            <CardHeader className={toneCardHeader('amber')}>
-              <CardTitle className={toneTitle('amber')}>Strategy page queued for development</CardTitle>
+        <DashboardPageScroll className="space-y-4 p-4 lg:p-6">
+          <Card className={cn('max-w-2xl border shadow-sm', toneCard(tone))}>
+            <CardHeader className={toneCardHeader(tone)}>
+              <CardTitle className={toneTitle(tone)}>Strategy module queued</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              <p className={cn('text-sm', toneBody('amber'))}>
-                This strategy is registered in navigation but has not been implemented yet.
+              <p className={cn('text-sm', toneBody(tone))}>
+                {definition?.description ?? `${groupMeta?.label ?? props.group.replace(/-/g, ' ')} — this model is registered in navigation and scheduled for engine deployment.`}
               </p>
-              <p className={cn('text-xs', toneMuted('amber'))}>
-                Group: {group.replace(/-/g, ' ')}
+              {definition?.algorithm ? (
+                <p className={cn('rounded-lg border px-3 py-2 text-xs font-mono', toneInsetSurface(tone), toneMuted(tone))}>
+                  {definition.algorithm}
+                </p>
+              ) : null}
+              <p className={cn('text-xs', toneMuted(tone))}>
+                Active engines run on reconstructed chart captures with institutional scoring, color-coded dashboards, and unified evaluation APIs.
               </p>
               <Link href="/institutional-strategy-intelligence" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
                 Back to strategy overview
               </Link>
             </CardContent>
           </Card>
-        </main>
-      </div>
+        </DashboardPageScroll>
+      </DashboardPageShell>
     </DashboardPageFrame>
   );
 }

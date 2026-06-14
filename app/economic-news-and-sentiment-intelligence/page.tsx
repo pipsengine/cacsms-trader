@@ -166,7 +166,7 @@ export default function MacroIntelligenceOverviewPage() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto bg-white">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain bg-white">
           <main className="space-y-5 p-4 md:p-6 lg:p-8">
             <section className="grid grid-cols-1 gap-4 xl:grid-cols-[1.6fr_1fr]">
               <div className="rounded-lg border border-zinc-800 bg-zinc-900/80 p-4 shadow-2xl shadow-black/20">

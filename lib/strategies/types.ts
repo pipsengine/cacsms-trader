@@ -1,7 +1,17 @@
+import type { DashboardTone } from '@/lib/dashboard-card-tones';
 import type { Timeframe } from '@/packages/shared-types';
 
-export type StrategySignalSide = 'buy' | 'sell' | 'wait';
-export type MovingAverageType = 'sma' | 'ema';
+export type StrategyParameterType = 'number' | 'select' | 'symbol' | 'timeframe';
+
+export interface StrategyParameterDefinition {
+  key: string;
+  label: string;
+  type: StrategyParameterType;
+  defaultValue: string | number;
+  min?: number;
+  max?: number;
+  options?: Array<{ value: string; label: string }>;
+}
 
 export interface StrategyDefinition {
   id: string;
@@ -9,8 +19,15 @@ export interface StrategyDefinition {
   label: string;
   family: string;
   description: string;
+  algorithm: string;
   status: 'active' | 'planned';
+  tone: DashboardTone;
+  parameters: StrategyParameterDefinition[];
+  minCandles: number;
+  rules: string[];
 }
+
+export type MovingAverageType = 'sma' | 'ema';
 
 export interface MovingAverageCrossoverConfig {
   symbol: string;
@@ -33,7 +50,7 @@ export interface MovingAverageCrossoverResult {
   symbol: string;
   timeframe: Timeframe;
   config: MovingAverageCrossoverConfig;
-  decision: StrategySignalSide;
+  decision: import('./evaluation').StrategySignalSide;
   confidence: number;
   trendBias: 'bullish' | 'bearish' | 'neutral';
   fastMa: number | null;
@@ -49,3 +66,5 @@ export interface MovingAverageCrossoverResult {
   candleCount: number;
   evaluatedAt: string;
 }
+
+export type StrategySignalSide = import('./evaluation').StrategySignalSide;

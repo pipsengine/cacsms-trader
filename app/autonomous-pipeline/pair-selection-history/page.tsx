@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, Crosshair, Menu, RefreshCw } from 'lucide-react';
 
-import { DashboardPageFrame } from '@/components/dashboard-page-frame';
+import { DashboardPageFrame, DashboardPageScroll, DashboardPageShell } from '@/components/dashboard-page-frame';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -64,8 +64,8 @@ export default function PairSelectionHistoryPage() {
       onMobileOpenChange={setMobileSidebarOpen}
       className="flex min-h-0 flex-1 flex-col overflow-hidden bg-slate-50"
     >
-      <main className="flex-1 overflow-hidden">
-        <header className="flex items-center justify-between border-b bg-white px-4 py-3">
+      <DashboardPageShell>
+      <header className="flex shrink-0 items-center justify-between border-b bg-white px-4 py-3">
           <div className="flex items-center gap-3">
             <Button variant="ghost" size="icon" className="lg:hidden" onClick={() => setMobileSidebarOpen(true)}>
               <Menu className="h-5 w-5" />
@@ -92,7 +92,8 @@ export default function PairSelectionHistoryPage() {
           </div>
         </header>
 
-        <div className="grid gap-4 p-4 lg:grid-cols-2">
+        <DashboardPageScroll className="p-4">
+        <div className="grid gap-4 lg:grid-cols-2">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Selection events</CardTitle>
@@ -162,7 +163,8 @@ export default function PairSelectionHistoryPage() {
             </CardContent>
           </Card>
         </div>
-      </main>
+        </DashboardPageScroll>
+      </DashboardPageShell>
     </DashboardPageFrame>
   );
 }

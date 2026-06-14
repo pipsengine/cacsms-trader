@@ -293,7 +293,7 @@ export function AiChartSegmentationDashboard() {
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto bg-white p-4 md:p-6">
+        <main className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain bg-white p-4 md:p-6">
           {error ? (
             <Card className="mb-4 border-amber-200 bg-amber-50">
               <CardContent className="flex items-start gap-3 p-4 text-sm text-amber-900">

@@ -480,7 +480,7 @@ export default function CotInstitutionalPositioningPage() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto bg-white">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain bg-white">
           <main className="space-y-5 p-4 md:p-6 lg:p-8">
             {toast ? (
               <div className={cn('rounded-lg border p-3 text-sm', toneClass(toast.tone))}>

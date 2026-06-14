@@ -1,18 +1,13 @@
-import type { StrategyDefinition } from './types';
+export {
+  ACTIVE_STRATEGIES,
+  getGroupMeta,
+  getStrategyDefinition,
+  getStrategyDefinitionByRoute,
+  isKnownStrategyGroup,
+  listStrategiesByGroup,
+  STRATEGY_DEFINITIONS,
+  STRATEGY_GROUP_META,
+  STRATEGY_REGISTRY,
+} from './catalog';
 
-export const MOVING_AVERAGE_CROSSOVER_STRATEGY: StrategyDefinition = {
-  id: 'moving-average-crossover',
-  group: 'trend-following-strategies',
-  label: 'Moving Average Crossover',
-  family: 'trend_following',
-  description: 'Generates buy and sell signals when a fast moving average crosses above or below a slow moving average.',
-  status: 'active',
-};
-
-export const STRATEGY_REGISTRY: Record<string, StrategyDefinition> = {
-  [MOVING_AVERAGE_CROSSOVER_STRATEGY.id]: MOVING_AVERAGE_CROSSOVER_STRATEGY,
-};
-
-export function getStrategyDefinition(strategyId: string): StrategyDefinition | null {
-  return STRATEGY_REGISTRY[strategyId] ?? null;
-}
+export { evaluateStrategyEngine, STRATEGY_ENGINES } from './engines';

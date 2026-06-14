@@ -347,8 +347,8 @@ export default function MonetaryPolicyInterestRatesPage() {
           </div>
         </header>
 
-        <div className="flex-1 overflow-hidden">
-          <ScrollArea className="h-full">
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <ScrollArea className="h-full min-h-0">
             <main className="space-y-5 p-4 md:p-6 lg:p-8">
               {error ? (
                 <Card className="border-rose-200 bg-rose-50">

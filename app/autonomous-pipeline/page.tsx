@@ -259,7 +259,7 @@ export default function AutonomousPipelinePage() {
           </div>
         </header>
 
-        <main className="flex-1 space-y-6 overflow-auto bg-white px-4 py-6 lg:px-8">
+        <main className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain space-y-6 bg-white px-4 py-6 lg:px-8">
           {error ? (
             <Card className="border-rose-200 bg-rose-50">
               <CardContent className="py-4 text-sm text-rose-700">{error}</CardContent>

@@ -258,7 +258,7 @@ export default function CacsmsVisionPage() {
           </div>
         </header>
 
-        <main className="flex-1 overflow-y-auto bg-white">
+        <main className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain bg-white">
         <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_420px]">
           <section className="space-y-4">
             {error ? <Alert text={error} /> : null}

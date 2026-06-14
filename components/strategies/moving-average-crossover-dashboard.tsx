@@ -14,7 +14,7 @@ import {
   TrendingUp,
 } from 'lucide-react';
 
-import { DashboardPageFrame } from '@/components/dashboard-page-frame';
+import { DashboardPageFrame, DashboardPageScroll, DashboardPageShell } from '@/components/dashboard-page-frame';
 import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -100,8 +100,8 @@ export function MovingAverageCrossoverDashboard() {
       onMobileOpenChange={setMobileSidebarOpen}
       className="flex min-h-0 min-w-0 flex-1 flex-col bg-slate-50"
     >
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-slate-200 bg-white/90 px-4 backdrop-blur lg:px-6">
+      <DashboardPageShell className="bg-slate-50">
+        <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center justify-between border-b border-slate-200 bg-white/90 px-4 backdrop-blur lg:px-6">
           <div className="flex items-center gap-3">
             <button
               type="button"
@@ -130,7 +130,7 @@ export function MovingAverageCrossoverDashboard() {
           </div>
         </header>
 
-        <main className="flex-1 space-y-4 p-4 lg:p-6">
+        <DashboardPageScroll className="space-y-4 p-4 lg:p-6">
           <div className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
             <Card className={cn('border shadow-sm', toneCard('violet'))}>
               <CardHeader className={cn('pb-3', toneCardHeader('violet'))}>
@@ -302,8 +302,8 @@ export function MovingAverageCrossoverDashboard() {
               </CardContent>
             </Card>
           </div>
-        </main>
-      </div>
+        </DashboardPageScroll>
+      </DashboardPageShell>
     </DashboardPageFrame>
   );
 }

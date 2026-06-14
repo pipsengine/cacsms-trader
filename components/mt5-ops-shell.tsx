@@ -251,7 +251,7 @@ export function Mt5OpsShell(props: {
       onMobileOpenChange={setMobileSidebarOpen}
       className="flex min-h-0 min-w-0 flex-1 flex-col bg-white text-slate-900 font-sans"
     >
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-white">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-white">
         <header className="flex items-center justify-between px-4 py-3 md:px-6 border-b border-slate-200 bg-white shrink-0">
           <div className="flex items-center gap-4">
             <button
@@ -288,7 +288,7 @@ export function Mt5OpsShell(props: {
         </header>
 
         <Mt5OpsStateContext.Provider value={state}>
-          <div className="flex-1 overflow-auto bg-white p-4 md:p-6 lg:p-8 space-y-6">
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain bg-white p-4 md:p-6 lg:p-8 space-y-6">
             {typeof props.children === 'function' ? props.children(state) : props.children}
           </div>
         </Mt5OpsStateContext.Provider>

@@ -254,7 +254,7 @@ export function VisualIntelligenceOverviewDashboard() {
           </div>
         </header>
 
-        <main className="flex-1 space-y-6 overflow-auto bg-white p-4 md:p-6">
+        <main className="min-h-0 flex-1 overflow-y-auto overscroll-y-contain space-y-6 bg-white p-4 md:p-6">
           {error ? (
             <Card className="border-amber-200 bg-amber-50">
               <CardContent className="flex items-start gap-3 p-4 text-sm text-amber-900">
