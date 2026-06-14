@@ -63,7 +63,7 @@ function estimateStopPips(
 }
 
 export function resolveAutonomousVolumeLots(input: {
-  decision: Pick<AutonomousDecisionOutput, 'symbol' | 'timeframe' | 'decision' | 'stopLoss' | 'tradingStyle'>;
+  decision: Pick<AutonomousDecisionOutput, 'symbol' | 'timeframe' | 'decision' | 'stopLoss' | 'tradingStyle' | 'capitalAllocation'>;
   account: ExecutionAccountContext;
   entryPrice?: number | null;
   tradingStyle?: TradingStyleId;
@@ -73,7 +73,12 @@ export function resolveAutonomousVolumeLots(input: {
   const profile = getAutonomyThresholdProfile(input.account.accountClass);
   const styleId = input.tradingStyle ?? input.decision.tradingStyle;
   const styleRiskPercent = styleId ? getTradingStyleProfile(styleId).riskPerTradePercent : null;
+  const allocationMultiplier = Math.max(0, Math.min(1, Number(input.decision.capitalAllocation?.riskMultiplier ?? 1)));
   const liveEquity = Math.max(input.account.equity, input.account.balance, 0);
+
+  if (allocationMultiplier <= 0) {
+    return { lots: 0, riskAmount: 0, stopPips: 0, method: 'fixed' };
+  }
 
   if (liveEquity <= 0) {
     return { lots: fallbackLots, riskAmount: 0, stopPips: 0, method: 'fixed' };
@@ -106,7 +111,7 @@ export function resolveAutonomousVolumeLots(input: {
   try {
     const sized = calculateLotSize({
       accountEquity: sizingEquity,
-      riskPercent: styleRiskPercent ?? profile.riskPerTradePercent,
+      riskPercent: (styleRiskPercent ?? profile.riskPerTradePercent) * allocationMultiplier,
       stopLossPips: stopPips,
       pipValuePerLot: pipValue,
       minLot: envNumber('CACSMS_MIN_LOT_SIZE', 0.01),

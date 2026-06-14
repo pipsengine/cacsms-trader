@@ -1016,9 +1016,13 @@ async function loadExecutionContext(_symbol: string, _timeframe: string) {
 }
 
 function buildTopDownAlignmentEvidence(
-  decision: { timeframe: string; dominantTimeframe: string; finalBias: string; setupType: string; decision: string },
+  decision: { timeframe: string; dominantTimeframe: string; finalBias: string; setupType: string; decision: string; institutionalPlan?: unknown },
   visual: unknown,
 ) {
+  const institutionalPlan = objectValue(decision.institutionalPlan);
+  if (Object.keys(institutionalPlan).length > 0) {
+    return institutionalPlan;
+  }
   const visualRecord = objectValue(visual);
   const visualBias = String(visualRecord.finalMarketBias ?? visualRecord.finalBias ?? '').toLowerCase();
   const decisionBias = String(decision.finalBias ?? '').toLowerCase();
@@ -1054,6 +1058,7 @@ function buildDecisionEvidence(input: {
       setupReadiness: decision.setupReadinessScore ?? null,
       risk: decision.riskScore ?? null,
       strategyBookScore: decision.strategyBookScore ?? null,
+      signalScore: decision.signalScore ?? null,
     },
     visual: {
       finalMarketBias: visual.finalMarketBias ?? null,
@@ -1066,6 +1071,9 @@ function buildDecisionEvidence(input: {
     macro,
     execution,
     strategyBook: input.strategyBook ?? null,
+    regimeClassification: decision.regimeClassification ?? null,
+    capitalAllocation: decision.capitalAllocation ?? null,
+    institutionalPlan: decision.institutionalPlan ?? null,
     governance: input.governance ?? {},
   };
 }
@@ -1080,21 +1088,25 @@ function buildStrategyDecisionMetadata(input: {
     setupType: string;
     stopLoss: number | null;
     takeProfitLevels: number[];
+    regimeClassification?: { primary?: string } | null;
+    institutionalPlan?: { htfBias?: string; ltfBias?: string } | null;
   };
   visual: unknown;
   topDownEvidence: Record<string, unknown>;
 }) {
   const visual = objectValue(input.visual);
-  const marketPhase = String(visual.marketPhase ?? '').trim();
+  const marketPhase = String(input.decision.regimeClassification?.primary ?? visual.marketPhase ?? '').trim();
   const ltfTrigger = String(visual.entryReadiness ?? input.decision.setupType ?? 'autonomous_fusion').trim();
   const hasStructuralStop = Number(input.decision.stopLoss ?? 0) > 0;
   const hasTargets = Array.isArray(input.decision.takeProfitLevels) && input.decision.takeProfitLevels.length > 0;
+  const htfBias = String(input.decision.institutionalPlan?.htfBias ?? input.topDownEvidence.htfBias ?? input.topDownEvidence.decisionBias ?? input.decision.finalBias ?? 'unknown');
+  const ltfTriggerLabel = String(input.decision.institutionalPlan?.ltfBias ?? ltfTrigger);
   return {
     strategyId: input.strategyId,
     tradingStyle: input.decision.tradingStyle ?? null,
     marketRegime: marketPhase || 'unknown',
-    htfBias: String(input.topDownEvidence.decisionBias ?? input.decision.finalBias ?? 'unknown'),
-    ltfTrigger,
+    htfBias,
+    ltfTrigger: ltfTriggerLabel,
     stopMethod: hasStructuralStop ? 'resolved_structural_or_default_stop' : 'unresolved',
     targetMethod: hasTargets ? 'resolved_reward_risk_target' : 'unresolved',
     riskModelVersion: 'equity_risk_v1',

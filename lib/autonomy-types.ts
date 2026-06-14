@@ -139,4 +139,37 @@ export interface AutonomousDecisionOutput {
   selectedStrategyLabel?: string | null;
   strategyBookScore?: number | null;
   strategyBookConsensus?: string | null;
+  institutionalPlan?: {
+    sequence: Array<{
+      stage: 'W/D bias' | 'H4 structure' | 'H1 setup' | 'M15 trigger' | 'execution confirmation';
+      timeframe: string;
+      bias: string;
+      status: 'aligned' | 'conflict' | 'missing' | 'confirmed' | 'pending';
+      score: number;
+      narrative: string;
+    }>;
+    htfBias: string;
+    ltfBias: string;
+    conflict: boolean;
+    countertrendAllowed: boolean;
+    conflictPolicy: string;
+  };
+  regimeClassification?: {
+    primary: 'trend' | 'range' | 'expansion' | 'compression' | 'reversal' | 'high-volatility' | 'news-risk';
+    tags: Array<'trend' | 'range' | 'expansion' | 'compression' | 'reversal' | 'high-volatility' | 'news-risk'>;
+    confidence: number;
+    source: string;
+  };
+  capitalAllocation?: {
+    riskMultiplier: number;
+    riskTier: 'full' | 'reduced' | 'minimal' | 'blocked';
+    rationale: string;
+  };
+  signalScore?: {
+    expectedR: number;
+    probabilityScore: number;
+    riskScore: number;
+    confidenceSource: string;
+    modelVersion: string;
+  };
 }
