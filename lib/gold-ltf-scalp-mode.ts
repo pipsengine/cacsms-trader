@@ -114,7 +114,7 @@ export function detectGoldLtfScalpContext(input: {
       selectedStrategyId: input.selectedStrategyId ?? null,
       setupType: input.setupType ?? '',
       regimeClassification: input.regimeClassification ?? undefined,
-      tradingStyle: input.tradingStyle ?? null,
+      tradingStyle: input.tradingStyle as AutonomousDecisionOutput['tradingStyle'],
     });
 
   if (htfRanging) {

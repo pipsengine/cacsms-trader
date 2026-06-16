@@ -121,7 +121,9 @@ export function isRangeOrientedContext(
 export function resolveGoldMinRewardRiskForDecision(
   decision: Pick<
     AutonomousDecisionOutput,
+    | 'symbol'
     | 'tradingStyle'
+    | 'timeframe'
     | 'regimeClassification'
     | 'selectedStrategyId'
     | 'setupType'
