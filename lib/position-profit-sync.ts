@@ -127,8 +127,55 @@ async function fetchBridgeTerminals(): Promise<BridgeTerminal[]> {
   }
 }
 
-export async function syncOpenPositionLiveMetrics(): Promise<{ updated: number; terminalSnapshots: number }> {
-  const [positions, terminals] = await Promise.all([listOpenPositions({ limit: 100 }), fetchBridgeTerminals()]);
+async function reconcileTerminalOpenPositions(
+  terminals: BridgeTerminal[],
+  positions: ExecutionOpenPosition[],
+): Promise<number> {
+  const { trackOpenPositionFromFill, markPositionClosed } = await import('./execution-open-positions');
+  let reconciled = 0;
+
+  for (const terminal of terminals) {
+    const terminalId = String(terminal.terminalId ?? '').trim();
+    if (!terminalId) continue;
+
+    const snapshots = normalizeSnapshots(terminal.openPositionSnapshots);
+    const trackedForTerminal = positions.filter((position) => position.terminalId === terminalId);
+    const snapshotTickets = new Set(snapshots.map((snapshot) => snapshot.ticket));
+
+    for (const snapshot of snapshots) {
+      if (trackedForTerminal.some((position) => position.ticket === snapshot.ticket)) continue;
+      await trackOpenPositionFromFill({
+        terminalId,
+        commandId: `heartbeat-sync-${snapshot.ticket}`,
+        ticket: snapshot.ticket,
+        symbol: snapshot.symbol,
+        side: snapshot.side.toUpperCase(),
+        volumeLots: snapshot.volumeLots,
+        entryPrice: snapshot.entryPrice,
+        stopLoss: snapshot.stopLoss || null,
+        takeProfit: snapshot.takeProfit || null,
+        metadata: { source: 'HEARTBEAT_RECONCILE' },
+      });
+      reconciled += 1;
+    }
+
+    for (const position of trackedForTerminal) {
+      if (snapshotTickets.has(position.ticket)) continue;
+      await markPositionClosed({ terminalId, ticket: position.ticket, partial: false });
+      reconciled += 1;
+    }
+  }
+
+  return reconciled;
+}
+
+export async function syncOpenPositionLiveMetrics(): Promise<{ updated: number; terminalSnapshots: number; reconciled: number }> {
+  const terminals = await fetchBridgeTerminals();
+  let positions = await listOpenPositions({ limit: 100 });
+  const reconciled = await reconcileTerminalOpenPositions(terminals, positions);
+  if (reconciled > 0) {
+    positions = await listOpenPositions({ limit: 100 });
+  }
   let updated = 0;
   let terminalSnapshots = 0;
 
@@ -179,5 +226,5 @@ export async function syncOpenPositionLiveMetrics(): Promise<{ updated: number; 
     updated += 1;
   }
 
-  return { updated, terminalSnapshots };
+  return { updated, terminalSnapshots, reconciled };
 }

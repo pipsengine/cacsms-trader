@@ -1,4 +1,5 @@
-import type { AutonomousDecisionOutput } from './autonomy-types';
+import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
+import { hydrateAutonomousDecisionFromRow, isRetryableExecutionBlocker, isTerminalExecutionBlocker } from '@/lib/autonomy-decision-hydration';
 import { resolveAutonomousVolumeLots } from './autonomy-lot-sizing';
 import { shouldDispatchPipelineExecution } from './autonomy-pipeline-throttle';
 import {
@@ -45,7 +46,13 @@ async function loadLatestDecision(symbol: string): Promise<StoredDecision | null
         macro_risk_warning,
         liquidity_warning,
         anomaly_warning,
-        recommended_next_action
+        recommended_next_action,
+        trading_style,
+        strategy_id,
+        market_regime,
+        htf_bias,
+        ltf_trigger,
+        decision_evidence_json
       FROM autonomous_decision_logs
       WHERE upper(symbol) = $1
       ORDER BY created_at DESC
@@ -55,29 +62,7 @@ async function loadLatestDecision(symbol: string): Promise<StoredDecision | null
   );
   const row = result.rows[0];
   if (!row) return null;
-
-  return {
-    decisionLogId: String(row.id),
-    symbol: String(row.symbol),
-    timeframe: String(row.timeframe),
-    dominantTimeframe: String(row.dominant_timeframe ?? row.timeframe),
-    finalBias: String(row.final_bias ?? 'neutral'),
-    setupType: String(row.setup_type ?? 'market structure assessment'),
-    setupReadinessScore: Number(row.setup_readiness_score ?? 0),
-    confidenceScore: Number(row.confidence_score ?? 0),
-    riskScore: Number(row.risk_score ?? 0),
-    decision: String(row.decision) as AutonomousDecisionOutput['decision'],
-    entryZone: (row.entry_zone_json as AutonomousDecisionOutput['entryZone']) ?? { status: 'not_ready', narrative: '' },
-    stopLoss: row.stop_loss == null ? null : Number(row.stop_loss),
-    takeProfitLevels: Array.isArray(row.take_profit_levels_json) ? row.take_profit_levels_json.map(Number) : [],
-    invalidationLevel: row.invalidation_level == null ? null : Number(row.invalidation_level),
-    reasonForDecision: String(row.reason_for_decision ?? ''),
-    reasonAgainstDecision: String(row.reason_against_decision ?? ''),
-    macroRiskWarning: String(row.macro_risk_warning ?? ''),
-    liquidityWarning: String(row.liquidity_warning ?? ''),
-    anomalyWarning: String(row.anomaly_warning ?? ''),
-    recommendedNextAction: String(row.recommended_next_action ?? ''),
-  };
+  return hydrateAutonomousDecisionFromRow(row);
 }
 
 async function hasRiskEvaluation(decisionLogId: string): Promise<boolean> {
@@ -257,7 +242,8 @@ export async function advancePipelineExecution(
     const dispatchStatus = String(row?.status ?? 'blocked');
     const blockers = Array.isArray(row?.blockers_json) ? row.blockers_json.map(String) : [];
     const stopLossBlocker = blockers.some((item) => /stop loss/i.test(item));
-    if (dispatchStatus === 'blocked' && stopLossBlocker) {
+    const retryableBlocker = isRetryableExecutionBlocker(blockers);
+    if (dispatchStatus === 'blocked' && (stopLossBlocker || retryableBlocker)) {
       await queryPostgres(
         'DELETE FROM autonomy_execution_dispatches WHERE decision_log_id = $1 AND status = $2',
         [decision.decisionLogId, 'blocked'],
@@ -442,11 +428,37 @@ export async function getPipelineExecutionStatus(symbol: string) {
           metrics: { ...bridge, commandId: row.command_id ? String(row.command_id) : null, blockers },
         };
       }
+      if (status === 'blocked') {
+        const liveChecklist = await evaluateAutonomyExecutionChecklist({
+          decision,
+          config: await getAutonomyConfig(),
+          manual: false,
+        }).catch(() => null);
+        const liveBlockers = liveChecklist?.blockers?.length
+          ? liveChecklist.blockers
+          : blockers.map(String);
+        if (isTerminalExecutionBlocker(liveBlockers)) {
+          return {
+            status: 'completed' as const,
+            detail: `Managing open ${decision.decision} setup — ${liveBlockers[0] ?? 'entry deferred while legs are active.'}`,
+            progress: 100,
+            metrics: { ...bridge, blockers: liveBlockers, dispatchStatus: status, deferred: true },
+          };
+        }
+        return {
+          status: 'in_progress' as const,
+          detail: liveChecklist?.ready
+            ? `Execution re-check passed for ${decision.decision}; dispatch will retry on next cycle.`
+            : `Execution blocked for ${decision.decision}: ${liveBlockers.join(' ') || status}`,
+          progress: liveChecklist?.ready ? 45 : 25,
+          metrics: { ...bridge, blockers: liveBlockers, dispatchStatus: status },
+        };
+      }
       return {
         status: 'in_progress' as const,
-        detail: `Execution blocked for ${decision.decision}: ${blockers.join(' ') || status}`,
-        progress: 25,
-        metrics: { ...bridge, blockers, dispatchStatus: status },
+        detail: `Execution status ${status} for ${decision.decision}.`,
+        progress: 20,
+        metrics: { ...bridge, blockers: blockers.map(String), dispatchStatus: status },
       };
     }
 

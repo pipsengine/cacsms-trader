@@ -6,6 +6,8 @@ import {
   goldSerialTradingEnabled,
   goldStackMinConfidence,
   goldStackMinReadiness,
+  goldBatchEntryEnabled,
+  goldEntryLegCount,
   isGoldSymbol,
 } from '@/lib/gold-trading-engine';
 import { validateGoldInstitutionalReentry } from '@/lib/gold-reentry-validator';
@@ -26,7 +28,7 @@ export type GoldStackEvaluation = {
   serialMode: boolean;
 };
 
-async function countPendingOpeningCommands(symbol?: string): Promise<number> {
+async function countPendingOpeningCommands(symbol?: string, side?: string): Promise<number> {
   const params: string[] = [];
   const conditions = [
     `upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')`,
@@ -35,6 +37,10 @@ async function countPendingOpeningCommands(symbol?: string): Promise<number> {
   if (symbol) {
     params.push(symbol.toUpperCase());
     conditions.push(`upper(c.symbol) = $${params.length}`);
+  }
+  if (side) {
+    params.push(side.toUpperCase());
+    conditions.push(`upper(coalesce(c.side, c.payload->>'side', '')) = $${params.length}`);
   }
   const result = await queryPostgres(
     `SELECT COUNT(*)::int AS pending FROM execution_commands c WHERE ${conditions.join(' AND ')}`,
@@ -88,10 +94,32 @@ export async function evaluateGoldPositionScaling(input: {
   const sameSideCount = positions.filter(
     (p) => p.symbol?.toUpperCase() === symbol && String(p.side ?? '').toUpperCase() === side,
   ).length;
+  const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
+  const oppositeSideCount = positions.filter(
+    (p) => p.symbol?.toUpperCase() === symbol && String(p.side ?? '').toUpperCase() === oppositeSide,
+  ).length;
   const pendingCount = await countPendingOpeningCommands(serialMode ? undefined : symbol);
+  const pendingOppositeCount = await countPendingOpeningCommands(symbol, oppositeSide);
   const tradesToday = await countTradesOpenedTodayForSymbol(symbol).catch(() => 0);
   const maxConcurrent = goldMaxConcurrentPositions();
   const maxDaily = goldMaxTradesPerDay();
+
+  if (!serialMode && (oppositeSideCount > 0 || pendingOppositeCount > 0)) {
+    blockers.push(
+      `Gold hedge blocked — close ${oppositeSideCount > 0 ? `${oppositeSideCount} open ${oppositeSide}` : ''}${oppositeSideCount > 0 && pendingOppositeCount > 0 ? ' and ' : ''}${pendingOppositeCount > 0 ? `${pendingOppositeCount} pending ${oppositeSide}` : ''} on ${symbol} before opening ${side}.`,
+    );
+    return {
+      allowed: false,
+      blockers,
+      openCount,
+      sameSideCount,
+      pendingCount,
+      tradesToday,
+      isStack: false,
+      isReentry: false,
+      serialMode,
+    };
+  }
 
   if (serialMode) {
     if (accountOpenCount > 0) {
@@ -105,8 +133,12 @@ export async function evaluateGoldPositionScaling(input: {
         `Gold serial mode — ${pendingCount} pending opening command(s) must complete or cancel before a new entry.`,
       );
     }
-  } else if (openCount >= maxConcurrent) {
-    blockers.push(`Gold max concurrent positions reached (${openCount}/${maxConcurrent}).`);
+  } else {
+    const batchLegs = goldBatchEntryEnabled() ? goldEntryLegCount() : 1;
+    const projectedOpen = openCount + pendingCount + (openCount === 0 && sameSideCount === 0 ? batchLegs : 1);
+    if (projectedOpen > maxConcurrent) {
+      blockers.push(`Gold max concurrent positions would be exceeded (${projectedOpen}/${maxConcurrent}).`);
+    }
   }
 
   if (tradesToday >= maxDaily) {
@@ -139,7 +171,7 @@ export async function evaluateGoldPositionScaling(input: {
       withinMinutes: 5,
     });
     if (duplicate) {
-      blockers.push('Duplicate Gold stack blocked — same strategy/setup signal fired within 5 minutes without new confirmation.');
+      blockers.push(`Gold setup active — ${sameSideCount} ${side} leg(s) open; additional ${side} entries paused (duplicate signal within 5 minutes).`);
     }
   }
 
@@ -202,4 +234,62 @@ async function hasRecentDuplicateGoldSignal(input: {
     [input.symbol.toUpperCase(), input.side, input.setupType, input.strategyId, String(input.withinMinutes)],
   ).catch(() => ({ rows: [] }));
   return Boolean(result.rows[0]);
+}
+
+/** Downgrade fresh BUY/SELL signals when Gold legs are already open. */
+export async function gateGoldDecisionForOpenPositions(input: {
+  symbol: string;
+  decision: string;
+}): Promise<{
+  decision: 'MONITOR';
+  reasonForDecision: string;
+  reasonAgainstDecision: string;
+} | null> {
+  if (!isGoldSymbol(input.symbol)) return null;
+  if (input.decision !== 'BUY' && input.decision !== 'SELL') return null;
+
+  const symbol = input.symbol.toUpperCase();
+  const side = input.decision;
+  const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
+  const positions = await listOpenPositions({ limit: 50 }).catch(() => []);
+  const goldPositions = positions.filter((p) => p.symbol?.toUpperCase() === symbol);
+  if (goldPositions.length === 0) return null;
+
+  const sameSidePositions = goldPositions.filter((p) => String(p.side ?? '').toUpperCase() === side);
+  const oppositeSidePositions = goldPositions.filter((p) => String(p.side ?? '').toUpperCase() === oppositeSide);
+  const sides = new Set(goldPositions.map((p) => String(p.side ?? '').toUpperCase()).filter(Boolean));
+
+  if (sides.size > 1) {
+    return {
+      decision: 'MONITOR',
+      reasonForDecision: `Hedged ${symbol} exposure (${goldPositions.length} mixed legs) — monitoring until flat.`,
+      reasonAgainstDecision: 'New entries blocked while both BUY and SELL legs are open.',
+    };
+  }
+
+  if (oppositeSidePositions.length > 0) {
+    return {
+      decision: 'MONITOR',
+      reasonForDecision: `Open ${oppositeSide} on ${symbol} — reverse ${side} blocked until opposite legs close.`,
+      reasonAgainstDecision: `Close ${oppositeSidePositions.length} ${oppositeSide} leg(s) before opening ${side}.`,
+    };
+  }
+
+  if (sameSidePositions.length > 0) {
+    const maxSetup = goldMaxSetupExposure();
+    if (sameSidePositions.length >= maxSetup) {
+      return {
+        decision: 'MONITOR',
+        reasonForDecision: `Setup exposure full (${sameSidePositions.length}/${maxSetup} ${side} legs on ${symbol}).`,
+        reasonAgainstDecision: 'Trade monitor managing open legs.',
+      };
+    }
+    return {
+      decision: 'MONITOR',
+      reasonForDecision: `${sameSidePositions.length} ${side} leg(s) open on ${symbol} — monitoring existing setup.`,
+      reasonAgainstDecision: 'Additional batch entries suppressed while legs are active.',
+    };
+  }
+
+  return null;
 }

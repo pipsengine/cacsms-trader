@@ -152,6 +152,8 @@ export interface AutonomousDecisionOutput {
     ltfBias: string;
     conflict: boolean;
     countertrendAllowed: boolean;
+    /** True when HTF is non-directional or a range/mean-reversion strategy is active — side match not required. */
+    rangingContextActive?: boolean;
     conflictPolicy: string;
   };
   regimeClassification?: {

@@ -22,7 +22,9 @@ import { evaluateAutonomySafetyLock } from '@/lib/autonomy-safety-lock';
 import { evaluateGoldExecutionQuality, resolveGoldLivePrice } from '@/lib/gold-execution-quality';
 import { evaluateGoldInstitutionalQuality } from '@/lib/gold-institutional-quality';
 import { evaluateGoldPositionScaling } from '@/lib/gold-position-scaling';
-import { goldMinRewardRisk, isGoldSymbol } from '@/lib/gold-trading-engine';
+import { resolveGoldMinRewardRiskForDecision } from '@/lib/gold-trade-context';
+import { buildBatchLegVolumes, goldLegLotsPerPosition, totalBatchExposureLots } from '@/lib/gold-batch-entry';
+import { isGoldSymbol, goldBatchEntryEnabled, goldEntryLegCount } from '@/lib/gold-trading-engine';
 import { evaluateStrategyGovernance, resolveStrategyIdFromDecision } from '@/lib/strategy-governance';
 import { logAutonomyDirectionAudit } from '@/lib/autonomy-direction-monitor';
 import { isRetracementEntryEnabled, planAutonomousRetracementEntry } from '@/lib/autonomous-entry-planner';
@@ -115,6 +117,7 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     | 'signalScore'
     | 'finalBias'
     | 'reasonForDecision'
+    | 'regimeClassification'
   >;
   config: Pick<AutonomyConfig, 'tradeExecutionMode' | 'confidenceThreshold' | 'riskThreshold'>;
   manual?: boolean;
@@ -267,17 +270,18 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     } else if (isGoldSymbol(input.decision.symbol)) {
       const stopLoss = Number(input.decision.stopLoss ?? 0);
       const tp = Number(takeProfit ?? 0);
+      const minRewardRisk = resolveGoldMinRewardRiskForDecision(input.decision);
       const expectedR = input.decision.signalScore?.expectedR ?? 0;
-      if (expectedR > 0 && expectedR < goldMinRewardRisk()) {
-        blockers.push(`Reward:risk ${expectedR.toFixed(2)} below Gold minimum ${goldMinRewardRisk()}.`);
+      if (expectedR > 0 && expectedR < minRewardRisk) {
+        blockers.push(`Reward:risk ${expectedR.toFixed(2)} below Gold minimum ${minRewardRisk}.`);
       } else if (stopLoss > 0 && tp > 0) {
         const livePrice = await resolveGoldLivePrice(input.decision.symbol);
         if (livePrice && livePrice > 0) {
           const risk = Math.abs(livePrice - stopLoss);
           const reward = Math.abs(tp - livePrice);
           const rr = risk > 0 ? reward / risk : 0;
-          if (rr > 0 && rr < goldMinRewardRisk()) {
-            blockers.push(`Computed R:R ${rr.toFixed(2)} below Gold minimum ${goldMinRewardRisk()}.`);
+          if (rr > 0 && rr < minRewardRisk) {
+            blockers.push(`Computed R:R ${rr.toFixed(2)} below Gold minimum ${minRewardRisk}.`);
           }
         }
       }
@@ -394,11 +398,23 @@ function buildExecutionPayload(input: {
   comment: string;
   leg: string;
   entryPlan?: Record<string, unknown> | null;
+  setupGroupId?: string;
+  legIndex?: number;
+  legCount?: number;
+  batchEntry?: boolean;
+  rewardRiskPlan?: Record<string, unknown> | null;
+  takeProfitLevels?: number[];
+  targetRewardRiskRatio?: number;
+  extendedRewardRiskRatio?: number;
 }) {
   return {
     source: 'AUTONOMY_EXECUTION_ADAPTER',
     decisionLogId: input.sourceDecision.decisionLogId,
     intentId: input.sourceDecision.decisionLogId,
+    setupGroupId: input.setupGroupId ?? input.sourceDecision.decisionLogId,
+    legIndex: input.legIndex ?? 1,
+    legCount: input.legCount ?? 1,
+    batchEntry: Boolean(input.batchEntry),
     symbol: input.executableDecision.symbol,
     side: input.side,
     orderType: input.orderType,
@@ -409,10 +425,14 @@ function buildExecutionPayload(input: {
     tp: input.takeProfit,
     stopLoss: input.stopLoss,
     takeProfit: input.takeProfit,
+    takeProfitLevels: input.takeProfitLevels ?? [input.takeProfit],
     price: input.entryPrice,
     entryPrice: input.entryPrice,
     pendingEntryPrice: input.orderType.includes('LIMIT') ? input.entryPrice : null,
     rewardRiskRatio: input.rewardRiskRatio,
+    targetRewardRiskRatio: input.targetRewardRiskRatio ?? input.rewardRiskRatio,
+    extendedRewardRiskRatio: input.extendedRewardRiskRatio ?? input.rewardRiskRatio,
+    rewardRiskPlan: input.rewardRiskPlan ?? null,
     stopTargetMethod: input.stopTargetMethod,
     comment: input.comment,
     mode: input.executionMode,
@@ -468,6 +488,7 @@ export async function resolveExecutableAutonomyDecision(
     timeframe: decision.timeframe,
     side,
     tradingStyle: decision.tradingStyle,
+    decision,
   });
   if (!stopTargets) {
     const storedStop = Number(decision.stopLoss ?? 0);
@@ -523,6 +544,7 @@ export async function dispatchAutonomyDecision(input: {
       timeframe: input.decision.timeframe,
       side: input.decision.decision as AutonomousTradeSide,
       tradingStyle: input.decision.tradingStyle,
+      decision: input.decision,
     });
     if (stopTargets) {
       executableDecision = {
@@ -644,13 +666,24 @@ export async function dispatchAutonomyDecision(input: {
     side,
     currentPrice: stopTargets.entryPrice,
     stopLoss,
-    rewardRiskRatio: stopTargets.rewardRiskRatio,
+    rewardRiskRatio: stopTargets.extendedRewardRiskRatio ?? stopTargets.rewardRiskRatio,
   }).catch(() => null);
-  const useRetracementEntry = Boolean(entryPlan && isRetracementEntryEnabled());
+  const useBatchEntry = isGoldSymbol(executableDecision.symbol) && goldBatchEntryEnabled() && !input.manual;
+  const useRetracementEntry = !useBatchEntry && Boolean(entryPlan && isRetracementEntryEnabled());
   const split = splitHybridLots(volumeLots, entryPlan?.marketFraction ?? 0);
+  const setupGroupId = input.decisionLogId;
+  const batchLegCount = useBatchEntry ? goldEntryLegCount() : 1;
+  const batchLegLots = useBatchEntry ? buildBatchLegVolumes(volumeLots, batchLegCount) : [volumeLots];
+  const batchTotalLots = useBatchEntry ? totalBatchExposureLots(batchLegLots) : volumeLots;
   const commandId = `autonomy-${input.decisionLogId.slice(0, 8)}-${randomUUID()}`;
   const pendingCommandId = useRetracementEntry ? `autonomy-${input.decisionLogId.slice(0, 8)}-limit-${randomUUID()}` : commandId;
   const executionMode = account.sandboxMode ? 'SANDBOX' : 'LIVE';
+  const rewardRiskExtras = {
+    takeProfitLevels: stopTargets.takeProfitLevels,
+    targetRewardRiskRatio: stopTargets.targetRewardRiskRatio ?? stopTargets.rewardRiskRatio,
+    extendedRewardRiskRatio: stopTargets.extendedRewardRiskRatio ?? stopTargets.rewardRiskRatio,
+    rewardRiskPlan: stopTargets.rewardRiskPlan ?? null,
+  };
 
   try {
     const dispatchedCommands: Array<{ commandId: string; orderType: string; volumeLots: number }> = [];
@@ -677,6 +710,7 @@ export async function dispatchAutonomyDecision(input: {
           comment: `Cacsms autonomy ${side} market scout ${executableDecision.symbol}`,
           entryPlan,
           leg: 'market_scout',
+          ...rewardRiskExtras,
         }),
         environment: account.environment,
         sandboxMode: account.sandboxMode,
@@ -687,43 +721,98 @@ export async function dispatchAutonomyDecision(input: {
       dispatchedCommands.push({ commandId: marketResult.command.commandId, orderType: 'MARKET', volumeLots: split.marketLots });
     }
 
-    const finalOrderType = useRetracementEntry ? (side === 'BUY' ? 'BUY_LIMIT' : 'SELL_LIMIT') : 'MARKET';
-    const finalVolumeLots = useRetracementEntry ? split.limitLots : volumeLots;
-    const finalEntryPrice = useRetracementEntry && entryPlan ? entryPlan.pendingEntryPrice : stopTargets.entryPrice;
-    const finalStopLoss = useRetracementEntry && entryPlan ? entryPlan.stopLoss : stopLoss;
-    const finalTakeProfit = useRetracementEntry && entryPlan ? entryPlan.takeProfit : takeProfit;
-    const result = await dispatchExecutionCommand({
-      commandId: pendingCommandId,
-      terminalId: checklist.terminalId,
-      type: 'place_order',
-      payload: buildExecutionPayload({
-        sourceDecision: input,
-        executableDecision,
-        account,
-        side,
-        executionMode,
-        volumeLots: finalVolumeLots,
-        stopLoss: finalStopLoss,
-        takeProfit: finalTakeProfit,
-        entryPrice: finalEntryPrice,
-        rewardRiskRatio: stopTargets.rewardRiskRatio,
-        stopTargetMethod: useRetracementEntry ? 'retracement_entry' : stopTargets.method,
-        sized,
-        strategyId,
-        orderType: finalOrderType,
-        comment: useRetracementEntry
-          ? `Cacsms autonomy ${side} retracement ${executableDecision.symbol}`
-          : `Cacsms autonomy ${side} ${executableDecision.symbol}`,
-        entryPlan: entryPlan ?? undefined,
-        leg: useRetracementEntry ? 'retracement_limit' : 'market_full',
-      }),
-      environment: account.environment,
-      sandboxMode: account.sandboxMode,
-      dedupeKey: `AUTONOMY:${input.decisionLogId}:${input.decision.symbol}:${side}:${finalOrderType}:${finalVolumeLots}:${finalEntryPrice}`,
-      intentId: useRetracementEntry ? `${input.decisionLogId}:limit` : input.decisionLogId,
-      source: 'AUTONOMY_EXECUTION_ADAPTER',
-    });
-    dispatchedCommands.push({ commandId: result.command.commandId, orderType: finalOrderType, volumeLots: finalVolumeLots });
+    let result: Awaited<ReturnType<typeof dispatchExecutionCommand>> | null = null;
+    let finalStopLoss = stopLoss;
+    let finalTakeProfit = takeProfit;
+    let finalEntryPrice = stopTargets.entryPrice;
+
+    if (useBatchEntry) {
+      for (let index = 0; index < batchLegLots.length; index += 1) {
+        const legLots = batchLegLots[index];
+        const legCommandId = `${commandId}-leg-${index + 1}-${randomUUID().slice(0, 8)}`;
+        const legResult = await dispatchExecutionCommand({
+          commandId: legCommandId,
+          terminalId: checklist.terminalId,
+          type: 'place_order',
+          payload: buildExecutionPayload({
+            sourceDecision: input,
+            executableDecision,
+            account,
+            side,
+            executionMode,
+            volumeLots: legLots,
+            stopLoss,
+            takeProfit,
+            entryPrice: stopTargets.entryPrice,
+            rewardRiskRatio: stopTargets.rewardRiskRatio,
+            stopTargetMethod: stopTargets.method,
+            sized,
+            strategyId,
+            orderType: 'MARKET',
+            comment: `Cacsms autonomy ${side} batch leg ${index + 1}/${batchLegLots.length} ${executableDecision.symbol}`,
+            leg: `batch_leg_${index + 1}`,
+            setupGroupId,
+            legIndex: index + 1,
+            legCount: batchLegCount,
+            batchEntry: true,
+            ...rewardRiskExtras,
+          }),
+          environment: account.environment,
+          sandboxMode: account.sandboxMode,
+          dedupeKey: `AUTONOMY:${input.decisionLogId}:${input.decision.symbol}:${side}:BATCH:${index + 1}:${legLots}`,
+          intentId: `${input.decisionLogId}:leg:${index + 1}`,
+          source: 'AUTONOMY_EXECUTION_ADAPTER',
+        });
+        result = legResult;
+        dispatchedCommands.push({ commandId: legResult.command.commandId, orderType: 'MARKET', volumeLots: legLots });
+      }
+      if (!result) {
+        throw new Error('Batch entry dispatch produced no commands.');
+      }
+    } else {
+      const finalOrderType = useRetracementEntry ? (side === 'BUY' ? 'BUY_LIMIT' : 'SELL_LIMIT') : 'MARKET';
+      const finalVolumeLots = useRetracementEntry ? split.limitLots : volumeLots;
+      finalEntryPrice = useRetracementEntry && entryPlan ? entryPlan.pendingEntryPrice : stopTargets.entryPrice;
+      finalStopLoss = useRetracementEntry && entryPlan ? entryPlan.stopLoss : stopLoss;
+      finalTakeProfit = useRetracementEntry && entryPlan ? entryPlan.takeProfit : takeProfit;
+      result = await dispatchExecutionCommand({
+        commandId: pendingCommandId,
+        terminalId: checklist.terminalId,
+        type: 'place_order',
+        payload: buildExecutionPayload({
+          sourceDecision: input,
+          executableDecision,
+          account,
+          side,
+          executionMode,
+          volumeLots: finalVolumeLots,
+          stopLoss: finalStopLoss,
+          takeProfit: finalTakeProfit,
+          entryPrice: finalEntryPrice,
+          rewardRiskRatio: stopTargets.rewardRiskRatio,
+          stopTargetMethod: useRetracementEntry ? 'retracement_entry' : stopTargets.method,
+          sized,
+          strategyId,
+          orderType: finalOrderType,
+          comment: useRetracementEntry
+            ? `Cacsms autonomy ${side} retracement ${executableDecision.symbol}`
+            : `Cacsms autonomy ${side} ${executableDecision.symbol}`,
+          entryPlan: entryPlan ?? undefined,
+          leg: useRetracementEntry ? 'retracement_limit' : 'market_full',
+          setupGroupId,
+          legIndex: 1,
+          legCount: 1,
+          batchEntry: false,
+          ...rewardRiskExtras,
+        }),
+        environment: account.environment,
+        sandboxMode: account.sandboxMode,
+        dedupeKey: `AUTONOMY:${input.decisionLogId}:${input.decision.symbol}:${side}:${finalOrderType}:${finalVolumeLots}:${finalEntryPrice}`,
+        intentId: useRetracementEntry ? `${input.decisionLogId}:limit` : input.decisionLogId,
+        source: 'AUTONOMY_EXECUTION_ADAPTER',
+      });
+      dispatchedCommands.push({ commandId: result.command.commandId, orderType: finalOrderType, volumeLots: finalVolumeLots });
+    }
 
     await persistDispatchRecord({
       decisionLogId: input.decisionLogId,
@@ -739,15 +828,19 @@ export async function dispatchAutonomyDecision(input: {
         deduped: result.deduped ?? false,
         accountClass: account.accountClass,
         environment: account.environment,
-        volumeLots,
+        volumeLots: batchTotalLots,
+        perLegLots: batchLegLots[0] ?? volumeLots,
         sizingMethod: sized.method,
         stopLoss: finalStopLoss,
         takeProfit: finalTakeProfit,
         entryPrice: finalEntryPrice,
-        stopTargetMethod: useRetracementEntry ? 'retracement_entry' : stopTargets.method,
+        stopTargetMethod: useBatchEntry ? 'batch_entry' : useRetracementEntry ? 'retracement_entry' : stopTargets.method,
         rewardRiskRatio: stopTargets.rewardRiskRatio,
         strategy: strategyMetadata,
-        entryPlan: entryPlan ?? null,
+        entryPlan: useBatchEntry ? null : entryPlan ?? null,
+        batchEntry: useBatchEntry,
+        legCount: batchLegLots.length,
+        setupGroupId,
         commands: dispatchedCommands,
       },
     });
@@ -761,7 +854,11 @@ export async function dispatchAutonomyDecision(input: {
       finalBias: executableDecision.finalBias,
       side,
       accepted: true,
-      reasons: [`${side} ${useRetracementEntry ? 'retracement entry plan' : 'market order'} dispatched to execution bridge.`],
+      reasons: [
+        useBatchEntry
+          ? `${side} batch entry dispatched ${batchLegLots.length} leg(s) to execution bridge.`
+          : `${side} ${useRetracementEntry ? 'retracement entry plan' : 'market order'} dispatched to execution bridge.`,
+      ],
       metrics: {
         commandId: result.command.commandId,
         terminalId: checklist.terminalId,
@@ -769,7 +866,10 @@ export async function dispatchAutonomyDecision(input: {
         volumeLots,
         stopLoss: finalStopLoss,
         takeProfit: finalTakeProfit,
-        entryPlan: entryPlan ?? null,
+        entryPlan: useBatchEntry ? null : entryPlan ?? null,
+        batchEntry: useBatchEntry,
+        legCount: batchLegLots.length,
+        setupGroupId,
         rewardRiskRatio: stopTargets.rewardRiskRatio,
       },
     });

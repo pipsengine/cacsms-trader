@@ -1,12 +1,16 @@
 import crypto from 'node:crypto';
 
 import { dispatchExecutionCommand } from '@/lib/execution-dispatch';
+import { hasPendingManagementCommand } from '@/lib/execution-bridge-store';
+import { resolveExecutionAccountContext } from '@/lib/execution-account-context';
 import { listOpenPositions, updatePositionEvaluation } from '@/lib/execution-open-positions';
 import { isExecutionEnabled } from '@/lib/execution-policy';
 import { parsePositionManagementMetadata } from '@/lib/position-management-state';
 import { syncOpenPositionLiveMetrics } from '@/lib/position-profit-sync';
+import { evaluateGroupBreakeven, groupOpenPositions } from '@/lib/position-group-management';
 import { getPositionManagementConfig } from '@/lib/trade-monitor-config';
-import { resolveGoldAdaptiveManagementConfig } from '@/lib/gold-adaptive-management';
+import { goldPartialCloseStages, resolveGoldAdaptiveManagementConfig } from '@/lib/gold-adaptive-management';
+import { readGoldRewardRiskPlan } from '@/lib/gold-dynamic-reward-risk';
 import {
   TradeMonitoringEngine,
   type EnrichedTradeSnapshot,
@@ -84,6 +88,7 @@ function buildEnrichedSnapshot(position: Awaited<ReturnType<typeof listOpenPosit
     riskPoints,
     rMultiple: riskPoints > 0 ? favorablePoints / riskPoints : 0,
     management: parsePositionManagementMetadata(position.metadata),
+    positionMetadata: (position.metadata ?? {}) as Record<string, unknown>,
   };
 }
 
@@ -95,6 +100,16 @@ async function dispatchManagementCommand(input: {
   payload: Record<string, unknown>;
   reason: string;
 }): Promise<boolean> {
+  const normalizedType = input.type.trim().toLowerCase().replaceAll('-', '_');
+  if (await hasPendingManagementCommand({
+    terminalId: input.terminalId,
+    ticket: input.ticket,
+    type: normalizedType,
+  })) {
+    return false;
+  }
+
+  const account = await resolveExecutionAccountContext(input.terminalId);
   try {
     await dispatchExecutionCommand({
       commandId: `mgmt-${crypto.randomUUID()}`,
@@ -107,8 +122,9 @@ async function dispatchManagementCommand(input: {
         reason: input.reason,
         source: 'TRADE_MONITOR',
       },
-      sandboxMode: true,
-      environment: 'DEMO',
+      sandboxMode: account?.sandboxMode ?? true,
+      environment: account?.environment ?? 'DEMO',
+      dedupeKey: `MGMT:${normalizedType}:${input.terminalId}:${input.ticket}`,
       skipRiskGate: true,
       source: 'TRADE_MONITOR',
     });
@@ -132,7 +148,7 @@ function metadataAfterAction(action: TradeManagementAction): Record<string, unkn
     };
   }
   if (action.action === 'partial_close') {
-    return { partialCloseApplied: true, lastActionAt: now };
+    return { lastActionAt: now };
   }
   return { lastActionAt: now };
 }
@@ -165,6 +181,43 @@ export async function runTradeMonitorTick(now = Date.now(), options?: { force?: 
   let actions = 0;
   let dispatched = 0;
 
+  for (const group of groupOpenPositions(positions)) {
+    const groupDecision = evaluateGroupBreakeven(group);
+    if (!groupDecision.shouldApply) continue;
+
+    for (const position of group.positions) {
+      const management = parsePositionManagementMetadata(position.metadata);
+      if (management.breakEvenApplied || Boolean(position.metadata?.groupBreakEvenApplied)) continue;
+      if (shouldSkipCooldown(position, true)) continue;
+
+      actions += 1;
+      const ok = await dispatchManagementCommand({
+        terminalId: position.terminalId,
+        type: 'move_to_breakeven',
+        ticket: position.ticket,
+        symbol: group.symbol,
+        payload: { bufferPoints: groupDecision.bufferPoints },
+        reason: groupDecision.reason,
+      });
+      if (ok) {
+        dispatched += 1;
+        await updatePositionEvaluation({
+          id: position.id,
+          currentPrice: position.currentPrice,
+          profitLoss: position.profitLoss,
+          lastAction: 'move_to_break_even',
+          lastActionReason: groupDecision.reason,
+          metadata: {
+            groupBreakEvenRequested: true,
+            groupProfitUsd: group.totalProfitLoss,
+            groupRMultiple: group.aggregateRMultiple,
+            lastActionAt: new Date().toISOString(),
+          },
+        });
+      }
+    }
+  }
+
   for (const position of positions) {
     const snapshot = buildEnrichedSnapshot(position);
     const config = resolveGoldAdaptiveManagementConfig(getPositionManagementConfig(), {
@@ -175,6 +228,7 @@ export async function runTradeMonitorTick(now = Date.now(), options?: { force?: 
       spreadPoints: snapshot.spreadPoints,
       peakRMultiple: snapshot.management.peakRMultiple,
       breakEvenApplied: snapshot.management.breakEvenApplied,
+      rewardRiskPlan: readGoldRewardRiskPlan(snapshot.positionMetadata),
     });
     const decision = new TradeMonitoringEngine(config).evaluatePosition(snapshot);
     if (decision.action === 'hold') {
@@ -235,16 +289,27 @@ export async function runTradeMonitorTick(now = Date.now(), options?: { force?: 
       payload,
       reason: decision.reason,
     });
-    if (ok) dispatched += 1;
-
-    await updatePositionEvaluation({
-      id: position.id,
-      currentPrice: snapshot.currentPrice,
-      profitLoss: snapshot.profitLoss,
-      lastAction: decision.action,
-      lastActionReason: decision.reason,
-      metadata: metadataAfterAction(decision),
-    });
+    if (ok) {
+      dispatched += 1;
+      const actionMetadata = metadataAfterAction(decision);
+      if (decision.action === 'partial_close') {
+        const currentStage = parsePositionManagementMetadata(position.metadata).partialCloseStage ?? 0;
+        const stages = goldPartialCloseStages({ metadata: position.metadata as Record<string, unknown> });
+        const nextStage = currentStage + 1;
+        Object.assign(actionMetadata, {
+          partialCloseStage: nextStage,
+          partialCloseApplied: stages.length > 0 ? nextStage >= stages.length : true,
+        });
+      }
+      await updatePositionEvaluation({
+        id: position.id,
+        currentPrice: snapshot.currentPrice,
+        profitLoss: snapshot.profitLoss,
+        lastAction: decision.action,
+        lastActionReason: decision.reason,
+        metadata: actionMetadata,
+      });
+    }
   }
 
   return {

@@ -608,6 +608,22 @@ export async function generateAutonomousSignal(
     execution,
     strategyBook,
   });
+  if (isGoldSymbol(decision.symbol) && (decision.decision === 'BUY' || decision.decision === 'SELL')) {
+    const { gateGoldDecisionForOpenPositions } = await import('@/lib/gold-position-scaling');
+    const gate = await gateGoldDecisionForOpenPositions({
+      symbol: decision.symbol,
+      decision: decision.decision,
+    });
+    if (gate) {
+      decision = {
+        ...decision,
+        decision: gate.decision,
+        reasonForDecision: gate.reasonForDecision,
+        reasonAgainstDecision: gate.reasonAgainstDecision,
+        recommendedNextAction: 'Manage open positions via trade monitor.',
+      };
+    }
+  }
   const baseSignalDecision = decision.decision;
   if (['BUY', 'SELL'].includes(decision.decision)) {
     const { resolveExecutableAutonomyDecision } = await import('@/lib/autonomy-execution-adapter');

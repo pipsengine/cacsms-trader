@@ -7,6 +7,13 @@ import { queryPostgres } from '@/lib/postgres';
 import type { ReconstructedCandle } from '@/lib/visual-intelligence-types';
 import { getTradingStyleProfile } from '@/lib/trading-styles/registry';
 import type { TradingStyleId } from '@/lib/trading-styles/types';
+import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
+import {
+  buildGoldTakeProfitPrices,
+  resolveGoldDynamicRewardRisk,
+  type GoldDynamicRewardRiskPlan,
+} from '@/lib/gold-dynamic-reward-risk';
+import { isGoldSymbol } from '@/lib/gold-trading-engine';
 
 export type AutonomousTradeSide = 'BUY' | 'SELL';
 
@@ -18,6 +25,9 @@ export type AutonomousStopTargetResult = {
   invalidationLevel: number;
   stopPips: number;
   rewardRiskRatio: number;
+  targetRewardRiskRatio?: number;
+  extendedRewardRiskRatio?: number;
+  rewardRiskPlan?: GoldDynamicRewardRiskPlan;
   method: 'structure' | 'swing' | 'atr' | 'pip_default';
 };
 
@@ -264,12 +274,17 @@ export async function resolveAutonomousStopTargets(input: {
   side: AutonomousTradeSide;
   entryPrice?: number | null;
   tradingStyle?: TradingStyleId;
+  decision?: AutonomousDecisionOutput;
 }): Promise<AutonomousStopTargetResult | null> {
   const symbol = input.symbol.toUpperCase();
   const timeframe = input.timeframe.toUpperCase();
   const rules = loadPropFirmRiskRulesFromEnv();
   const styleProfile = input.tradingStyle ? getTradingStyleProfile(input.tradingStyle) : null;
-  const minRewardRiskRatio = styleProfile?.minRewardRisk ?? rules.minRewardRiskRatio;
+  const goldPlan = isGoldSymbol(symbol) && input.decision
+    ? resolveGoldDynamicRewardRisk(input.decision)
+    : null;
+  const minRewardRiskRatio = goldPlan?.floor ?? styleProfile?.minRewardRisk ?? rules.minRewardRiskRatio;
+  const targetRewardRiskRatio = goldPlan?.extendedTargetR ?? minRewardRiskRatio;
   const atrMultiplier = styleProfile?.stopAtrMultiplier ?? envNumber('CACSMS_ATR_STOP_MULTIPLIER', 1.2);
   const pipSize = pipSizeForSymbol(symbol);
   const minStopDistance = defaultStopPips(symbol, timeframe) * pipSize;
@@ -333,12 +348,34 @@ export async function resolveAutonomousStopTargets(input: {
   }
 
   const takeProfit = input.side === 'BUY'
-    ? resolvedEntry + stopDistance * minRewardRiskRatio
-    : resolvedEntry - stopDistance * minRewardRiskRatio;
+    ? resolvedEntry + stopDistance * targetRewardRiskRatio
+    : resolvedEntry - stopDistance * targetRewardRiskRatio;
 
   const roundedEntry = roundPrice(symbol, resolvedEntry);
   let roundedStop = roundPrice(symbol, stopLoss);
   let roundedTp = roundPrice(symbol, takeProfit);
+  let takeProfitLevels = [roundedTp];
+  let rewardRiskRatio = minRewardRiskRatio;
+  let primaryTargetR = goldPlan?.targetR ?? minRewardRiskRatio;
+  let extendedTargetR = goldPlan?.extendedTargetR ?? targetRewardRiskRatio;
+
+  if (goldPlan) {
+    const goldTargets = buildGoldTakeProfitPrices({
+      symbol,
+      side: input.side,
+      entryPrice: roundedEntry,
+      stopDistance,
+      plan: goldPlan,
+      supports,
+      resistances,
+    });
+    takeProfitLevels = goldTargets.levels;
+    roundedTp = goldTargets.extendedTakeProfit;
+    rewardRiskRatio = goldTargets.rewardRiskRatio;
+    primaryTargetR = goldPlan.targetR;
+    extendedTargetR = goldPlan.extendedTargetR;
+  }
+
   let validationError = validateStopTargets({
     symbol,
     side: input.side,
@@ -358,8 +395,8 @@ export async function resolveAutonomousStopTargets(input: {
     roundedTp = roundPrice(
       symbol,
       input.side === 'BUY'
-        ? roundedEntry + widenedDistance * minRewardRiskRatio
-        : roundedEntry - widenedDistance * minRewardRiskRatio,
+        ? roundedEntry + widenedDistance * targetRewardRiskRatio
+        : roundedEntry - widenedDistance * targetRewardRiskRatio,
     );
     validationError = validateStopTargets({
       symbol,
@@ -370,29 +407,38 @@ export async function resolveAutonomousStopTargets(input: {
       minRewardRiskRatio,
       minStopDistance,
     });
-    return buildGuaranteedPipStopTargets({
-      symbol,
-      side: input.side,
-      entryPrice: roundedEntry,
-      timeframe,
-      rewardRiskRatio: minRewardRiskRatio,
-    });
+    if (validationError) {
+      return buildGuaranteedPipStopTargets({
+        symbol,
+        side: input.side,
+        entryPrice: roundedEntry,
+        timeframe,
+        rewardRiskRatio: minRewardRiskRatio,
+      });
+    }
+    takeProfitLevels = [roundedTp];
+    rewardRiskRatio = targetRewardRiskRatio;
   }
 
   stopDistance = Math.abs(roundedEntry - roundedStop);
 
   const stopPips = stopPipsFromDistance(symbol, roundedEntry, roundedStop);
-  const rewardDistance = Math.abs(roundedTp - roundedEntry);
-  const rewardRiskRatio = stopDistance > 0 ? Number((rewardDistance / stopDistance).toFixed(4)) : minRewardRiskRatio;
+  if (!goldPlan) {
+    const rewardDistance = Math.abs(roundedTp - roundedEntry);
+    rewardRiskRatio = stopDistance > 0 ? Number((rewardDistance / stopDistance).toFixed(4)) : minRewardRiskRatio;
+  }
 
   return {
     entryPrice: roundedEntry,
     stopLoss: roundedStop,
     takeProfit: roundedTp,
-    takeProfitLevels: [roundedTp],
+    takeProfitLevels,
     invalidationLevel: roundedStop,
     stopPips,
     rewardRiskRatio,
+    targetRewardRiskRatio: primaryTargetR,
+    extendedRewardRiskRatio: extendedTargetR,
+    rewardRiskPlan: goldPlan ?? undefined,
     method,
   };
 }

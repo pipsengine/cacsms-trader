@@ -318,6 +318,34 @@ export async function recordDispatch(input: DispatchEventInput): Promise<void> {
   }).catch(() => null);
 }
 
+export async function hasPendingManagementCommand(input: {
+  terminalId: string;
+  ticket: string;
+  type: string;
+}): Promise<boolean> {
+  const normalizedType = String(input.type ?? '').trim().toUpperCase().replaceAll('-', '_');
+  const ticket = text(input.ticket);
+  if (!ticket) return false;
+
+  const result = await queryPostgres(
+    `
+      SELECT 1
+      FROM execution_commands
+      WHERE terminal_id = $1
+        AND lifecycle_state IN ('QUEUED', 'ROUTING', 'SENT', 'ACKNOWLEDGED')
+        AND upper(replace(type, '-', '_')) = $2
+        AND (
+          ticket = $3
+          OR payload->>'ticket' = $3
+        )
+      LIMIT 1
+    `,
+    [input.terminalId, normalizedType, ticket],
+  ).catch(() => ({ rows: [] }));
+
+  return Boolean(result.rows[0]);
+}
+
 export async function recordAck(input: AckEventInput): Promise<void> {
   const caps = await getSchemaCaps();
   const receivedAt = iso(input.receivedAt) ?? new Date().toISOString();
@@ -436,6 +464,16 @@ async function syncOpenPositionFromAck(input: {
       entryPrice: input.executedPrice,
       stopLoss: Number(payload.sl ?? payload.stopLoss ?? 0) || null,
       takeProfit: Number(payload.tp ?? payload.takeProfit ?? 0) || null,
+      metadata: {
+        setupGroupId: payload.setupGroupId ?? payload.decisionLogId ?? null,
+        legIndex: payload.legIndex ?? null,
+        legCount: payload.legCount ?? null,
+        batchEntry: payload.batchEntry ?? false,
+        rewardRiskPlan: payload.rewardRiskPlan ?? null,
+        takeProfitLevels: payload.takeProfitLevels ?? null,
+        targetRewardRiskRatio: payload.targetRewardRiskRatio ?? null,
+        extendedRewardRiskRatio: payload.extendedRewardRiskRatio ?? null,
+      },
     });
     return;
   }
@@ -447,6 +485,32 @@ async function syncOpenPositionFromAck(input: {
 
   if (commandType === 'partial_close' && ticket && (input.status === 'accepted' || input.mappedState === 'EXECUTED')) {
     await markPositionClosed({ terminalId: input.terminalId, ticket, partial: true });
+    return;
+  }
+
+  if (
+    (commandType === 'move_to_breakeven' || commandType === 'modify_order' || commandType === 'set_trailing_stop')
+    && ticket
+    && (input.status === 'accepted' || input.mappedState === 'EXECUTED' || input.mappedState === 'ACKNOWLEDGED')
+  ) {
+    const { updatePositionEvaluation, listOpenPositions } = await import('@/lib/execution-open-positions');
+    const positions = await listOpenPositions({ limit: 100, terminalId: input.terminalId }).catch(() => []);
+    const position = positions.find((item) => String(item.ticket) === ticket);
+    if (position) {
+      await updatePositionEvaluation({
+        id: position.id,
+        currentPrice: position.currentPrice,
+        profitLoss: position.profitLoss,
+        lastAction: commandType === 'move_to_breakeven' ? 'move_to_break_even' : commandType,
+        lastActionReason: String(payload.reason ?? 'Acknowledged by EA.'),
+        metadata: {
+          breakEvenApplied: commandType === 'move_to_breakeven',
+          groupBreakEvenApplied: commandType === 'move_to_breakeven' ? true : undefined,
+          profitLockApplied: commandType === 'modify_order' ? true : undefined,
+          lastActionAt: new Date().toISOString(),
+        },
+      });
+    }
   }
 }
 

@@ -5,6 +5,7 @@ export interface PositionManagementMetadata {
   breakEvenApplied: boolean;
   profitLockApplied: boolean;
   partialCloseApplied: boolean;
+  partialCloseStage: number;
   lastLockedSl: number | null;
   wasEverProfitable: boolean;
   lastPeakAt: string | null;
@@ -18,6 +19,7 @@ export const EMPTY_POSITION_MANAGEMENT_METADATA: PositionManagementMetadata = {
   breakEvenApplied: false,
   profitLockApplied: false,
   partialCloseApplied: false,
+  partialCloseStage: 0,
   lastLockedSl: null,
   wasEverProfitable: false,
   lastPeakAt: null,
@@ -36,6 +38,7 @@ export function parsePositionManagementMetadata(raw: unknown): PositionManagemen
     breakEvenApplied: Boolean(value.breakEvenApplied),
     profitLockApplied: Boolean(value.profitLockApplied),
     partialCloseApplied: Boolean(value.partialCloseApplied),
+    partialCloseStage: Number(value.partialCloseStage ?? 0),
     lastLockedSl: value.lastLockedSl == null ? null : Number(value.lastLockedSl),
     wasEverProfitable: Boolean(value.wasEverProfitable),
     lastPeakAt: value.lastPeakAt ? String(value.lastPeakAt) : null,

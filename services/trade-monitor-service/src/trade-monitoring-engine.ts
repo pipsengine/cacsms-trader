@@ -1,7 +1,8 @@
 import type { TradeIntent } from '../../../packages/shared-types';
 import type { PositionManagementConfig } from '../../../lib/trade-monitor-config';
 import type { PositionManagementMetadata } from '../../../lib/position-management-state';
-import { goldBreakEvenAllowed, resolveGoldAdaptiveManagementConfig } from '../../../lib/gold-adaptive-management';
+import { goldBreakEvenAllowed, goldPartialCloseStages, resolveGoldAdaptiveManagementConfig } from '../../../lib/gold-adaptive-management';
+import { readGoldRewardRiskPlan } from '../../../lib/gold-dynamic-reward-risk';
 import { isGoldSymbol } from '../../../lib/gold-trading-engine';
 
 export interface OpenTradeSnapshot {
@@ -47,6 +48,7 @@ export interface EnrichedTradeSnapshot extends OpenTradeSnapshot {
   riskPoints: number;
   rMultiple: number;
   management: PositionManagementMetadata;
+  positionMetadata?: Record<string, unknown>;
 }
 
 export class TradeMonitoringEngine {
@@ -116,6 +118,7 @@ export class TradeMonitoringEngine {
   }
 
   evaluateBreakEven(snapshot: EnrichedTradeSnapshot): TradeManagementAction {
+    const rewardRiskPlan = readGoldRewardRiskPlan(snapshot.positionMetadata);
     const config = isGoldSymbol(snapshot.symbol)
       ? resolveGoldAdaptiveManagementConfig(this.config, {
           symbol: snapshot.symbol,
@@ -125,6 +128,7 @@ export class TradeMonitoringEngine {
           spreadPoints: snapshot.spreadPoints,
           peakRMultiple: snapshot.management.peakRMultiple,
           breakEvenApplied: snapshot.management.breakEvenApplied,
+          rewardRiskPlan,
         })
       : this.config;
 
@@ -198,6 +202,29 @@ export class TradeMonitoringEngine {
   }
 
   evaluatePartialClose(snapshot: EnrichedTradeSnapshot, closeAtR = this.config.partialCloseR): TradeManagementAction {
+    const goldStages = isGoldSymbol(snapshot.symbol)
+      ? goldPartialCloseStages({ metadata: snapshot.positionMetadata })
+      : [];
+    const stageIndex = snapshot.management.partialCloseStage ?? 0;
+
+    if (goldStages.length > 0) {
+      const nextStage = goldStages[stageIndex];
+      if (!nextStage) {
+        return action(snapshot, 'hold', 'All Gold partial-close stages completed.', 0, false);
+      }
+      if (snapshot.rMultiple + 1e-9 < nextStage.atR) {
+        return action(snapshot, 'hold', `Waiting for ${nextStage.label} at ${nextStage.atR}R.`, 0, false);
+      }
+      return {
+        ticket: snapshot.ticket,
+        action: 'partial_close',
+        reason: `Gold ${nextStage.label} at ${snapshot.rMultiple.toFixed(2)}R (target ${nextStage.atR}R).`,
+        priority: 50 + stageIndex,
+        urgent: false,
+        partialCloseFraction: nextStage.fraction,
+      };
+    }
+
     if (snapshot.management.partialCloseApplied) {
       return action(snapshot, 'hold', 'Partial close already applied.', 0, false);
     }
@@ -215,6 +242,7 @@ export class TradeMonitoringEngine {
   }
 
   evaluateTrailingStop(snapshot: EnrichedTradeSnapshot): TradeManagementAction {
+    const rewardRiskPlan = readGoldRewardRiskPlan(snapshot.positionMetadata);
     const config = isGoldSymbol(snapshot.symbol)
       ? resolveGoldAdaptiveManagementConfig(this.config, {
           symbol: snapshot.symbol,
@@ -224,10 +252,12 @@ export class TradeMonitoringEngine {
           spreadPoints: snapshot.spreadPoints,
           peakRMultiple: snapshot.management.peakRMultiple,
           breakEvenApplied: snapshot.management.breakEvenApplied,
+          rewardRiskPlan,
         })
       : this.config;
 
-    if (!snapshot.management.profitLockApplied && snapshot.rMultiple < config.profitLockStartR) {
+    const trailThreshold = rewardRiskPlan?.trailActivateAtR ?? config.profitLockStartR;
+    if (!snapshot.management.profitLockApplied && snapshot.rMultiple < trailThreshold) {
       return action(snapshot, 'hold', 'Trailing stop waits for profit lock stage.', 0, false);
     }
     if (snapshot.profitLoss <= 0) {

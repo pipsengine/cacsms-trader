@@ -16,6 +16,7 @@ export async function POST(request: Request): Promise<Response> {
   const payload = await request.text();
   const parsed = safeJson(payload);
   const receivedAt = new Date().toISOString();
+  const bridgeRelay = request.headers.get('X-Cacsms-Bridge-Relay') === '1';
   if (parsed && typeof parsed === 'object') {
     try {
       const ack = parsed as any;
@@ -64,6 +65,15 @@ export async function POST(request: Request): Promise<Response> {
       message: 'Ack payload is not valid JSON.',
       payload: { receivedAt, body: payload.slice(0, 4000) },
     }).catch(() => null);
+  }
+  if (bridgeRelay) {
+    return new Response(JSON.stringify({ ok: true, relay: true }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'Cache-Control': 'no-store',
+      },
+    });
   }
   const response = await fetch(`${bridgeUrl()}/commands/ack`, {
     method: 'POST',

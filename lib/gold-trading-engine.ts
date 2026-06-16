@@ -72,7 +72,7 @@ export function goldIntelligentScalingEnabled(): boolean {
 
 /** Max concurrent XAUUSD positions (scaling cap). */
 export function goldMaxConcurrentPositions(): number {
-  return Math.max(1, Math.min(8, Math.round(envNumber('CACSMS_GOLD_MAX_CONCURRENT_POSITIONS', 3))));
+  return Math.max(1, Math.min(10, Math.round(envNumber('CACSMS_GOLD_MAX_CONCURRENT_POSITIONS', 5))));
 }
 
 /** Max new Gold entries per maintenance cycle. */
@@ -104,9 +104,24 @@ export function goldMaxTickAgeSeconds(): number {
   return Math.max(15, Math.round(envNumber('CACSMS_GOLD_MAX_TICK_AGE_SECONDS', 90)));
 }
 
-/** Min reward:risk for Gold entries. */
+/** Min reward:risk for Gold entries — hard floor 1:2. */
 export function goldMinRewardRisk(): number {
-  return Math.max(1.2, envNumber('CACSMS_GOLD_MIN_REWARD_RISK', 2));
+  return Math.max(2, envNumber('CACSMS_GOLD_MIN_REWARD_RISK', 2));
+}
+
+/** Default target R:R for standard Gold setups (1:3). */
+export function goldTargetRewardRisk(): number {
+  return Math.max(goldMinRewardRisk(), envNumber('CACSMS_GOLD_TARGET_REWARD_RISK', 3));
+}
+
+/** Target R:R for elevated / institutional Gold setups (1:4 default). */
+export function goldInstitutionalTargetRewardRisk(): number {
+  return Math.max(goldTargetRewardRisk(), envNumber('CACSMS_GOLD_INSTITUTIONAL_TARGET_REWARD_RISK', 4));
+}
+
+/** Maximum extended runner target R:R (1:6 cap by default). */
+export function goldMaxTargetRewardRisk(): number {
+  return Math.max(goldInstitutionalTargetRewardRisk(), envNumber('CACSMS_GOLD_MAX_TARGET_REWARD_RISK', 6));
 }
 
 /** Minimum institutional quality score (0–100) required to execute Gold trades. */
@@ -116,7 +131,21 @@ export function goldMinInstitutionalQuality(): number {
 
 /** Max scale-in legs per setup type before requiring fresh confirmation. */
 export function goldMaxSetupExposure(): number {
-  return Math.max(1, Math.min(goldMaxConcurrentPositions(), Math.round(envNumber('CACSMS_GOLD_MAX_SETUP_EXPOSURE', 3))));
+  return Math.max(1, Math.min(goldMaxConcurrentPositions(), Math.round(envNumber('CACSMS_GOLD_MAX_SETUP_EXPOSURE', 5))));
+}
+
+/** Parallel market legs opened together on each new Gold entry signal. */
+export function goldEntryLegCount(): number {
+  const configured = Math.round(envNumber('CACSMS_GOLD_ENTRY_LEGS', 5));
+  return Math.max(1, Math.min(goldMaxConcurrentPositions(), configured));
+}
+
+/** When true, each signal dispatches `goldEntryLegCount()` market legs in one batch. */
+export function goldBatchEntryEnabled(): boolean {
+  if (!isGoldOnlyTradingEngine() || goldSerialTradingEnabled()) return false;
+  const raw = String(process.env.CACSMS_GOLD_BATCH_ENTRY ?? '').trim().toLowerCase();
+  if (raw) return raw === 'true' || raw === '1' || raw === 'yes';
+  return goldEntryLegCount() > 1;
 }
 
 /** Max trades per calendar day on Gold. */
@@ -153,12 +182,18 @@ export interface GoldEngineStatus {
   symbol: GoldSymbol;
   serialTrading: boolean;
   intelligentScaling: boolean;
+  batchEntryEnabled: boolean;
+  entryLegCount: number;
   minInstitutionalQuality: number;
   maxSetupExposure: number;
   maxConcurrentPositions: number;
   maxEntriesPerCycle: number;
   maxSpreadPoints: number;
   maxTradesPerDay: number;
+  minRewardRisk: number;
+  targetRewardRisk: number;
+  institutionalTargetRewardRisk: number;
+  maxTargetRewardRisk: number;
   preferredStyles: string[];
   sessions24h: boolean;
 }
@@ -169,12 +204,18 @@ export function getGoldEngineStatus(): GoldEngineStatus {
     symbol: GOLD_SYMBOL,
     serialTrading: goldSerialTradingEnabled(),
     intelligentScaling: goldIntelligentScalingEnabled(),
+    batchEntryEnabled: goldBatchEntryEnabled(),
+    entryLegCount: goldEntryLegCount(),
     minInstitutionalQuality: goldMinInstitutionalQuality(),
     maxSetupExposure: goldMaxSetupExposure(),
     maxConcurrentPositions: goldMaxConcurrentPositions(),
     maxEntriesPerCycle: goldMaxEntriesPerCycle(),
     maxSpreadPoints: goldMaxSpreadPoints(),
     maxTradesPerDay: goldMaxTradesPerDay(),
+    minRewardRisk: goldMinRewardRisk(),
+    targetRewardRisk: goldTargetRewardRisk(),
+    institutionalTargetRewardRisk: goldInstitutionalTargetRewardRisk(),
+    maxTargetRewardRisk: goldMaxTargetRewardRisk(),
     preferredStyles: goldPreferredStyles(),
     sessions24h: envBool('CACSMS_24H_TRADING_ENABLED', true),
   };

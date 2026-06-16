@@ -1,7 +1,11 @@
 import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
 import {
+  isNonDirectionalBias,
+  resolveGoldMinRewardRiskForDecision,
+} from '@/lib/gold-trade-context';
+import { resolveGoldDynamicRewardRisk } from '@/lib/gold-dynamic-reward-risk';
+import {
   goldMinInstitutionalQuality,
-  goldMinRewardRisk,
   isGoldSymbol,
 } from '@/lib/gold-trading-engine';
 
@@ -15,6 +19,7 @@ export type GoldInstitutionalQualityResult = {
 };
 
 function sideMatchesBias(side: string, bias: string): boolean {
+  if (isNonDirectionalBias(bias)) return true;
   const s = side.toUpperCase();
   const b = bias.toLowerCase();
   if (s === 'BUY') return b.includes('bull');
@@ -39,6 +44,9 @@ export function evaluateGoldInstitutionalQuality(
     | 'reasonForDecision'
     | 'macroRiskWarning'
     | 'liquidityWarning'
+    | 'regimeClassification'
+    | 'tradingStyle'
+    | 'timeframe'
   >,
 ): GoldInstitutionalQualityResult {
   if (!isGoldSymbol(decision.symbol)) {
@@ -71,10 +79,30 @@ export function evaluateGoldInstitutionalQuality(
   }
   breakdown.topDownPlan = planScore;
 
+  const minRewardRisk = resolveGoldMinRewardRiskForDecision(decision);
+  const dynamicPlan = resolveGoldDynamicRewardRisk(decision);
   const expectedR = decision.signalScore?.expectedR ?? 0;
-  breakdown.expectedR = expectedR >= goldMinRewardRisk() ? 12 : Math.max(0, Math.round(expectedR * 4));
-  if (expectedR > 0 && expectedR < goldMinRewardRisk()) {
-    blockers.push(`Expected R ${expectedR.toFixed(2)} below Gold minimum ${goldMinRewardRisk()}.`);
+  breakdown.expectedR = dynamicPlan.setupScore >= 55 ? 12 : Math.max(0, Math.round(expectedR * 4));
+  breakdown.dynamicTarget = dynamicPlan.tier === 'institutional' ? 12 : dynamicPlan.tier === 'elevated' ? 8 : 6;
+
+  const stopLoss = Number((decision as { stopLoss?: number | null }).stopLoss ?? 0);
+  const takeProfit = Number((decision as { takeProfitLevels?: number[] }).takeProfitLevels?.[0] ?? 0);
+  if (stopLoss > 0 && takeProfit > 0) {
+    const entryProxy = Number((decision as { entryZone?: { mid?: number } }).entryZone?.mid ?? 0);
+    if (entryProxy > 0) {
+      const risk = Math.abs(entryProxy - stopLoss);
+      const reward = Math.abs(takeProfit - entryProxy);
+      const geometricRr = risk > 0 ? reward / risk : 0;
+      if (geometricRr > 0 && geometricRr + 1e-9 < minRewardRisk) {
+        blockers.push(`Geometric R:R ${geometricRr.toFixed(2)} below Gold minimum ${minRewardRisk}.`);
+      }
+    }
+  } else if (dynamicPlan.targetR + 1e-9 < minRewardRisk) {
+    blockers.push(`Dynamic target ${dynamicPlan.targetR.toFixed(2)}R below Gold minimum ${minRewardRisk}.`);
+  }
+
+  if (expectedR > 0 && expectedR < minRewardRisk && dynamicPlan.tier === 'standard') {
+    blockers.push(`Model expectancy ${expectedR.toFixed(2)}R below Gold minimum ${minRewardRisk} on standard setup.`);
   }
 
   const allocation = decision.capitalAllocation?.riskTier ?? 'full';
@@ -87,7 +115,11 @@ export function evaluateGoldInstitutionalQuality(
   breakdown.structureEvidence = structureKeywords.test(decision.reasonForDecision) ? 8 : 0;
   breakdown.setupType = /structure|liquidity|order.?block|fvg|institutional|smc/i.test(decision.setupType) ? 6 : 2;
 
-  if (decision.macroRiskWarning && /blackout|avoid|blocked|high.?impact/i.test(decision.macroRiskWarning)) {
+  if (
+    decision.macroRiskWarning
+    && !/no high.?impact|not available|no macro blocker/i.test(decision.macroRiskWarning)
+    && /blackout|avoid|blocked|elevated near high.?impact|high.?impact macro risk is active/i.test(decision.macroRiskWarning)
+  ) {
     blockers.push(decision.macroRiskWarning);
   }
   if (decision.liquidityWarning && /erratic|thin|unclear|avoid/i.test(decision.liquidityWarning)) {
@@ -100,7 +132,11 @@ export function evaluateGoldInstitutionalQuality(
     blockers.push(`Gold institutional quality ${score}% below minimum ${minRequired}%.`);
   }
 
-  const tier = score >= minRequired + 10 ? 'institutional' : score >= minRequired ? 'acceptable' : 'reject';
+  const tier = score >= minRequired + 10 && dynamicPlan.tier === 'institutional'
+    ? 'institutional'
+    : score >= minRequired
+      ? 'acceptable'
+      : 'reject';
 
   return {
     ok: blockers.length === 0 && score >= minRequired,

@@ -1,4 +1,5 @@
 import type { PositionManagementConfig } from '@/lib/trade-monitor-config';
+import { readGoldRewardRiskPlan, type GoldDynamicRewardRiskPlan } from '@/lib/gold-dynamic-reward-risk';
 import { isGoldSymbol } from '@/lib/gold-trading-engine';
 
 function envNumber(name: string, fallback: number): number {
@@ -16,6 +17,7 @@ export type GoldAdaptiveManagementInput = {
   spreadPoints: number;
   peakRMultiple: number;
   breakEvenApplied: boolean;
+  rewardRiskPlan?: GoldDynamicRewardRiskPlan | null;
 };
 
 /** Gold adaptive trade management — disables fixed-pip micro BE; uses R + spread/slippage buffers. */
@@ -25,14 +27,16 @@ export function resolveGoldAdaptiveManagementConfig(
 ): PositionManagementConfig {
   if (!isGoldSymbol(input.symbol)) return base;
 
+  const plan = input.rewardRiskPlan;
   const spreadBuffer = Math.max(base.spreadBufferPoints, input.spreadPoints, envNumber('CACSMS_GOLD_BE_SPREAD_BUFFER', 3));
   const slippageBuffer = envNumber('CACSMS_GOLD_BE_SLIPPAGE_BUFFER', 2);
   const volatilityFactor = input.riskPoints > 0 ? Math.min(1.4, Math.max(0.85, input.riskPoints / 500)) : 1;
-  const standardBeR = Math.max(
+  const standardBeR = plan?.breakEvenAtR ?? Math.max(
     envNumber('CACSMS_GOLD_STANDARD_BE_R', 0.85),
     Math.min(1.35, 0.75 * volatilityFactor + spreadBuffer / Math.max(input.riskPoints, 50)),
   );
-  const profitLockR = Math.max(base.profitLockStartR, standardBeR + 0.25);
+  const profitLockR = plan?.profitLockAtR ?? Math.max(base.profitLockStartR, standardBeR + 0.25);
+  const partialCloseR = plan?.partialCloseStages?.[0]?.atR ?? base.partialCloseR;
   const trailingPoints = Math.max(
     spreadBuffer * 4,
     Math.round(input.riskPoints * envNumber('CACSMS_GOLD_TRAIL_RISK_FRACTION', 0.32)),
@@ -44,10 +48,21 @@ export function resolveGoldAdaptiveManagementConfig(
     microBreakEvenR: 999,
     standardBreakEvenR: standardBeR,
     profitLockStartR: profitLockR,
+    partialCloseR,
     spreadBufferPoints: spreadBuffer,
     trailingPoints,
     minPeakProfitUsd: Math.max(base.minPeakProfitUsd, spreadBuffer * 0.05),
+    maxMinutesOpen: plan?.extendedTargetR && plan.extendedTargetR >= 5
+      ? Math.max(base.maxMinutesOpen, 720)
+      : base.maxMinutesOpen,
   };
+}
+
+export function goldPartialCloseStages(input: {
+  metadata?: Record<string, unknown>;
+}): Array<{ atR: number; fraction: number; label: string }> {
+  const plan = readGoldRewardRiskPlan(input.metadata);
+  return plan?.partialCloseStages ?? [];
 }
 
 export function goldBreakEvenAllowed(input: GoldAdaptiveManagementInput, standardBeR: number): boolean {

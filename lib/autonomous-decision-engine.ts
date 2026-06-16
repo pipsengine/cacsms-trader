@@ -1,4 +1,5 @@
 import { getContinuousRefillDecisionThresholds, getDecisionThresholds } from './autonomy-account-profiles';
+import { isRangeOrientedContext } from './gold-trade-context';
 import { getTradingStyleProfile } from './trading-styles/registry';
 import { shouldBypassNewsBlackout } from './trading-session-policy';
 import { mapBookSideToAutonomy } from '@/lib/strategies/strategy-book-scoring';
@@ -29,6 +30,7 @@ export function buildAutonomousDecision(input: AutonomousDecisionInput): Autonom
   const finalBias = normalizeBias(visual.finalMarketBias);
   const baseDecision = normalizeDecision(visual.finalDecision);
   const blockers = collectBlockers({ confidenceScore, setupReadinessScore, riskScore, input });
+  const regimeClassification = classifyRegime({ visual, macro, execution, riskScore });
   const strategyFusion = fuseStrategyBook({
     visualDecision: baseDecision,
     visualBias: finalBias,
@@ -37,21 +39,24 @@ export function buildAutonomousDecision(input: AutonomousDecisionInput): Autonom
     strategyBook: input.strategyBook ?? null,
     refillMode: Boolean(input.refillMode),
   });
+  const fusedConfidence = strategyFusion.confidenceScore;
+  const fusedReadiness = strategyFusion.setupReadinessScore;
+  const setupType = strategyFusion.setupType ?? inferSetupType(String(visual.marketPhase ?? ''), String(visual.liquidityObjective ?? ''));
   const decision = downgradeDecision(
     strategyFusion.decision,
     strategyFusion.bias,
     [...blockers, ...strategyFusion.blockers],
     Boolean(input.refillMode),
+    regimeClassification.primary,
   );
-  const fusedConfidence = strategyFusion.confidenceScore;
-  const fusedReadiness = strategyFusion.setupReadinessScore;
-  const setupType = strategyFusion.setupType ?? inferSetupType(String(visual.marketPhase ?? ''), String(visual.liquidityObjective ?? ''));
-  const regimeClassification = classifyRegime({ visual, macro, execution, riskScore });
   const institutionalPlan = buildInstitutionalPlan({
     visual,
     decision,
     finalBias: strategyFusion.bias,
     strategyBook: input.strategyBook ?? null,
+    regime: regimeClassification.primary,
+    selectedStrategyId: strategyFusion.selectedStrategyId,
+    setupType,
   });
   const conflictAdjustedDecision = applyInstitutionalConflictPolicy(decision, institutionalPlan);
   const signalScore = scoreSignalModel({
@@ -157,6 +162,9 @@ function buildInstitutionalPlan(input: {
   decision: AutonomyDecision;
   finalBias: string;
   strategyBook: AutonomousDecisionInput['strategyBook'];
+  regime: RegimeTag;
+  selectedStrategyId: string | null;
+  setupType: string;
 }): NonNullable<AutonomousDecisionOutput['institutionalPlan']> {
   const states = Array.isArray((input.visual as Record<string, unknown>).timeframeStates)
     ? (input.visual as Record<string, unknown>).timeframeStates as Array<Record<string, unknown>>
@@ -190,6 +198,11 @@ function buildInstitutionalPlan(input: {
   const ltfBias = m15Bias === 'neutral' || m15Bias === 'mixed' ? h1Bias : m15Bias;
   const conflict = isDirectional(htfBias) && isDirectional(ltfBias) && htfBias !== ltfBias;
   const leader = input.strategyBook?.bestStrategy;
+  const rangingContextActive = isRangeOrientedContext({
+    selectedStrategyId: input.selectedStrategyId,
+    setupType: input.setupType,
+    regimeClassification: { primary: input.regime, tags: [input.regime], confidence: 0, source: 'plan' },
+  }) || !isDirectional(htfBias);
   const countertrendAllowed = Boolean(
     conflict
     && leader
@@ -216,11 +229,16 @@ function buildInstitutionalPlan(input: {
     ltfBias,
     conflict,
     countertrendAllowed,
+    rangingContextActive,
     conflictPolicy: conflict
       ? countertrendAllowed
-        ? 'HTF/LTF conflict accepted only because the selected strategy has promoted countertrend evidence.'
+        ? rangingContextActive && !conflict
+          ? 'HTF is non-directional or range regime — range/mean-reversion strategies may execute without HTF side alignment.'
+          : 'HTF/LTF conflict accepted only because the selected strategy has promoted countertrend evidence.'
         : 'No trade: HTF and LTF disagree and no tested countertrend strategy qualifies.'
-      : 'Top-down path is aligned or non-directional; normal risk gates apply.',
+      : rangingContextActive
+        ? 'Non-directional HTF or range regime — directional side match is not required.'
+        : 'Top-down path is aligned or non-directional; normal risk gates apply.',
   };
 }
 
@@ -409,6 +427,7 @@ function downgradeDecision(
   bias: string,
   blockers: string[],
   refillMode = false,
+  regime: RegimeTag = 'range',
 ): AutonomyDecision {
   const hardBlock = blockers.some((item) =>
     item.includes('Risk score')
@@ -420,8 +439,9 @@ function downgradeDecision(
   }
   if (hardBlock) return 'AVOID';
   if (blockers.length) return 'MONITOR';
-  if (decision === 'BUY' && (bias === 'bullish' || (refillMode && bias === 'mixed'))) return 'BUY';
-  if (decision === 'SELL' && (bias === 'bearish' || (refillMode && bias === 'mixed'))) return 'SELL';
+  const rangingRegime = regime === 'range' || regime === 'compression';
+  if (decision === 'BUY' && (bias === 'bullish' || (refillMode && bias === 'mixed') || (rangingRegime && bias === 'neutral'))) return 'BUY';
+  if (decision === 'SELL' && (bias === 'bearish' || (refillMode && bias === 'mixed') || (rangingRegime && bias === 'neutral'))) return 'SELL';
   if (decision === 'WAIT' || decision === 'AVOID' || decision === 'MONITOR') return decision;
   return 'WAIT';
 }

@@ -269,6 +269,10 @@ const server = http.createServer(async (request, response) => {
       assertAuthorized(request);
       const payload = await readJson(request);
       const result = acknowledgeCommand(payload);
+      relayAckToApp(payload).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        pushEvent("WARN", `Failed to relay ack to app for ${payload.commandId}: ${message}`);
+      });
       sendJson(response, 200, { ok: true, ...result });
       return;
     }
@@ -962,6 +966,10 @@ function leaseNextCommand(terminalId) {
   }
 
   const now = Date.now();
+  let selected = null;
+  let selectedPriority = Number.POSITIVE_INFINITY;
+  let selectedCreatedAt = Number.POSITIVE_INFINITY;
+
   for (const commandId of queue) {
     const command = commandsById.get(commandId);
     if (!command) continue;
@@ -982,16 +990,69 @@ function leaseNextCommand(terminalId) {
       continue;
     }
 
-    command.attempt += 1;
-    command.status = "leased";
-    command.leasedAt = new Date(now).toISOString();
-    command.leasedUntil = new Date(now + COMMAND_LEASE_MS).toISOString();
-    command.lastDispatchedAt = command.leasedAt;
-    pushEvent("DISPATCH", `Leased command ${command.commandId} to ${terminalId} (attempt ${command.attempt}).`);
-    return command;
+    const priority = commandTypePriority(command.type);
+    const createdAt = Date.parse(command.createdAt || "");
+    if (
+      priority < selectedPriority
+      || (priority === selectedPriority && Number.isFinite(createdAt) && createdAt < selectedCreatedAt)
+    ) {
+      selected = command;
+      selectedPriority = priority;
+      selectedCreatedAt = createdAt;
+    }
   }
 
-  return null;
+  if (!selected) {
+    return null;
+  }
+
+  selected.attempt += 1;
+  selected.status = "leased";
+  selected.leasedAt = new Date(now).toISOString();
+  selected.leasedUntil = new Date(now + COMMAND_LEASE_MS).toISOString();
+  selected.lastDispatchedAt = selected.leasedAt;
+  pushEvent("DISPATCH", `Leased command ${selected.commandId} to ${terminalId} (attempt ${selected.attempt}).`);
+  return selected;
+}
+
+function commandTypePriority(type) {
+  const normalized = String(type ?? "").trim().toUpperCase().replaceAll("-", "_");
+  const priorities = {
+    PLACE_ORDER: 0,
+    PARTIAL_CLOSE: 10,
+    CLOSE_ORDER: 11,
+    EMERGENCY_CLOSE_ALL: 12,
+    MOVE_TO_BREAKEVEN: 20,
+    MODIFY_ORDER: 21,
+    SET_TRAILING_STOP: 22,
+    OPEN_CHART: 90,
+    SET_TIMEFRAME: 91,
+    CAPTURE_CHART: 92,
+    CLOSE_CHART: 93,
+  };
+  return priorities[normalized] ?? 50;
+}
+
+async function relayAckToApp(payload) {
+  const headers = {
+    "Content-Type": "application/json",
+    "X-Cacsms-Bridge-Relay": "1",
+  };
+  const secret = getSharedSecret();
+  if (secret) {
+    headers["X-Cacsms-Secret"] = secret;
+  }
+
+  const response = await fetch(`${INTERNAL_APP_URL}/commands/ack`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(`App ack relay failed with HTTP ${response.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
 }
 
 function toCommandEnvelope(command) {

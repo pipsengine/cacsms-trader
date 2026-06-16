@@ -57,6 +57,7 @@ export async function trackOpenPositionFromFill(input: {
   entryPrice?: number | null;
   stopLoss?: number | null;
   takeProfit?: number | null;
+  metadata?: Record<string, unknown>;
 }): Promise<void> {
   if (!input.ticket || !input.terminalId || !input.commandId) return;
   await queryPostgres(
@@ -74,9 +75,10 @@ export async function trackOpenPositionFromFill(input: {
         current_price,
         status,
         opened_at,
-        updated_at
+        updated_at,
+        metadata
       )
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$7,'open',now(),now())
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$7,'open',now(),now(),$10::jsonb)
       ON CONFLICT (terminal_id, ticket) WHERE status IN ('open', 'partial') DO NOTHING
     `,
     [
@@ -89,6 +91,7 @@ export async function trackOpenPositionFromFill(input: {
       input.entryPrice ?? null,
       input.stopLoss ?? null,
       input.takeProfit ?? null,
+      JSON.stringify(input.metadata ?? {}),
     ],
   ).catch(() => null);
 }
@@ -280,6 +283,12 @@ export async function reconcileOpenPositionsFromExecutedCommands(terminalOpen: n
         entryPrice: row.executed_price == null ? null : Number(row.executed_price),
         stopLoss: Number(payload.sl ?? payload.stopLoss ?? 0) || null,
         takeProfit: Number(payload.tp ?? payload.takeProfit ?? 0) || null,
+        metadata: {
+          setupGroupId: payload.setupGroupId ?? payload.decisionLogId ?? null,
+          legIndex: payload.legIndex ?? null,
+          legCount: payload.legCount ?? null,
+          batchEntry: payload.batchEntry ?? false,
+        },
       });
       inserted += 1;
     }
