@@ -19,7 +19,10 @@ import { listTerminalSnapshots } from '@/lib/mt5-heartbeat-store';
 import { getLatestPairSelection } from '@/lib/pair-selector';
 import { queryPostgres } from '@/lib/postgres';
 import { evaluateAutonomySafetyLock } from '@/lib/autonomy-safety-lock';
-import { evaluateStrategyGovernance, normalizeStrategyId } from '@/lib/strategy-governance';
+import { evaluateGoldExecutionQuality } from '@/lib/gold-execution-quality';
+import { evaluateGoldPositionScaling } from '@/lib/gold-position-scaling';
+import { isGoldSymbol } from '@/lib/gold-trading-engine';
+import { evaluateStrategyGovernance, resolveStrategyIdFromDecision } from '@/lib/strategy-governance';
 import { logAutonomyDirectionAudit } from '@/lib/autonomy-direction-monitor';
 import { isRetracementEntryEnabled, planAutonomousRetracementEntry } from '@/lib/autonomous-entry-planner';
 
@@ -122,11 +125,7 @@ export async function evaluateAutonomyExecutionChecklist(input: {
   }
 
   if (!manual && ['BUY', 'SELL'].includes(input.decision.decision)) {
-    const strategyId = normalizeStrategyId({
-      tradingStyle: input.decision.tradingStyle ?? null,
-      timeframe: input.decision.timeframe,
-      setupType: input.decision.setupType,
-    });
+    const strategyId = resolveStrategyIdFromDecision(input.decision);
     const governance = await evaluateStrategyGovernance({
       strategyId,
       tradingStyle: input.decision.tradingStyle ?? null,
@@ -205,6 +204,16 @@ export async function evaluateAutonomyExecutionChecklist(input: {
       autoActivateKillSwitch: true,
     });
     blockers.push(...safety.blockers);
+
+    if (isGoldSymbol(input.decision.symbol)) {
+      const goldQuality = await evaluateGoldExecutionQuality(input.decision.symbol);
+      blockers.push(...goldQuality.blockers);
+      const goldStack = await evaluateGoldPositionScaling({
+        decision: input.decision,
+        terminalId,
+      });
+      blockers.push(...goldStack.blockers);
+    }
   }
 
   if (!shouldBypassNewsBlackout()) {
@@ -486,11 +495,7 @@ export async function dispatchAutonomyDecision(input: {
       };
     }
   }
-  const strategyId = normalizeStrategyId({
-    tradingStyle: executableDecision.tradingStyle ?? null,
-    timeframe: executableDecision.timeframe,
-    setupType: executableDecision.setupType,
-  });
+  const strategyId = resolveStrategyIdFromDecision(executableDecision);
   const strategyMetadata = {
     strategyId,
     tradingStyle: executableDecision.tradingStyle ?? null,

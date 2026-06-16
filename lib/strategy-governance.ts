@@ -1,3 +1,4 @@
+import { isAutonomyDemoMode } from '@/lib/autonomy-demo-config';
 import { getTradingStyleProfile, TRADING_STYLE_PROFILES } from '@/lib/trading-styles/registry';
 import type { TradingStyleId } from '@/lib/trading-styles/types';
 import { queryPostgres } from '@/lib/postgres';
@@ -107,6 +108,24 @@ export function normalizeStrategyId(input: {
   return `${style}:${timeframe}:${setup}`;
 }
 
+export function resolveStrategyIdFromDecision(input: {
+  selectedStrategyId?: string | null;
+  tradingStyle?: string | null;
+  timeframe?: string | null;
+  setupType?: string | null;
+}): string {
+  const catalogId = String(input.selectedStrategyId ?? '').trim();
+  if (catalogId && !catalogId.includes(':')) return catalogId;
+  const setupType = String(input.setupType ?? '').trim();
+  const setupMatch = setupType.match(/\(([a-z0-9-]+)\)\s*$/i);
+  if (setupMatch?.[1] && !setupMatch[1].includes(':')) return setupMatch[1].toLowerCase();
+  return normalizeStrategyId({
+    tradingStyle: input.tradingStyle ?? null,
+    timeframe: input.timeframe ?? null,
+    setupType: input.setupType ?? null,
+  });
+}
+
 function styleFromStrategyId(strategyId: string): TradingStyleId | null {
   const style = strategyId.split(':')[0] as TradingStyleId;
   return TRADING_STYLE_PROFILES[style] ? style : null;
@@ -207,7 +226,7 @@ export async function evaluateStrategyGovernance(input: {
     blockers.push(`Strategy ${strategyId} is disabled${override.reason ? `: ${override.reason}` : '.'}`);
   }
 
-  const requiresPromotion = envBool('CACSMS_REQUIRE_STRATEGY_PROMOTION', true);
+  const requiresPromotion = envBool('CACSMS_REQUIRE_STRATEGY_PROMOTION', !isAutonomyDemoMode()) && !isAutonomyDemoMode();
   const actionable = ['BUY', 'SELL'].includes(String(input.decision ?? '').toUpperCase());
   if (requiresPromotion && actionable) {
     const symbol = String(input.symbol ?? '').trim().toUpperCase();

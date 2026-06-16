@@ -1,3 +1,10 @@
+import {
+  GOLD_SYMBOL,
+  goldMaxConcurrentPositions,
+  goldMaxEntriesPerCycle,
+  goldSerialTradingEnabled,
+  isGoldOnlyTradingEngine,
+} from '@/lib/gold-trading-engine';
 import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
 import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
 import { getLatestPairSelection, runAutonomousPairSelection, shouldRefreshPairSelection } from '@/lib/pair-selector';
@@ -105,8 +112,14 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
     };
   }
 
-  const minOpen = envNumber('CACSMS_MIN_OPEN_POSITIONS', 3);
-  const perCycleCap = envNumber('CACSMS_MAX_ENTRIES_PER_CYCLE', 5);
+  const minOpen = isGoldOnlyTradingEngine()
+    ? goldSerialTradingEnabled()
+      ? 0
+      : Math.min(envNumber('CACSMS_MIN_OPEN_POSITIONS', 2), goldMaxConcurrentPositions())
+    : envNumber('CACSMS_MIN_OPEN_POSITIONS', 3);
+  const perCycleCap = isGoldOnlyTradingEngine()
+    ? goldMaxEntriesPerCycle()
+    : envNumber('CACSMS_MAX_ENTRIES_PER_CYCLE', 5);
   const openCount = await countOpenPositions();
   const slotsToFill = Math.max(0, risk.remainingOpenPositions);
   const deficit = Math.max(0, minOpen - openCount);
@@ -121,6 +134,16 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
       symbolsProcessed: [],
       dispatchesAttempted: 0,
       detail: `Open capacity full (${openCount}/${risk.maxOpenPositions}).`,
+    };
+  }
+
+  if (goldSerialTradingEnabled() && openCount > 0) {
+    return {
+      status: 'capacity_full',
+      slotsTargeted: 0,
+      symbolsProcessed: [],
+      dispatchesAttempted: 0,
+      detail: `Gold serial mode — ${openCount} trade(s) still open; waiting for close before next entry.`,
     };
   }
 
@@ -143,24 +166,40 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
     }))
     .sort((a, b) => b.institutionalScore - a.institutionalScore);
 
-  const poolSize = Math.max(targetEntries * 4, selection.eligibleSymbols.length, 28);
+  const poolSize = isGoldOnlyTradingEngine()
+    ? Math.max(targetEntries * 2, goldMaxConcurrentPositions())
+    : Math.max(targetEntries * 4, selection.eligibleSymbols.length, 28);
   const targets: string[] = [];
-  const seedSymbols = [
-    ...selection.eligibleSymbols,
-    ...selection.qualifiedSymbols,
-    ...ranked.map((candidate) => candidate.symbol),
-  ].map((symbol) => symbol.toUpperCase());
 
-  for (const symbol of [...new Set(seedSymbols)]) {
-    if (targets.length >= poolSize) break;
-    if (openSymbols.includes(symbol)) continue;
-    targets.push(symbol);
-  }
+  if (isGoldOnlyTradingEngine()) {
+    const xauOpen = openSymbols.filter((symbol) => symbol.includes('XAU')).length;
+    const maxStack = goldMaxConcurrentPositions();
+    const slotsForGold = goldSerialTradingEnabled()
+      ? openCount > 0
+        ? 0
+        : Math.min(1, targetEntries)
+      : Math.min(targetEntries, Math.max(0, maxStack - xauOpen));
+    for (let i = 0; i < slotsForGold; i += 1) {
+      targets.push(GOLD_SYMBOL);
+    }
+  } else {
+    const seedSymbols = [
+      ...selection.eligibleSymbols,
+      ...selection.qualifiedSymbols,
+      ...ranked.map((candidate) => candidate.symbol),
+    ].map((symbol) => symbol.toUpperCase());
 
-  for (const candidate of ranked) {
-    if (targets.length >= poolSize) break;
-    if (targets.includes(candidate.symbol) || openSymbols.includes(candidate.symbol)) continue;
-    targets.push(candidate.symbol);
+    for (const symbol of [...new Set(seedSymbols)]) {
+      if (targets.length >= poolSize) break;
+      if (openSymbols.includes(symbol)) continue;
+      targets.push(symbol);
+    }
+
+    for (const candidate of ranked) {
+      if (targets.length >= poolSize) break;
+      if (targets.includes(candidate.symbol) || openSymbols.includes(candidate.symbol)) continue;
+      targets.push(candidate.symbol);
+    }
   }
 
   if (targets.length === 0) {

@@ -1,4 +1,5 @@
 import { isContinuousTradingEnabled } from './execution-risk-limits';
+import { GOLD_SYMBOL, isGoldOnlyTradingEngine } from './gold-trading-engine';
 import { SYSTEM_FOCUS_SYMBOLS } from './focus-symbols';
 import type { PairSelectionResult } from './pair-selector';
 
@@ -8,9 +9,12 @@ export function resolvePipelineSymbolUniverse(
   latestSelection: PairSelectionResult | null,
 ): string[] {
   const normalized = requestedSymbol.toUpperCase();
-  if (normalized !== 'AUTO') return [normalized];
+  if (normalized !== 'AUTO') {
+    if (isGoldOnlyTradingEngine()) return [GOLD_SYMBOL];
+    return [normalized];
+  }
 
-  if (isContinuousTradingEnabled()) {
+  if (isGoldOnlyTradingEngine() || isContinuousTradingEnabled()) {
     return [...SYSTEM_FOCUS_SYMBOLS];
   }
 

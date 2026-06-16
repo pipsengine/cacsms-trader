@@ -137,6 +137,7 @@ async function countPendingOpeningCommands(filter: { terminalId?: string | null;
     )`);
   }
   const staleMinutes = staleCommandMinutes();
+  const conditionalMinutes = Math.max(30, Math.round(envNumber('CACSMS_CONDITIONAL_ENTRY_MAX_MINUTES', 360)));
   const result = await queryPostgres(
     `
       SELECT
@@ -144,15 +145,20 @@ async function countPendingOpeningCommands(filter: { terminalId?: string | null;
         COUNT(*) FILTER (
           WHERE c.created_at < now() - ($${params.length + 1} || ' minutes')::interval
             AND COALESCE(c.broker_message, '') <> 'conditional_entry_waiting_for_retracement_confirmation'
-        )::int AS stale
+        )::int AS stale,
+        COUNT(*) FILTER (
+          WHERE COALESCE(c.broker_message, '') = 'conditional_entry_waiting_for_retracement_confirmation'
+            AND c.created_at < now() - ($${params.length + 2} || ' minutes')::interval
+        )::int AS expired_conditional
       FROM execution_commands c
       WHERE ${conditions.join(' AND ')}
     `,
-    [...params, String(staleMinutes)],
-  ).catch(() => ({ rows: [{ pending: 0, stale: 0 }] }));
-  const row = result.rows[0] as { pending?: number; stale?: number };
+    [...params, String(staleMinutes), String(conditionalMinutes)],
+  ).catch(() => ({ rows: [{ pending: 0, stale: 0, expired_conditional: 0 }] }));
+  const row = result.rows[0] as { pending?: number; stale?: number; expired_conditional?: number };
+  const expiredConditional = Number(row?.expired_conditional ?? 0);
   return {
-    pending: Number(row?.pending ?? 0),
+    pending: Math.max(0, Number(row?.pending ?? 0) - expiredConditional),
     stale: Number(row?.stale ?? 0),
   };
 }

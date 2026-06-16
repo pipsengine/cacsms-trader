@@ -1,4 +1,5 @@
 import { SYSTEM_FOCUS_SYMBOLS, type SystemFocusSymbol } from './focus-symbols';
+import { goldBrokerAliases, goldMaxSpreadPoints, isGoldOnlyTradingEngine } from './gold-trading-engine';
 
 export interface Mt5SymbolTelemetrySnapshot {
   symbol: string;
@@ -30,34 +31,7 @@ export interface Mt5TelemetrySummary {
 }
 
 export const MT5_SYMBOL_ALIAS_CANDIDATES: Record<SystemFocusSymbol, string[]> = {
-  EURUSD: ['EURUSD', 'EURUSDm'],
-  GBPUSD: ['GBPUSD', 'GBPUSDm'],
-  EURGBP: ['EURGBP', 'EURGBPm'],
-  EURJPY: ['EURJPY', 'EURJPYm'],
-  GBPJPY: ['GBPJPY', 'GBPJPYm'],
-  USDJPY: ['USDJPY', 'USDJPYm'],
-  USDCAD: ['USDCAD', 'USDCADm'],
-  USDCHF: ['USDCHF', 'USDCHFm'],
-  AUDUSD: ['AUDUSD', 'AUDUSDm'],
-  NZDUSD: ['NZDUSD', 'NZDUSDm'],
-  AUDJPY: ['AUDJPY', 'AUDJPYm'],
-  EURAUD: ['EURAUD', 'EURAUDm'],
-  EURCAD: ['EURCAD', 'EURCADm'],
-  EURCHF: ['EURCHF', 'EURCHFm'],
-  EURNZD: ['EURNZD', 'EURNZDm'],
-  GBPAUD: ['GBPAUD', 'GBPAUDm'],
-  GBPCAD: ['GBPCAD', 'GBPCADm'],
-  AUDNZD: ['AUDNZD', 'AUDNZDm'],
-  CADJPY: ['CADJPY', 'CADJPYm'],
-  CHFJPY: ['CHFJPY', 'CHFJPYm'],
-  NZDJPY: ['NZDJPY', 'NZDJPYm'],
-  XAUUSD: ['XAUUSD', 'XAUUSDm', 'GOLD'],
-  XAGUSD: ['XAGUSD', 'XAGUSDm', 'SILVER'],
-  BTCUSD: ['BTCUSD', 'BTCUSDm'],
-  US30: ['US30', 'DJ30', 'US30Cash', 'DowJones30'],
-  UK100: ['UK100', 'FTSE100', 'UK100Cash'],
-  NASDAQ100: ['NASDAQ100', 'NAS100', 'USTEC', 'US100'],
-  SP500: ['SP500', 'SPX500', 'US500', 'SP500m'],
+  XAUUSD: [...goldBrokerAliases()],
 };
 
 const STALE_TICK_AGE_SECONDS = 120;
@@ -146,12 +120,15 @@ export function extractTelemetrySummary(terminal: TerminalLike | null | undefine
 }
 
 function legacyTelemetryRows(terminal: TerminalLike): Mt5SymbolTelemetrySnapshot[] {
-  const legacy: Array<{ symbol: string; available: boolean | null | undefined; spread: number | null | undefined }> = [
-    { symbol: 'EURUSD', available: terminal.eurusdAvailable, spread: terminal.eurusdSpreadPoints },
-    { symbol: 'XAUUSD', available: terminal.xauusdAvailable, spread: terminal.xauusdSpreadPoints },
-    { symbol: 'GBPUSD', available: terminal.gbpusdAvailable, spread: terminal.gbpusdSpreadPoints },
-    { symbol: 'USDJPY', available: terminal.usdjpyAvailable, spread: terminal.usdjpySpreadPoints },
-  ];
+  const legacy: Array<{ symbol: string; available: boolean | null | undefined; spread: number | null | undefined }> =
+    isGoldOnlyTradingEngine()
+      ? [{ symbol: 'XAUUSD', available: terminal.xauusdAvailable, spread: terminal.xauusdSpreadPoints }]
+      : [
+          { symbol: 'EURUSD', available: terminal.eurusdAvailable, spread: terminal.eurusdSpreadPoints },
+          { symbol: 'XAUUSD', available: terminal.xauusdAvailable, spread: terminal.xauusdSpreadPoints },
+          { symbol: 'GBPUSD', available: terminal.gbpusdAvailable, spread: terminal.gbpusdSpreadPoints },
+          { symbol: 'USDJPY', available: terminal.usdjpyAvailable, spread: terminal.usdjpySpreadPoints },
+        ];
   return legacy
     .filter((item) => item.available != null || item.spread != null)
     .map((item) => ({
@@ -202,7 +179,7 @@ export function isSymbolTradableTelemetry(
 export function rankedTradableSymbols(
   terminal: TerminalLike | null | undefined,
   watchlist: string[] = [...SYSTEM_FOCUS_SYMBOLS],
-  maxSpreadPoints = 35,
+  maxSpreadPoints = isGoldOnlyTradingEngine() ? goldMaxSpreadPoints() : 35,
 ): Mt5SymbolTelemetrySnapshot[] {
   const map = symbolTelemetryMap(terminal);
   return watchlist

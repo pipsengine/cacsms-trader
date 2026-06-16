@@ -1,6 +1,13 @@
 import crypto from 'node:crypto';
 import { queryPostgres } from '@/lib/postgres';
 
+function envNumber(name: string, fallback: number): number {
+  const raw = String(process.env[name] ?? '').trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 export type ExecutionEnvironment = 'DEMO' | 'LIVE' | 'PROP' | 'MARKET_DATA_MONITOR' | 'FAILOVER_RESERVE';
 
 export type ExecutionLifecycleState =
@@ -443,6 +450,10 @@ async function syncOpenPositionFromAck(input: {
   }
 }
 
+function conditionalEntryMaxMinutes(): number {
+  return Math.max(30, Math.round(envNumber('CACSMS_CONDITIONAL_ENTRY_MAX_MINUTES', 360)));
+}
+
 export async function markTimeouts(now = new Date()): Promise<number> {
   const caps = await getSchemaCaps();
   if (caps.hasLifecycleState) {
@@ -514,6 +525,22 @@ export async function markTimeouts(now = new Date()): Promise<number> {
       `,
     );
     ids.push(...(totalTimeout.rows as any));
+
+    const conditionalExpired = await queryPostgres(
+      `
+        UPDATE execution_commands
+        SET lifecycle_state = 'CANCELLED',
+            last_error = COALESCE(last_error, 'conditional_entry_expired'),
+            broker_message = 'conditional_entry_expired',
+            last_updated_at = now()
+        WHERE lifecycle_state = 'ACKNOWLEDGED'
+          AND COALESCE(broker_message, '') = 'conditional_entry_waiting_for_retracement_confirmation'
+          AND created_at < now() - ($1 || ' minutes')::interval
+        RETURNING command_id, terminal_id
+      `,
+      [String(conditionalEntryMaxMinutes())],
+    );
+    ids.push(...(conditionalExpired.rows as any));
 
     const deduped = new Map<string, { command_id: string; terminal_id: string }>();
     for (const row of ids) {

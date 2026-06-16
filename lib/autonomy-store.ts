@@ -4,6 +4,7 @@ import { applyAutonomyAccountProfile } from './autonomy-account-profiles';
 import { buildAutonomousDecision } from './autonomous-decision-engine';
 import { resolveExecutionAccountContext } from './execution-account-context';
 import { SYSTEM_FOCUS_SYMBOLS } from './focus-symbols';
+import { isGoldSymbol } from './gold-trading-engine';
 import { DEFAULT_PAIR_SELECTION_CONFIG, runAutonomousPairSelection } from './pair-selector';
 import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomousDecisionInput, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
 import { getTradingStyleProfile } from './trading-styles/registry';
@@ -642,7 +643,7 @@ export async function generateAutonomousSignal(
     decision.reasonAgainstDecision, decision.macroRiskWarning, decision.liquidityWarning, decision.anomalyWarning,
     decision.recommendedNextAction, decision.tradingStyle ?? null,
     JSON.stringify(topDownEvidence),
-    JSON.stringify(buildDecisionEvidence({ decision, visual, macro, execution, refillMode, governance: governanceMetadata, strategyBook })),
+    JSON.stringify(buildDecisionEvidence({ decision, visual, macro, execution, refillMode, governance: governanceMetadata, strategyBook, goldEngine: isGoldSymbol(decision.symbol) ? await import('@/lib/gold-trading-engine').then((m) => m.getGoldEngineStatus()) : null })),
     strategyId,
     governanceMetadata.marketRegime,
     governanceMetadata.htfBias,
@@ -1045,6 +1046,7 @@ function buildDecisionEvidence(input: {
   refillMode: boolean;
   governance?: Record<string, unknown>;
   strategyBook?: unknown;
+  goldEngine?: unknown;
 }) {
   const visual = objectValue(input.visual);
   const macro = objectValue(input.macro);
@@ -1071,6 +1073,7 @@ function buildDecisionEvidence(input: {
     macro,
     execution,
     strategyBook: input.strategyBook ?? null,
+    goldEngine: input.goldEngine ?? null,
     regimeClassification: decision.regimeClassification ?? null,
     capitalAllocation: decision.capitalAllocation ?? null,
     institutionalPlan: decision.institutionalPlan ?? null,

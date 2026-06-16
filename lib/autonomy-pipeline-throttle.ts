@@ -2,6 +2,7 @@ import type { TradingAccountClass } from '@/lib/execution-account-context';
 import { getAutonomyThresholdProfile } from '@/lib/autonomy-account-profiles';
 import { isContinuousTradingEnabled, resolveLiveOpenPositionCount } from '@/lib/execution-risk-limits';
 import { getOpenPositionSymbols } from '@/lib/open-position-symbols';
+import { goldSerialTradingEnabled } from '@/lib/gold-trading-engine';
 import { queryPostgres } from '@/lib/postgres';
 
 function envNumber(name: string, fallback: number): number {
@@ -17,7 +18,8 @@ export async function shouldRelaxContinuousTradingLimits(): Promise<boolean> {
   const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
   if (!(await isContinuousTradingSessionActive())) return false;
   const openCount = await resolveLiveOpenPositionCount();
-  const minOpen = envNumber('CACSMS_MIN_OPEN_POSITIONS', 3);
+  if (goldSerialTradingEnabled() && openCount > 0) return false;
+  const minOpen = envNumber('CACSMS_MIN_OPEN_POSITIONS', goldSerialTradingEnabled() ? 0 : 3);
   return openCount < minOpen;
 }
 
@@ -109,6 +111,11 @@ export async function shouldDispatchPipelineExecution(
 
   const normalizedSymbol = symbol?.toUpperCase() ?? null;
   const relaxed = await shouldRelaxContinuousTradingLimits();
+
+  if (goldSerialTradingEnabled()) {
+    const openCount = await resolveLiveOpenPositionCount();
+    if (openCount > 0) return false;
+  }
 
   if (relaxed && normalizedSymbol) {
     const openSymbols = await getOpenPositionSymbols();

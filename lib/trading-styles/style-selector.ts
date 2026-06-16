@@ -207,6 +207,8 @@ function styleFitness(styleId: TradingStyleId, context: StyleFitnessContext): St
 
     if (['overlap', 'london', 'new_york'].includes(context.session)) score += 14;
 
+    if (context.symbol.includes('XAU')) score += 10;
+
     if (context.volatilityScore >= 55) score += 10;
 
     if (context.volatilityScore < 35) score -= 12;
@@ -351,11 +353,15 @@ export function pickStyleCandidates(
 
   maxTotal: number,
 
+  options: { allowGoldStacking?: boolean } = {},
+
 ): StyleFitnessResult[] {
 
   const picked: StyleFitnessResult[] = [];
 
   const usedSymbolStyle = new Set<string>();
+
+  const allowGoldStacking = options.allowGoldStacking === true;
 
 
 
@@ -372,6 +378,14 @@ export function pickStyleCandidates(
     const profile = getTradingStyleProfile(row.styleId);
 
     if (styleCount >= profile.maxEntriesPerCycle) continue;
+
+    if (!allowGoldStacking) {
+
+      const symbolAlreadyUsed = picked.some((item) => item.symbol === row.symbol);
+
+      if (symbolAlreadyUsed) continue;
+
+    }
 
     picked.push(row);
 

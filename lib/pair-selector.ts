@@ -10,6 +10,7 @@ import { getOpenPositionSymbols } from './open-position-symbols';
 import { logPairSelectionEventsBatch, type PairSelectionEventInput } from './pair-selection-audit';
 import { clampScore, parsePairCurrencies } from './pair-selector-utils';
 import { findCorrelatedOpenSymbol } from './symbol-correlation';
+import { goldSerialTradingEnabled } from './gold-trading-engine';
 import { queryPostgres } from './postgres';
 import {
   is24HourTradingEnabled,
@@ -307,9 +308,21 @@ async function executeAutonomousPairSelection(
       continue;
     }
 
+    if (goldSerialTradingEnabled() && openPositionSymbols.length > 0) {
+      candidate.eligibleForNewEntry = false;
+      candidate.reasons.push(
+        `Gold serial mode — ${openPositionSymbols.length} trade(s) still open (${openPositionSymbols.join(', ')}); close before next entry`,
+      );
+    }
+
     if (continuousMode && openPositionSymbols.includes(candidate.symbol)) {
-      candidate.eligibleForNewEntry = true;
-      candidate.reasons.push('Open exposure already active - continuous mode allows a fresh entry only if risk and same-symbol exposure caps pass');
+      if (goldSerialTradingEnabled()) {
+        candidate.eligibleForNewEntry = false;
+        candidate.reasons.push('Gold serial mode — close the current trade before opening another on this symbol');
+      } else {
+        candidate.eligibleForNewEntry = true;
+        candidate.reasons.push('Open exposure already active - continuous mode allows a fresh entry only if risk and same-symbol exposure caps pass');
+      }
     }
 
     const correlatedWith = findCorrelatedOpenSymbol(candidate.symbol, openPositionSymbols, {

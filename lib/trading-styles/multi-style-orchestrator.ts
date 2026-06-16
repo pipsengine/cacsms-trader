@@ -1,4 +1,11 @@
 import { generateAutonomousSignal } from '@/lib/autonomy-store';
+import {
+  GOLD_SYMBOL,
+  goldMaxEntriesPerCycle,
+  goldPreferredStyles,
+  goldSerialTradingEnabled,
+  isGoldOnlyTradingEngine,
+} from '@/lib/gold-trading-engine';
 import { getLatestPairSelection } from '@/lib/pair-selector';
 import { queryPostgres } from '@/lib/postgres';
 import type { MultiStyleCycleResult, TradingStyleId } from './types';
@@ -9,16 +16,25 @@ export async function runMultiStyleTradingCycle(input: {
   maxTotalEntries: number;
   symbols?: string[];
 }): Promise<MultiStyleCycleResult> {
-  const styles = getEnabledTradingStyles();
+  const styles = getEnabledTradingStyles().filter((style) =>
+    !isGoldOnlyTradingEngine() || goldPreferredStyles().includes(style.id),
+  );
   const selection = await getLatestPairSelection();
-  const symbolPool = input.symbols?.length
-    ? input.symbols
-    : selection?.eligibleSymbols?.length
-      ? selection.eligibleSymbols
-      : selection?.qualifiedSymbols ?? [];
+  const symbolPool = isGoldOnlyTradingEngine()
+    ? [GOLD_SYMBOL]
+    : input.symbols?.length
+      ? input.symbols
+      : selection?.eligibleSymbols?.length
+        ? selection.eligibleSymbols
+        : selection?.qualifiedSymbols ?? [];
 
-  const matrix = await buildStyleFitnessMatrix(symbolPool.slice(0, 28));
-  const candidates = pickStyleCandidates(matrix, input.maxTotalEntries);
+  const matrix = await buildStyleFitnessMatrix(symbolPool.slice(0, isGoldOnlyTradingEngine() ? 1 : 28));
+  const maxEntries = isGoldOnlyTradingEngine()
+    ? Math.min(input.maxTotalEntries, goldMaxEntriesPerCycle())
+    : input.maxTotalEntries;
+  const candidates = pickStyleCandidates(matrix, maxEntries, {
+    allowGoldStacking: isGoldOnlyTradingEngine() && !goldSerialTradingEnabled(),
+  });
 
   const byStyle: MultiStyleCycleResult['byStyle'] = {};
   for (const style of styles) {
@@ -65,7 +81,9 @@ export async function runMultiStyleTradingCycle(input: {
     byStyle,
     at: new Date().toISOString(),
     detail: actionableDispatches > 0
-      ? `Multi-style cycle placed ${actionableDispatches} actionable signal(s) across ${styles.map((s) => s.label).join(', ')}.`
+      ? isGoldOnlyTradingEngine()
+        ? `Gold engine placed ${actionableDispatches} actionable XAU/USD signal(s) across ${styles.map((s) => s.label).join(', ')}.`
+        : `Multi-style cycle placed ${actionableDispatches} actionable signal(s) across ${styles.map((s) => s.label).join(', ')}.`
       : dispatchesAttempted > 0
         ? `Multi-style cycle scanned ${dispatchesAttempted} candidate(s) — awaiting BUY/SELL confirmation.`
         : 'No eligible multi-style candidates this cycle.',
