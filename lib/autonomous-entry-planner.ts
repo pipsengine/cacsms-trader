@@ -1,4 +1,5 @@
 import { resolveLatestCaptureId } from '@/lib/capture-analysis-bootstrap';
+import { loadGoldStructureEntryAnchors } from '@/lib/gold-structure-anchors';
 import { getOrderBlockAnalysis } from '@/lib/order-block-detection-store';
 import { getSupportResistanceAnalysis } from '@/lib/support-resistance-store';
 import { getSwingDetections } from '@/lib/swing-point-store';
@@ -178,6 +179,11 @@ export async function planAutonomousRetracementEntry(input: {
     }
   }
 
+  const structureAnchors = await loadGoldStructureEntryAnchors({ symbol, timeframe, side: input.side });
+  for (const anchor of structureAnchors) {
+    candidates.push({ price: anchor.price, weight: anchor.weight, source: anchor.source });
+  }
+
   const valid = candidates.filter((candidate) => {
     const distance = input.side === 'BUY'
       ? currentPrice - candidate.price
@@ -222,6 +228,7 @@ export async function planAutonomousRetracementEntry(input: {
       input.side === 'BUY' ? 'bullish engulfing or pin-bar rejection inside entry zone' : 'bearish engulfing or pin-bar rejection inside entry zone',
       'volume or participation proxy expansion',
       'momentum resumption away from retracement zone',
+      structureAnchors.length > 0 ? 'structure retest confirmation (BOS/CHoCH/FVG/OB)' : 'retracement zone confirmation',
     ],
     method: selected?.source ?? 'atr_retracement_fallback',
     reasons: [

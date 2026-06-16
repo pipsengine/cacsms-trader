@@ -1,6 +1,7 @@
 export const runtime = 'nodejs';
 
 import { getAutonomyConfig } from '@/lib/autonomy-store';
+import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
 import { resolveExecutionAccountContext } from '@/lib/execution-account-context';
 import {
   evaluateAutonomyExecutionChecklist,
@@ -44,6 +45,14 @@ export async function GET(request: Request): Promise<Response> {
               ? (row.take_profit_levels_json as number[])
               : [],
             macroRiskWarning: String(row.macro_risk_warning ?? ''),
+            liquidityWarning: String(row.liquidity_warning ?? ''),
+            finalBias: String(row.final_bias ?? row.bias ?? ''),
+            reasonForDecision: String(row.reason_for_decision ?? row.reason ?? ''),
+            selectedStrategyId: row.strategy_id == null ? null : String(row.strategy_id),
+            strategyBookScore: row.strategy_book_score == null ? undefined : Number(row.strategy_book_score),
+            institutionalPlan: row.institutional_plan_json as AutonomousDecisionOutput['institutionalPlan'],
+            capitalAllocation: row.capital_allocation_json as AutonomousDecisionOutput['capitalAllocation'],
+            signalScore: row.signal_score_json as AutonomousDecisionOutput['signalScore'],
           },
           config,
           manual: true,

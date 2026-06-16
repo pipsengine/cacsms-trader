@@ -27,3 +27,8 @@ export function isSystemFocusSymbol(symbol: string): symbol is SystemFocusSymbol
   }
   return (SYSTEM_FOCUS_SYMBOLS as readonly string[]).includes(symbol.toUpperCase());
 }
+
+/** Symbols that may receive top-down chart capture / visual intelligence analysis. */
+export function getTopDownCaptureSymbols(): readonly string[] {
+  return [...SYSTEM_FOCUS_SYMBOLS];
+}

@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 
 import { AUTONOMY_TIMEFRAME_SEQUENCE } from './autonomous-pipeline';
+import { enforceGoldPipelineSymbol } from './gold-trading-engine';
 import { captureChartOnTerminal, openChartOnTerminal, setChartTimeframe } from './mt5-chart-control';
 import { queryPostgres } from './postgres';
 
@@ -53,7 +54,7 @@ export async function startTopDownSession(input: {
 }): Promise<{ sessionId: string; status: SessionStatus }> {
   await ensurePipelineSchema();
   const sessionId = randomUUID();
-  const symbol = input.symbol.toUpperCase();
+  const symbol = enforceGoldPipelineSymbol(input.symbol);
   const stageStatus = Object.fromEntries(
     [
       'terminal-connectivity',

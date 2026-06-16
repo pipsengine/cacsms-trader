@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { MarketIntelligenceEngine } from '@/services/market-intelligence-engine';
 import type { TickSnapshot, TradingSession } from '@/packages/shared-types';
 import { isSystemFocusSymbol, SYSTEM_FOCUS_SYMBOLS, SYSTEM_FOCUS_SYMBOL_COUNT } from './focus-symbols';
+import { filterToActiveTradingSymbols, isGoldOnlyTradingEngine } from './gold-trading-engine';
 import { countTradesOpenedTodayBySymbol, isContinuousTradingEnabled } from './execution-risk-limits';
 import { getExecutionRiskSettings } from './execution-risk-settings';
 import { extractSymbolTelemetry, symbolTelemetryMap, type Mt5SymbolTelemetrySnapshot } from './mt5-symbol-telemetry';
@@ -145,7 +146,11 @@ async function executeAutonomousPairSelection(
 ): Promise<PairSelectionResult> {
   await ensurePairSelectionSchema();
   const resolved = { ...DEFAULT_PAIR_SELECTION_CONFIG, ...config };
-  const watchlist = resolved.watchlistSymbols.map((symbol) => symbol.toUpperCase());
+  let watchlist = resolved.watchlistSymbols.map((symbol) => symbol.toUpperCase());
+  if (isGoldOnlyTradingEngine()) {
+    watchlist = filterToActiveTradingSymbols(watchlist);
+    if (watchlist.length === 0) watchlist = [...SYSTEM_FOCUS_SYMBOLS];
+  }
   const [terminal, openPositionSymbols, riskSettings] = await Promise.all([
     fetchBestConnectedTerminal(),
     getOpenPositionSymbols(),

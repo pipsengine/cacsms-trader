@@ -1,13 +1,17 @@
 import { getAutonomousPipelineStatus } from '@/lib/autonomous-pipeline-store';
-import { updateSchedules } from '@/lib/autonomy-store';
+import { ensureFocusSymbolsConfigured, updateSchedules } from '@/lib/autonomy-store';
+import { enforceGoldPipelineSymbol, isGoldOnlyTradingEngine } from '@/lib/gold-trading-engine';
 import { runAutonomousPairSelection } from '@/lib/pair-selector';
 import { startTopDownSession } from '@/lib/top-down-orchestrator';
 
 export async function POST(request: Request): Promise<Response> {
   try {
     const body = await request.json().catch(() => ({}));
+    await ensureFocusSymbolsConfigured();
     let symbol = String(body.symbol ?? 'AUTO').toUpperCase();
-    if (symbol === 'AUTO') {
+    if (isGoldOnlyTradingEngine()) {
+      symbol = enforceGoldPipelineSymbol(symbol);
+    } else if (symbol === 'AUTO') {
       const selection = await runAutonomousPairSelection();
       symbol = selection.selectedSymbol;
       await updateSchedules({ config: { activeSymbols: selection.selectedSymbols } });

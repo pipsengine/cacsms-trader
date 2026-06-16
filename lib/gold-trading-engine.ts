@@ -47,24 +47,32 @@ export function filterToActiveTradingSymbols(symbols: string[]): string[] {
   return symbols.map((s) => normalizeGoldSymbol(s)).filter((s): s is GoldSymbol => s != null);
 }
 
+/** When Gold-only mode is active, all pipeline/top-down work is restricted to XAUUSD. */
+export function enforceGoldPipelineSymbol(symbol: string): GoldSymbol {
+  if (isGoldOnlyTradingEngine()) return GOLD_SYMBOL;
+  return normalizeGoldSymbol(symbol) ?? GOLD_SYMBOL;
+}
+
 export function goldBrokerAliases(): string[] {
   return [...GOLD_ALIASES];
 }
 
-/**
- * Serial Gold trading: complete or close the current trade before opening another.
- * Default on when max concurrent positions is 1.
- */
+/** Serial Gold trading: one trade at a time. Default off — intelligent scaling enabled. */
 export function goldSerialTradingEnabled(): boolean {
   if (!isGoldOnlyTradingEngine()) return false;
   const raw = String(process.env.CACSMS_GOLD_SERIAL_TRADING ?? '').trim();
-  if (raw) return envBool('CACSMS_GOLD_SERIAL_TRADING', true);
+  if (raw) return envBool('CACSMS_GOLD_SERIAL_TRADING', false);
   return goldMaxConcurrentPositions() <= 1;
 }
 
-/** Max concurrent XAUUSD positions (1 = serial, no stacking). */
+/** Intelligent multi-position scaling on high-probability Gold setups. */
+export function goldIntelligentScalingEnabled(): boolean {
+  return isGoldOnlyTradingEngine() && !goldSerialTradingEnabled();
+}
+
+/** Max concurrent XAUUSD positions (scaling cap). */
 export function goldMaxConcurrentPositions(): number {
-  return Math.max(1, Math.min(8, Math.round(envNumber('CACSMS_GOLD_MAX_CONCURRENT_POSITIONS', 1))));
+  return Math.max(1, Math.min(8, Math.round(envNumber('CACSMS_GOLD_MAX_CONCURRENT_POSITIONS', 3))));
 }
 
 /** Max new Gold entries per maintenance cycle. */
@@ -101,6 +109,16 @@ export function goldMinRewardRisk(): number {
   return Math.max(1.2, envNumber('CACSMS_GOLD_MIN_REWARD_RISK', 2));
 }
 
+/** Minimum institutional quality score (0–100) required to execute Gold trades. */
+export function goldMinInstitutionalQuality(): number {
+  return Math.max(50, Math.round(envNumber('CACSMS_GOLD_MIN_INSTITUTIONAL_QUALITY', 62)));
+}
+
+/** Max scale-in legs per setup type before requiring fresh confirmation. */
+export function goldMaxSetupExposure(): number {
+  return Math.max(1, Math.min(goldMaxConcurrentPositions(), Math.round(envNumber('CACSMS_GOLD_MAX_SETUP_EXPOSURE', 3))));
+}
+
 /** Max trades per calendar day on Gold. */
 export function goldMaxTradesPerDay(): number {
   return Math.max(1, Math.min(50, Math.round(envNumber('CACSMS_GOLD_MAX_TRADES_PER_DAY', 25))));
@@ -134,6 +152,9 @@ export interface GoldEngineStatus {
   enabled: boolean;
   symbol: GoldSymbol;
   serialTrading: boolean;
+  intelligentScaling: boolean;
+  minInstitutionalQuality: number;
+  maxSetupExposure: number;
   maxConcurrentPositions: number;
   maxEntriesPerCycle: number;
   maxSpreadPoints: number;
@@ -147,6 +168,9 @@ export function getGoldEngineStatus(): GoldEngineStatus {
     enabled: isGoldOnlyTradingEngine(),
     symbol: GOLD_SYMBOL,
     serialTrading: goldSerialTradingEnabled(),
+    intelligentScaling: goldIntelligentScalingEnabled(),
+    minInstitutionalQuality: goldMinInstitutionalQuality(),
+    maxSetupExposure: goldMaxSetupExposure(),
     maxConcurrentPositions: goldMaxConcurrentPositions(),
     maxEntriesPerCycle: goldMaxEntriesPerCycle(),
     maxSpreadPoints: goldMaxSpreadPoints(),

@@ -6,6 +6,7 @@ import { isExecutionEnabled } from '@/lib/execution-policy';
 import { parsePositionManagementMetadata } from '@/lib/position-management-state';
 import { syncOpenPositionLiveMetrics } from '@/lib/position-profit-sync';
 import { getPositionManagementConfig } from '@/lib/trade-monitor-config';
+import { resolveGoldAdaptiveManagementConfig } from '@/lib/gold-adaptive-management';
 import {
   TradeMonitoringEngine,
   type EnrichedTradeSnapshot,
@@ -13,7 +14,6 @@ import {
 } from '@/services/trade-monitor-service/src/trade-monitoring-engine';
 
 let lastTickAt = 0;
-let engine = new TradeMonitoringEngine(getPositionManagementConfig());
 
 function envBool(name: string, fallback = false): boolean {
   const raw = String(process.env[name] ?? '').trim().toLowerCase();
@@ -131,6 +131,9 @@ function metadataAfterAction(action: TradeManagementAction): Record<string, unkn
       lastActionAt: now,
     };
   }
+  if (action.action === 'partial_close') {
+    return { partialCloseApplied: true, lastActionAt: now };
+  }
   return { lastActionAt: now };
 }
 
@@ -157,7 +160,6 @@ export async function runTradeMonitorTick(now = Date.now(), options?: { force?: 
   }
   lastTickAt = now;
 
-  engine = new TradeMonitoringEngine(getPositionManagementConfig());
   const sync = await syncOpenPositionLiveMetrics();
   const positions = await listOpenPositions({ limit: 100 });
   let actions = 0;
@@ -165,7 +167,16 @@ export async function runTradeMonitorTick(now = Date.now(), options?: { force?: 
 
   for (const position of positions) {
     const snapshot = buildEnrichedSnapshot(position);
-    const decision = engine.evaluatePosition(snapshot);
+    const config = resolveGoldAdaptiveManagementConfig(getPositionManagementConfig(), {
+      symbol: snapshot.symbol,
+      favorablePoints: snapshot.favorablePoints,
+      riskPoints: snapshot.riskPoints,
+      rMultiple: snapshot.rMultiple,
+      spreadPoints: snapshot.spreadPoints,
+      peakRMultiple: snapshot.management.peakRMultiple,
+      breakEvenApplied: snapshot.management.breakEvenApplied,
+    });
+    const decision = new TradeMonitoringEngine(config).evaluatePosition(snapshot);
     if (decision.action === 'hold') {
       await updatePositionEvaluation({
         id: position.id,

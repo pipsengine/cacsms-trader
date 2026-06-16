@@ -1,6 +1,8 @@
 import type { TradeIntent } from '../../../packages/shared-types';
 import type { PositionManagementConfig } from '../../../lib/trade-monitor-config';
 import type { PositionManagementMetadata } from '../../../lib/position-management-state';
+import { goldBreakEvenAllowed, resolveGoldAdaptiveManagementConfig } from '../../../lib/gold-adaptive-management';
+import { isGoldSymbol } from '../../../lib/gold-trading-engine';
 
 export interface OpenTradeSnapshot {
   ticket: string;
@@ -114,29 +116,61 @@ export class TradeMonitoringEngine {
   }
 
   evaluateBreakEven(snapshot: EnrichedTradeSnapshot): TradeManagementAction {
+    const config = isGoldSymbol(snapshot.symbol)
+      ? resolveGoldAdaptiveManagementConfig(this.config, {
+          symbol: snapshot.symbol,
+          favorablePoints: snapshot.favorablePoints,
+          riskPoints: snapshot.riskPoints,
+          rMultiple: snapshot.rMultiple,
+          spreadPoints: snapshot.spreadPoints,
+          peakRMultiple: snapshot.management.peakRMultiple,
+          breakEvenApplied: snapshot.management.breakEvenApplied,
+        })
+      : this.config;
+
     if (snapshot.management.breakEvenApplied || isStopProtectingEntry(snapshot)) {
       return action(snapshot, 'hold', 'Break-even already applied.', 0, false);
     }
 
-    if (snapshot.rMultiple >= this.config.standardBreakEvenR) {
+    if (snapshot.rMultiple >= config.standardBreakEvenR) {
+      if (
+        isGoldSymbol(snapshot.symbol) &&
+        !goldBreakEvenAllowed(
+          {
+            symbol: snapshot.symbol,
+            favorablePoints: snapshot.favorablePoints,
+            riskPoints: snapshot.riskPoints,
+            rMultiple: snapshot.rMultiple,
+            spreadPoints: snapshot.spreadPoints,
+            peakRMultiple: snapshot.management.peakRMultiple,
+            breakEvenApplied: snapshot.management.breakEvenApplied,
+          },
+          config.standardBreakEvenR,
+        )
+      ) {
+        return action(snapshot, 'hold', 'Gold break-even waiting for structure/volatility confirmation.', 0, false);
+      }
       return {
         ticket: snapshot.ticket,
         action: 'move_to_break_even',
-        reason: `Trade reached ${snapshot.rMultiple.toFixed(2)}R — moving stop to break-even.`,
+        reason: `Trade reached ${snapshot.rMultiple.toFixed(2)}R — adaptive break-even with spread buffer.`,
         priority: 70,
         urgent: false,
-        bufferPoints: this.config.spreadBufferPoints,
+        bufferPoints: config.spreadBufferPoints,
       };
     }
 
-    if (snapshot.rMultiple >= this.config.microBreakEvenR || snapshot.profitLoss >= this.config.minPeakProfitUsd) {
+    if (
+      !isGoldSymbol(snapshot.symbol) &&
+      (snapshot.rMultiple >= config.microBreakEvenR || snapshot.profitLoss >= config.minPeakProfitUsd)
+    ) {
       return {
         ticket: snapshot.ticket,
         action: 'move_to_break_even',
         reason: `Micro-profit threshold reached (${snapshot.rMultiple.toFixed(2)}R) — early break-even lock.`,
         priority: 60,
         urgent: false,
-        bufferPoints: this.config.spreadBufferPoints,
+        bufferPoints: config.spreadBufferPoints,
       };
     }
 
@@ -164,6 +198,9 @@ export class TradeMonitoringEngine {
   }
 
   evaluatePartialClose(snapshot: EnrichedTradeSnapshot, closeAtR = this.config.partialCloseR): TradeManagementAction {
+    if (snapshot.management.partialCloseApplied) {
+      return action(snapshot, 'hold', 'Partial close already applied.', 0, false);
+    }
     if (snapshot.rMultiple < closeAtR) {
       return action(snapshot, 'hold', 'Partial close threshold not reached.', 0, false);
     }
@@ -178,7 +215,19 @@ export class TradeMonitoringEngine {
   }
 
   evaluateTrailingStop(snapshot: EnrichedTradeSnapshot): TradeManagementAction {
-    if (!snapshot.management.profitLockApplied && snapshot.rMultiple < this.config.profitLockStartR) {
+    const config = isGoldSymbol(snapshot.symbol)
+      ? resolveGoldAdaptiveManagementConfig(this.config, {
+          symbol: snapshot.symbol,
+          favorablePoints: snapshot.favorablePoints,
+          riskPoints: snapshot.riskPoints,
+          rMultiple: snapshot.rMultiple,
+          spreadPoints: snapshot.spreadPoints,
+          peakRMultiple: snapshot.management.peakRMultiple,
+          breakEvenApplied: snapshot.management.breakEvenApplied,
+        })
+      : this.config;
+
+    if (!snapshot.management.profitLockApplied && snapshot.rMultiple < config.profitLockStartR) {
       return action(snapshot, 'hold', 'Trailing stop waits for profit lock stage.', 0, false);
     }
     if (snapshot.profitLoss <= 0) {
@@ -187,10 +236,10 @@ export class TradeMonitoringEngine {
     return {
       ticket: snapshot.ticket,
       action: 'trail_stop',
-      reason: 'Profitable trade under active profit protection — trailing stop refresh.',
+      reason: 'Profitable trade under active profit protection — adaptive trailing stop refresh.',
       priority: 35,
       urgent: false,
-      trailingPoints: this.config.trailingPoints,
+      trailingPoints: config.trailingPoints,
     };
   }
 

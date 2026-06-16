@@ -1,5 +1,7 @@
 import { AUTONOMY_TIMEFRAME_SEQUENCE } from './autonomous-pipeline';
 import { resolveConnectedTerminalId } from './autonomy-execution-adapter';
+import { getTopDownCaptureSymbols } from './focus-symbols';
+import { enforceGoldPipelineSymbol, isGoldOnlyTradingEngine } from './gold-trading-engine';
 import { isContinuousTradingEnabled } from './execution-risk-limits';
 import type { PairSelectionResult } from './pair-selector';
 import { getLatestPipelineSession, startTopDownSession } from './top-down-orchestrator';
@@ -35,9 +37,14 @@ function navigationSessionActive(session: Record<string, unknown> | null): boole
 }
 
 function resolveEligibleSymbols(selection: PairSelectionResult | null): string[] {
-  if (!selection) return [];
+  if (isGoldOnlyTradingEngine()) {
+    return [...getTopDownCaptureSymbols()];
+  }
+  if (!selection) return [...getTopDownCaptureSymbols()];
   if (isContinuousTradingEnabled() && selection.eligibleSymbols.length > 0) {
-    return selection.eligibleSymbols.map((symbol) => symbol.toUpperCase());
+    return selection.eligibleSymbols
+      .map((symbol) => enforceGoldPipelineSymbol(symbol))
+      .filter((symbol, index, list) => list.indexOf(symbol) === index);
   }
   const qualified = (selection.qualifiedSymbols ?? [])
     .map((symbol) => symbol.toUpperCase())

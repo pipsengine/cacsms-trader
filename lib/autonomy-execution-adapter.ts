@@ -19,9 +19,10 @@ import { listTerminalSnapshots } from '@/lib/mt5-heartbeat-store';
 import { getLatestPairSelection } from '@/lib/pair-selector';
 import { queryPostgres } from '@/lib/postgres';
 import { evaluateAutonomySafetyLock } from '@/lib/autonomy-safety-lock';
-import { evaluateGoldExecutionQuality } from '@/lib/gold-execution-quality';
+import { evaluateGoldExecutionQuality, resolveGoldLivePrice } from '@/lib/gold-execution-quality';
+import { evaluateGoldInstitutionalQuality } from '@/lib/gold-institutional-quality';
 import { evaluateGoldPositionScaling } from '@/lib/gold-position-scaling';
-import { isGoldSymbol } from '@/lib/gold-trading-engine';
+import { goldMinRewardRisk, isGoldSymbol } from '@/lib/gold-trading-engine';
 import { evaluateStrategyGovernance, resolveStrategyIdFromDecision } from '@/lib/strategy-governance';
 import { logAutonomyDirectionAudit } from '@/lib/autonomy-direction-monitor';
 import { isRetracementEntryEnabled, planAutonomousRetracementEntry } from '@/lib/autonomous-entry-planner';
@@ -95,7 +96,25 @@ export async function resolveConnectedTerminalId(): Promise<string | null> {
 export async function evaluateAutonomyExecutionChecklist(input: {
   decision: Pick<
     AutonomousDecisionOutput,
-    'symbol' | 'decision' | 'confidenceScore' | 'setupReadinessScore' | 'riskScore' | 'stopLoss' | 'takeProfitLevels' | 'macroRiskWarning' | 'tradingStyle' | 'timeframe' | 'setupType'
+    | 'symbol'
+    | 'decision'
+    | 'confidenceScore'
+    | 'setupReadinessScore'
+    | 'riskScore'
+    | 'stopLoss'
+    | 'takeProfitLevels'
+    | 'macroRiskWarning'
+    | 'liquidityWarning'
+    | 'tradingStyle'
+    | 'timeframe'
+    | 'setupType'
+    | 'selectedStrategyId'
+    | 'strategyBookScore'
+    | 'institutionalPlan'
+    | 'capitalAllocation'
+    | 'signalScore'
+    | 'finalBias'
+    | 'reasonForDecision'
   >;
   config: Pick<AutonomyConfig, 'tradeExecutionMode' | 'confidenceThreshold' | 'riskThreshold'>;
   manual?: boolean;
@@ -208,6 +227,8 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     if (isGoldSymbol(input.decision.symbol)) {
       const goldQuality = await evaluateGoldExecutionQuality(input.decision.symbol);
       blockers.push(...goldQuality.blockers);
+      const institutional = evaluateGoldInstitutionalQuality(input.decision);
+      blockers.push(...institutional.blockers);
       const goldStack = await evaluateGoldPositionScaling({
         decision: input.decision,
         terminalId,
@@ -243,6 +264,23 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     });
     if (!valid) {
       blockers.push('Stop loss and take profit must be resolved before execution dispatch.');
+    } else if (isGoldSymbol(input.decision.symbol)) {
+      const stopLoss = Number(input.decision.stopLoss ?? 0);
+      const tp = Number(takeProfit ?? 0);
+      const expectedR = input.decision.signalScore?.expectedR ?? 0;
+      if (expectedR > 0 && expectedR < goldMinRewardRisk()) {
+        blockers.push(`Reward:risk ${expectedR.toFixed(2)} below Gold minimum ${goldMinRewardRisk()}.`);
+      } else if (stopLoss > 0 && tp > 0) {
+        const livePrice = await resolveGoldLivePrice(input.decision.symbol);
+        if (livePrice && livePrice > 0) {
+          const risk = Math.abs(livePrice - stopLoss);
+          const reward = Math.abs(tp - livePrice);
+          const rr = risk > 0 ? reward / risk : 0;
+          if (rr > 0 && rr < goldMinRewardRisk()) {
+            blockers.push(`Computed R:R ${rr.toFixed(2)} below Gold minimum ${goldMinRewardRisk()}.`);
+          }
+        }
+      }
     }
   }
 

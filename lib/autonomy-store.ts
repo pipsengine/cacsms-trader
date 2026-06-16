@@ -4,7 +4,7 @@ import { applyAutonomyAccountProfile } from './autonomy-account-profiles';
 import { buildAutonomousDecision } from './autonomous-decision-engine';
 import { resolveExecutionAccountContext } from './execution-account-context';
 import { SYSTEM_FOCUS_SYMBOLS } from './focus-symbols';
-import { isGoldSymbol } from './gold-trading-engine';
+import { enforceGoldPipelineSymbol, isGoldOnlyTradingEngine, isGoldSymbol } from './gold-trading-engine';
 import { DEFAULT_PAIR_SELECTION_CONFIG, runAutonomousPairSelection } from './pair-selector';
 import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomousDecisionInput, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
 import { getTradingStyleProfile } from './trading-styles/registry';
@@ -763,8 +763,11 @@ async function enqueueTimeframes(symbol: string) {
 
 async function runCaptureReadiness(symbol: string, timeframe: string) {
   const config = await getAutonomyConfig();
-  let activeSymbol = symbol.toUpperCase();
-  if (config.pairSelectionEnabled && (activeSymbol === 'AUTO' || !config.activeSymbols.includes(activeSymbol))) {
+  const requested = symbol.toUpperCase();
+  let activeSymbol = requested;
+  if (isGoldOnlyTradingEngine()) {
+    activeSymbol = enforceGoldPipelineSymbol(requested);
+  } else if (config.pairSelectionEnabled && (requested === 'AUTO' || !config.activeSymbols.includes(requested))) {
     const selection = await selectAutonomousPairs();
     activeSymbol = selection.selectedSymbol;
   }
@@ -877,8 +880,11 @@ export async function ensureFocusSymbolsConfigured() {
   const config = await readAutonomyConfigRow();
   const watchlist = config.watchlistSymbols.map((symbol) => symbol.toUpperCase());
   const expected = SYSTEM_FOCUS_SYMBOLS.map((symbol) => symbol.toUpperCase());
+  const hasForeignSymbols = isGoldOnlyTradingEngine()
+    && watchlist.some((symbol) => !expected.includes(symbol));
   const matchesFocusUniverse =
-    expected.every((symbol) => watchlist.includes(symbol))
+    !hasForeignSymbols
+    && expected.every((symbol) => watchlist.includes(symbol))
     && watchlist.length === expected.length
     && config.maxSelectedSymbols >= expected.length
     && config.activeSymbols.length >= expected.length;

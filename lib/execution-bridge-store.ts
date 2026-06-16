@@ -451,10 +451,21 @@ async function syncOpenPositionFromAck(input: {
 }
 
 function conditionalEntryMaxMinutes(): number {
+  try {
+    const { goldSerialTradingEnabled, isGoldOnlyTradingEngine } = require('./gold-trading-engine') as typeof import('./gold-trading-engine');
+    const { goldSerialConditionalMaxMinutes } = require('./gold-pending-order-cleanup') as typeof import('./gold-pending-order-cleanup');
+    if (isGoldOnlyTradingEngine() && goldSerialTradingEnabled()) {
+      return goldSerialConditionalMaxMinutes();
+    }
+  } catch {
+    // fall through
+  }
   return Math.max(30, Math.round(envNumber('CACSMS_CONDITIONAL_ENTRY_MAX_MINUTES', 360)));
 }
 
 export async function markTimeouts(now = new Date()): Promise<number> {
+  const { cleanupGoldSerialPendingOrders } = await import('./gold-pending-order-cleanup');
+  let cleaned = await cleanupGoldSerialPendingOrders().catch(() => 0);
   const caps = await getSchemaCaps();
   if (caps.hasLifecycleState) {
     const ids: { command_id: string; terminal_id: string }[] = [];
@@ -563,7 +574,7 @@ export async function markTimeouts(now = new Date()): Promise<number> {
       ),
     );
 
-    return deduped.size;
+    return deduped.size + cleaned;
   }
 
   const result = await queryPostgres(

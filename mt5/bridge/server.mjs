@@ -18,10 +18,20 @@ const INTERNAL_APP_URL = String(
   ?? `http://localhost:${process.env.PORT ?? 3000}`,
 ).replace(/\/+$/, "");
 const REATTACH_TOPDOWN_ENABLED = String(process.env.CACSMS_REATTACH_TOPDOWN_ENABLED ?? "true").toLowerCase() !== "false";
-const REATTACH_TOPDOWN_SYMBOLS = String(process.env.CACSMS_REATTACH_TOPDOWN_SYMBOLS ?? process.env.CACSMS_REATTACH_TOPDOWN_SYMBOL ?? "SP500")
-  .split(",")
-  .map((symbol) => symbol.trim().toUpperCase())
-  .filter(Boolean);
+function resolveReattachTopDownSymbols() {
+  const goldOnly = String(process.env.CACSMS_GOLD_ONLY_TRADING ?? "true").toLowerCase() !== "false";
+  if (goldOnly) return ["XAUUSD"];
+  const raw = String(
+    process.env.CACSMS_REATTACH_TOPDOWN_SYMBOLS
+    ?? process.env.CACSMS_REATTACH_TOPDOWN_SYMBOL
+    ?? "XAUUSD",
+  );
+  return raw
+    .split(",")
+    .map((symbol) => symbol.trim().toUpperCase())
+    .filter(Boolean);
+}
+const REATTACH_TOPDOWN_SYMBOLS = resolveReattachTopDownSymbols();
 const REATTACH_TOPDOWN_COOLDOWN_MS = Math.max(15_000, Number(process.env.CACSMS_REATTACH_TOPDOWN_COOLDOWN_MS ?? 45_000));
 let cachedSharedSecret = { value: String(process.env.MT5_BRIDGE_SHARED_SECRET ?? ""), mtimeMs: 0 };
 

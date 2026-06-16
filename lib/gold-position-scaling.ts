@@ -1,13 +1,15 @@
 import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
 import {
   goldMaxConcurrentPositions,
+  goldMaxSetupExposure,
   goldMaxTradesPerDay,
-  goldReentryCooldownMinutes,
   goldSerialTradingEnabled,
   goldStackMinConfidence,
   goldStackMinReadiness,
   isGoldSymbol,
 } from '@/lib/gold-trading-engine';
+import { validateGoldInstitutionalReentry } from '@/lib/gold-reentry-validator';
+import { resolveGoldLivePrice } from '@/lib/gold-execution-quality';
 import { getOpenPositionExposureForSymbol, listOpenPositions } from '@/lib/execution-open-positions';
 import { countTradesOpenedTodayForSymbol } from '@/lib/execution-risk-limits';
 import { queryPostgres } from '@/lib/postgres';
@@ -44,9 +46,19 @@ async function countPendingOpeningCommands(symbol?: string): Promise<number> {
 export async function evaluateGoldPositionScaling(input: {
   decision: Pick<
     AutonomousDecisionOutput,
-    'symbol' | 'decision' | 'confidenceScore' | 'setupReadinessScore' | 'setupType' | 'selectedStrategyId'
+    | 'symbol'
+    | 'decision'
+    | 'confidenceScore'
+    | 'setupReadinessScore'
+    | 'setupType'
+    | 'selectedStrategyId'
+    | 'stopLoss'
+    | 'takeProfitLevels'
+    | 'timeframe'
+    | 'signalScore'
   >;
   terminalId?: string | null;
+  currentPrice?: number | null;
 }): Promise<GoldStackEvaluation> {
   if (!isGoldSymbol(input.decision.symbol)) {
     return {
@@ -66,6 +78,8 @@ export async function evaluateGoldPositionScaling(input: {
   const side = input.decision.decision;
   const blockers: string[] = [];
   const serialMode = goldSerialTradingEnabled();
+
+  await import('@/lib/gold-pending-order-cleanup').then((m) => m.cleanupGoldSerialPendingOrders()).catch(() => 0);
 
   const exposure = await getOpenPositionExposureForSymbol(symbol).catch(() => ({ count: 0, volumeLots: 0 }));
   const positions = await listOpenPositions({ limit: 50 }).catch(() => []);
@@ -103,6 +117,10 @@ export async function evaluateGoldPositionScaling(input: {
   const isReentry = openCount === 0 && pendingCount === 0 && tradesToday > 0;
 
   if (isStack) {
+    const setupLegs = sameSideCount + (serialMode ? 0 : pendingCount);
+    if (setupLegs >= goldMaxSetupExposure()) {
+      blockers.push(`Gold max setup exposure reached (${setupLegs}/${goldMaxSetupExposure()} legs on this opportunity).`);
+    }
     if (input.decision.confidenceScore < goldStackMinConfidence()) {
       blockers.push(
         `Stack requires confidence >= ${goldStackMinConfidence()}% (current ${input.decision.confidenceScore}%).`,
@@ -126,12 +144,28 @@ export async function evaluateGoldPositionScaling(input: {
   }
 
   if (isReentry) {
-    const cooledDown = await isGoldReentryCooldownClear(symbol, side);
-    if (!cooledDown) {
-      blockers.push(
-        `Gold re-entry cooldown active (${goldReentryCooldownMinutes()} min) — wait for retracement to institutional level.`,
-      );
+    const livePrice = input.currentPrice ?? (await resolveGoldLivePrice(symbol));
+    const stopLoss = Number(input.decision.stopLoss ?? 0);
+    const takeProfit = Number(input.decision.takeProfitLevels?.[0] ?? 0);
+    const expectedR = input.decision.signalScore?.expectedR ?? 0;
+    let rewardRiskRatio = expectedR > 0 ? expectedR : 2;
+    if (livePrice && stopLoss > 0 && takeProfit > 0) {
+      const risk = Math.abs(livePrice - stopLoss);
+      const reward = Math.abs(takeProfit - livePrice);
+      if (risk > 0) rewardRiskRatio = Number((reward / risk).toFixed(4));
     }
+    const reentry = await validateGoldInstitutionalReentry({
+      symbol,
+      side: side as 'BUY' | 'SELL',
+      currentPrice: livePrice ?? 0,
+      stopLoss,
+      rewardRiskRatio,
+      timeframe: input.decision.timeframe ?? 'M15',
+    }).catch(() => ({ allowed: false, blockers: ['Re-entry validation failed.'] }));
+    if (!livePrice || livePrice <= 0) {
+      blockers.push('Gold re-entry blocked — live price unavailable for institutional level confirmation.');
+    }
+    blockers.push(...reentry.blockers);
   }
 
   return {
@@ -168,23 +202,4 @@ async function hasRecentDuplicateGoldSignal(input: {
     [input.symbol.toUpperCase(), input.side, input.setupType, input.strategyId, String(input.withinMinutes)],
   ).catch(() => ({ rows: [] }));
   return Boolean(result.rows[0]);
-}
-
-async function isGoldReentryCooldownClear(symbol: string, side: string): Promise<boolean> {
-  const cooldownMin = goldReentryCooldownMinutes();
-  const result = await queryPostgres(
-    `
-      SELECT MAX(COALESCE(o.reviewed_at, o.created_at)) AS last_close
-      FROM autonomous_outcome_tracking o
-      JOIN autonomous_decision_logs d ON d.id = o.decision_log_id
-      WHERE upper(d.symbol) = $1
-        AND d.decision = $2
-        AND o.outcome_status <> 'pending'
-    `,
-    [symbol.toUpperCase(), side],
-  ).catch(() => ({ rows: [{ last_close: null }] }));
-  const lastClose = result.rows[0]?.last_close;
-  if (!lastClose) return true;
-  const ageMs = Date.now() - new Date(String(lastClose)).getTime();
-  return ageMs >= cooldownMin * 60 * 1000;
 }

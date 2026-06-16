@@ -36,6 +36,23 @@ async function loadTerminalTelemetry(): Promise<unknown | null> {
   }
 }
 
+/** Live Gold mid price from connected terminal telemetry (for re-entry / retracement checks). */
+export async function resolveGoldLivePrice(symbol: string): Promise<number | null> {
+  if (!isGoldSymbol(symbol)) return null;
+  const terminal = await loadTerminalTelemetry();
+  if (!terminal) return null;
+  const row = telemetryForSymbol(terminal, symbol);
+  if (!row || row.stale) return null;
+  const bid = Number(row.bid);
+  const ask = Number(row.ask);
+  if (Number.isFinite(bid) && bid > 0 && Number.isFinite(ask) && ask > 0) {
+    return Number(((bid + ask) / 2).toFixed(2));
+  }
+  if (Number.isFinite(bid) && bid > 0) return bid;
+  if (Number.isFinite(ask) && ask > 0) return ask;
+  return null;
+}
+
 export async function evaluateGoldExecutionQuality(symbol: string): Promise<GoldExecutionQualityResult> {
   if (!isGoldSymbol(symbol)) {
     return {
