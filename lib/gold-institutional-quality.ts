@@ -1,6 +1,9 @@
 import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
 import {
+  computeGeometricRewardRisk,
   isNonDirectionalBias,
+  isRangeOrientedContext,
+  resolveExtendedTakeProfitPrice,
   resolveGoldMinRewardRiskForDecision,
 } from '@/lib/gold-trade-context';
 import { resolveGoldDynamicRewardRisk } from '@/lib/gold-dynamic-reward-risk';
@@ -66,14 +69,20 @@ export function evaluateGoldInstitutionalQuality(
   breakdown.strategyBook = Math.round((decision.strategyBookScore ?? decision.confidenceScore * 0.85) * 0.18);
 
   const plan = decision.institutionalPlan;
+  const rangingContext = Boolean(
+    plan?.rangingContextActive
+    || isRangeOrientedContext(decision)
+    || isNonDirectionalBias(plan?.htfBias ?? '')
+    || isNonDirectionalBias(decision.finalBias),
+  );
   let planScore = 0;
   if (plan) {
     const alignedStages = plan.sequence.filter((s) => s.status === 'aligned' || s.status === 'confirmed').length;
     planScore = Math.min(18, alignedStages * 4);
-    if (plan.conflict && !plan.countertrendAllowed) {
+    if (plan.conflict && !plan.countertrendAllowed && !rangingContext) {
       blockers.push('Institutional HTF/LTF conflict — setup blocked until structure realigns.');
     }
-    if (!sideMatchesBias(decision.decision, plan.htfBias) && !plan.countertrendAllowed) {
+    if (!sideMatchesBias(decision.decision, plan.htfBias) && !plan.countertrendAllowed && !rangingContext) {
       blockers.push(`Trade side ${decision.decision} conflicts with HTF bias ${plan.htfBias}.`);
     }
   }
@@ -86,23 +95,25 @@ export function evaluateGoldInstitutionalQuality(
   breakdown.dynamicTarget = dynamicPlan.tier === 'institutional' ? 12 : dynamicPlan.tier === 'elevated' ? 8 : 6;
 
   const stopLoss = Number((decision as { stopLoss?: number | null }).stopLoss ?? 0);
-  const takeProfit = Number((decision as { takeProfitLevels?: number[] }).takeProfitLevels?.[0] ?? 0);
-  if (stopLoss > 0 && takeProfit > 0) {
+  const extendedTakeProfit = resolveExtendedTakeProfitPrice(
+    decision.decision,
+    (decision as { takeProfitLevels?: number[] }).takeProfitLevels,
+  );
+  if (stopLoss > 0 && extendedTakeProfit) {
     const entryProxy = Number((decision as { entryZone?: { mid?: number } }).entryZone?.mid ?? 0);
     if (entryProxy > 0) {
-      const risk = Math.abs(entryProxy - stopLoss);
-      const reward = Math.abs(takeProfit - entryProxy);
-      const geometricRr = risk > 0 ? reward / risk : 0;
+      const geometricRr = computeGeometricRewardRisk({
+        side: decision.decision,
+        entryPrice: entryProxy,
+        stopLoss,
+        takeProfit: extendedTakeProfit,
+      });
       if (geometricRr > 0 && geometricRr + 1e-9 < minRewardRisk) {
         blockers.push(`Geometric R:R ${geometricRr.toFixed(2)} below Gold minimum ${minRewardRisk}.`);
       }
     }
-  } else if (dynamicPlan.targetR + 1e-9 < minRewardRisk) {
-    blockers.push(`Dynamic target ${dynamicPlan.targetR.toFixed(2)}R below Gold minimum ${minRewardRisk}.`);
-  }
-
-  if (expectedR > 0 && expectedR < minRewardRisk && dynamicPlan.tier === 'standard') {
-    blockers.push(`Model expectancy ${expectedR.toFixed(2)}R below Gold minimum ${minRewardRisk} on standard setup.`);
+  } else if (dynamicPlan.extendedTargetR + 1e-9 < minRewardRisk) {
+    blockers.push(`Dynamic target ${dynamicPlan.extendedTargetR.toFixed(2)}R below Gold minimum ${minRewardRisk}.`);
   }
 
   const allocation = decision.capitalAllocation?.riskTier ?? 'full';

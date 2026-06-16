@@ -429,8 +429,12 @@ export async function getPipelineExecutionStatus(symbol: string) {
         };
       }
       if (status === 'blocked') {
-        const liveChecklist = await evaluateAutonomyExecutionChecklist({
+        const { decision: enrichedDecision } = await resolveExecutableAutonomyDecision(decision).catch(() => ({
           decision,
+          stopTargets: null,
+        }));
+        const liveChecklist = await evaluateAutonomyExecutionChecklist({
+          decision: enrichedDecision,
           config: await getAutonomyConfig(),
           manual: false,
         }).catch(() => null);

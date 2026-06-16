@@ -408,13 +408,19 @@ export async function resolveAutonomousStopTargets(input: {
       minStopDistance,
     });
     if (validationError) {
-      return buildGuaranteedPipStopTargets({
+      const fallback = buildGuaranteedPipStopTargets({
         symbol,
         side: input.side,
         entryPrice: roundedEntry,
         timeframe,
-        rewardRiskRatio: minRewardRiskRatio,
+        rewardRiskRatio: targetRewardRiskRatio,
       });
+      return {
+        ...fallback,
+        targetRewardRiskRatio: goldPlan?.targetR ?? targetRewardRiskRatio,
+        extendedRewardRiskRatio: targetRewardRiskRatio,
+        rewardRiskPlan: goldPlan ?? undefined,
+      };
     }
     takeProfitLevels = [roundedTp];
     rewardRiskRatio = targetRewardRiskRatio;

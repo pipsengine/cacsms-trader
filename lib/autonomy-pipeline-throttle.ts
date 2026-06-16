@@ -15,12 +15,16 @@ function envNumber(name: string, fallback: number): number {
 /** Continuous session with open slots below the institutional floor — relax cooldowns and daily caps. */
 export async function shouldRelaxContinuousTradingLimits(): Promise<boolean> {
   if (!isContinuousTradingEnabled()) return false;
-  const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
-  if (!(await isContinuousTradingSessionActive())) return false;
   const openCount = await resolveLiveOpenPositionCount();
   if (goldSerialTradingEnabled() && openCount > 0) return false;
   const minOpen = envNumber('CACSMS_MIN_OPEN_POSITIONS', goldSerialTradingEnabled() ? 0 : 3);
-  return openCount < minOpen;
+  if (openCount >= minOpen) return false;
+
+  const { isContinuousTradingSessionActive } = await import('./continuous-trading-session');
+  if (await isContinuousTradingSessionActive()) return true;
+
+  const { isGoldOnlyTradingEngine } = await import('./gold-trading-engine');
+  return isGoldOnlyTradingEngine() && openCount === 0;
 }
 
 function continuousDispatchCooldownMs(): number {

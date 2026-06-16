@@ -590,6 +590,11 @@ export async function generateAutonomousSignal(
     const { shouldRelaxContinuousTradingLimits } = await import('@/lib/autonomy-pipeline-throttle');
     refillMode = await shouldRelaxContinuousTradingLimits();
   }
+  if (!refillMode && isGoldSymbol(symbol)) {
+    const { getOpenPositionExposureForSymbol } = await import('@/lib/execution-open-positions');
+    const exposure = await getOpenPositionExposureForSymbol(symbol.toUpperCase()).catch(() => ({ count: 0, volumeLots: 0 }));
+    if (exposure.count === 0) refillMode = true;
+  }
   const macro = await loadMacroContext(symbol);
   const execution = await loadExecutionContext(symbol, timeframe);
   const { runSymbolStrategyBookScan } = await import('@/lib/strategies/run-symbol-strategy-book');

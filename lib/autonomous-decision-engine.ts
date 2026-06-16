@@ -246,7 +246,14 @@ function applyInstitutionalConflictPolicy(
   decision: AutonomyDecision,
   plan: NonNullable<AutonomousDecisionOutput['institutionalPlan']>,
 ): AutonomyDecision {
-  if ((decision === 'BUY' || decision === 'SELL') && plan.conflict && !plan.countertrendAllowed) return 'MONITOR';
+  if (
+    (decision === 'BUY' || decision === 'SELL')
+    && plan.conflict
+    && !plan.countertrendAllowed
+    && !plan.rangingContextActive
+  ) {
+    return 'MONITOR';
+  }
   return decision;
 }
 
@@ -299,7 +306,11 @@ function allocateCapital(input: {
   if (input.regime === 'news-risk' || input.riskScore >= 78) {
     return { riskMultiplier: 0, riskTier: 'blocked', rationale: 'News-risk or extreme risk regime blocks autonomous capital.' };
   }
-  if (input.institutionalPlan.conflict && !input.institutionalPlan.countertrendAllowed) {
+  if (
+    input.institutionalPlan.conflict
+    && !input.institutionalPlan.countertrendAllowed
+    && !input.institutionalPlan.rangingContextActive
+  ) {
     return { riskMultiplier: 0, riskTier: 'blocked', rationale: input.institutionalPlan.conflictPolicy };
   }
   if (input.signalScore.expectedR >= 0.45 && input.signalScore.probabilityScore >= 68 && input.confidenceScore >= 68 && input.readinessScore >= 65) {
@@ -309,6 +320,12 @@ function allocateCapital(input: {
     return { riskMultiplier: 0.5, riskTier: 'reduced', rationale: 'Positive but uncertain expectancy; reduced risk only.' };
   }
   return { riskMultiplier: 0.25, riskTier: 'minimal', rationale: 'Weak edge; minimal pilot risk only if downstream gates allow execution.' };
+}
+
+function strategyBookOverrideScore(): number {
+  const raw = String(process.env.CACSMS_STRATEGY_BOOK_OVERRIDE_VISUAL_SCORE ?? '68').trim();
+  const value = Number(raw);
+  return Number.isFinite(value) ? Math.max(55, Math.min(100, value)) : 68;
 }
 
 function fuseStrategyBook(input: {
@@ -354,14 +371,15 @@ function fuseStrategyBook(input: {
   const visualSide = input.visualDecision === 'BUY' || input.visualDecision === 'SELL' ? input.visualDecision : null;
 
   let decision: AutonomyDecision = input.visualDecision;
+  const overrideScore = strategyBookOverrideScore();
   if (leader.score >= 55 && bookSide !== 'WAIT') {
     if (!visualSide || visualSide === bookSide || input.visualDecision === 'WAIT' || input.visualDecision === 'MONITOR') {
       decision = bookSide;
-    } else if (leader.score >= 72 && book.healthyCount >= 12) {
-      decision = input.refillMode ? bookSide : 'MONITOR';
-      if (decision === 'MONITOR') {
-        blockers.push(`Visual ${visualSide} conflicts with strategy book leader ${leader.label} (${bookSide}).`);
-      }
+    } else if (leader.score >= overrideScore) {
+      // Strong institutional strategy book consensus wins over conflicting visual signal.
+      decision = bookSide;
+    } else if (input.refillMode) {
+      decision = bookSide;
     } else {
       decision = 'MONITOR';
       blockers.push(`Visual ${visualSide} conflicts with strategy book leader ${leader.label} (${bookSide}).`);
@@ -383,7 +401,10 @@ function fuseStrategyBook(input: {
   const winRateText = leader.winRate != null && leader.sampleSize >= 3
     ? ` · ${(leader.winRate * 100).toFixed(1)}% win rate`
     : '';
-  const reasonForDecision = `${decision} selected using strategy book leader ${leader.label} (${leader.score}/100${winRateText}) fused with visual confidence ${Math.round(input.visualConfidence)}. ${book.reasons[0] ?? ''}`.trim();
+  const visualConflictNote = visualSide && visualSide !== bookSide && decision === bookSide
+    ? ` Visual ${visualSide} overridden by strategy book leader (${bookSide}, score ${leader.score}).`
+    : '';
+  const reasonForDecision = `${decision} selected using strategy book leader ${leader.label} (${leader.score}/100${winRateText}) fused with visual confidence ${Math.round(input.visualConfidence)}.${visualConflictNote} ${book.reasons[0] ?? ''}`.trim();
 
   return {
     decision,
@@ -437,8 +458,11 @@ function downgradeDecision(
   if (refillMode && (decision === 'BUY' || decision === 'SELL') && !hardBlock) {
     return decision;
   }
+  const softBlockers = blockers.filter((item) =>
+    !/conflicts with strategy book leader|Strategy book lacks actionable consensus/i.test(item),
+  );
+  if (softBlockers.length) return 'MONITOR';
   if (hardBlock) return 'AVOID';
-  if (blockers.length) return 'MONITOR';
   const rangingRegime = regime === 'range' || regime === 'compression';
   if (decision === 'BUY' && (bias === 'bullish' || (refillMode && bias === 'mixed') || (rangingRegime && bias === 'neutral'))) return 'BUY';
   if (decision === 'SELL' && (bias === 'bearish' || (refillMode && bias === 'mixed') || (rangingRegime && bias === 'neutral'))) return 'SELL';

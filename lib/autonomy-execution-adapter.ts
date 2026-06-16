@@ -22,7 +22,7 @@ import { evaluateAutonomySafetyLock } from '@/lib/autonomy-safety-lock';
 import { evaluateGoldExecutionQuality, resolveGoldLivePrice } from '@/lib/gold-execution-quality';
 import { evaluateGoldInstitutionalQuality } from '@/lib/gold-institutional-quality';
 import { evaluateGoldPositionScaling } from '@/lib/gold-position-scaling';
-import { resolveGoldMinRewardRiskForDecision } from '@/lib/gold-trade-context';
+import { evaluateGoldExecutionRewardRisk } from '@/lib/gold-trade-context';
 import { buildBatchLegVolumes, goldLegLotsPerPosition, totalBatchExposureLots } from '@/lib/gold-batch-entry';
 import { isGoldSymbol, goldBatchEntryEnabled, goldEntryLegCount } from '@/lib/gold-trading-engine';
 import { evaluateStrategyGovernance, resolveStrategyIdFromDecision } from '@/lib/strategy-governance';
@@ -268,23 +268,9 @@ export async function evaluateAutonomyExecutionChecklist(input: {
     if (!valid) {
       blockers.push('Stop loss and take profit must be resolved before execution dispatch.');
     } else if (isGoldSymbol(input.decision.symbol)) {
-      const stopLoss = Number(input.decision.stopLoss ?? 0);
-      const tp = Number(takeProfit ?? 0);
-      const minRewardRisk = resolveGoldMinRewardRiskForDecision(input.decision);
-      const expectedR = input.decision.signalScore?.expectedR ?? 0;
-      if (expectedR > 0 && expectedR < minRewardRisk) {
-        blockers.push(`Reward:risk ${expectedR.toFixed(2)} below Gold minimum ${minRewardRisk}.`);
-      } else if (stopLoss > 0 && tp > 0) {
-        const livePrice = await resolveGoldLivePrice(input.decision.symbol);
-        if (livePrice && livePrice > 0) {
-          const risk = Math.abs(livePrice - stopLoss);
-          const reward = Math.abs(tp - livePrice);
-          const rr = risk > 0 ? reward / risk : 0;
-          if (rr > 0 && rr < minRewardRisk) {
-            blockers.push(`Computed R:R ${rr.toFixed(2)} below Gold minimum ${minRewardRisk}.`);
-          }
-        }
-      }
+      const livePrice = await resolveGoldLivePrice(input.decision.symbol);
+      const rewardRisk = await evaluateGoldExecutionRewardRisk(input.decision, livePrice);
+      blockers.push(...rewardRisk.blockers);
     }
   }
 
