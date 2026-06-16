@@ -79,7 +79,7 @@ export async function evaluateGoldPositionScaling(input: {
   const blockers: string[] = [];
   const serialMode = goldSerialTradingEnabled();
 
-  await import('@/lib/gold-pending-order-cleanup').then((m) => m.cleanupGoldSerialPendingOrders()).catch(() => 0);
+  await import('@/lib/gold-pending-order-cleanup').then((m) => m.cleanupGoldPendingOrders()).catch(() => 0);
 
   const exposure = await getOpenPositionExposureForSymbol(symbol).catch(() => ({ count: 0, volumeLots: 0 }));
   const positions = await listOpenPositions({ limit: 50 }).catch(() => []);

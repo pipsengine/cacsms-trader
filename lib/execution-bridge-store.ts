@@ -452,10 +452,10 @@ async function syncOpenPositionFromAck(input: {
 
 function conditionalEntryMaxMinutes(): number {
   try {
-    const { goldSerialTradingEnabled, isGoldOnlyTradingEngine } = require('./gold-trading-engine') as typeof import('./gold-trading-engine');
-    const { goldSerialConditionalMaxMinutes } = require('./gold-pending-order-cleanup') as typeof import('./gold-pending-order-cleanup');
-    if (isGoldOnlyTradingEngine() && goldSerialTradingEnabled()) {
-      return goldSerialConditionalMaxMinutes();
+    const { isGoldOnlyTradingEngine } = require('./gold-trading-engine') as typeof import('./gold-trading-engine');
+    const { goldConditionalEntryMaxMinutes } = require('./gold-pending-order-cleanup') as typeof import('./gold-pending-order-cleanup');
+    if (isGoldOnlyTradingEngine()) {
+      return goldConditionalEntryMaxMinutes();
     }
   } catch {
     // fall through
@@ -464,8 +464,8 @@ function conditionalEntryMaxMinutes(): number {
 }
 
 export async function markTimeouts(now = new Date()): Promise<number> {
-  const { cleanupGoldSerialPendingOrders } = await import('./gold-pending-order-cleanup');
-  let cleaned = await cleanupGoldSerialPendingOrders().catch(() => 0);
+  const { cleanupGoldPendingOrders } = await import('./gold-pending-order-cleanup');
+  let cleaned = await cleanupGoldPendingOrders().catch(() => 0);
   const caps = await getSchemaCaps();
   if (caps.hasLifecycleState) {
     const ids: { command_id: string; terminal_id: string }[] = [];

@@ -16,6 +16,8 @@ import { queryPostgres } from '@/lib/postgres';
 import { hasValidStopTargets, isStopLossRequired } from '@/lib/autonomous-stop-targets';
 import { findCorrelatedOpenSymbol } from '@/lib/symbol-correlation';
 
+const VIRTUAL_CONDITIONAL_ENTRY = 'conditional_entry_waiting_for_retracement_confirmation';
+
 export class ExecutionRiskBlockedError extends Error {
   readonly decision: RiskDecision;
   readonly accountNumber: string;
@@ -94,8 +96,9 @@ async function getActiveOpeningCommandExposure(input: {
           AND upper(c.symbol) = $3
           AND upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
           AND c.lifecycle_state IN ('QUEUED','ROUTING','SENT','ACKNOWLEDGED')
+          AND COALESCE(c.broker_message, '') <> $4
       `,
-      [input.terminalId, input.accountNumber, input.symbol],
+      [input.terminalId, input.accountNumber, input.symbol, VIRTUAL_CONDITIONAL_ENTRY],
     );
     const row = result.rows[0] as { count?: number; volume_lots?: number | string } | undefined;
     return {
@@ -295,6 +298,9 @@ export async function evaluateExecutionRiskGate(input: ExecutionRiskGateInput): 
   });
   const rewardRiskRatio = resolveRewardRiskRatio(input, rules);
   const symbol = String(input.symbol ?? '').trim().toUpperCase();
+  if (symbol.startsWith('XAU') || symbol === 'GOLD') {
+    await import('@/lib/gold-pending-order-cleanup').then((m) => m.cleanupGoldPendingOrders()).catch(() => 0);
+  }
   const tradesOpenedTodayForSymbol = symbol
     ? await countTradesOpenedTodayForSymbol(symbol, accountNumber)
     : 0;
