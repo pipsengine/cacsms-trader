@@ -78,7 +78,7 @@ export function evaluateGoldInstitutionalQuality(
   let planScore = 0;
   if (plan) {
     const alignedStages = plan.sequence.filter((s) => s.status === 'aligned' || s.status === 'confirmed').length;
-    planScore = Math.min(18, alignedStages * 4);
+    planScore = Math.min(22, alignedStages * 3);
     if (plan.conflict && !plan.countertrendAllowed && !rangingContext) {
       blockers.push('Institutional HTF/LTF conflict — setup blocked until structure realigns.');
     }

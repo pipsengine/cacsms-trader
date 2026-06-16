@@ -8,6 +8,11 @@ import { isExecutionEnabled } from '@/lib/execution-policy';
 import { parsePositionManagementMetadata } from '@/lib/position-management-state';
 import { syncOpenPositionLiveMetrics } from '@/lib/position-profit-sync';
 import { evaluateGroupBreakeven, groupOpenPositions } from '@/lib/position-group-management';
+import {
+  basketMetadataPatch,
+  evaluateBasketProfitLock,
+  isGoldBasketGroup,
+} from '@/lib/gold-basket-management';
 import { getPositionManagementConfig } from '@/lib/trade-monitor-config';
 import { goldPartialCloseStages, resolveGoldAdaptiveManagementConfig } from '@/lib/gold-adaptive-management';
 import { readGoldRewardRiskPlan } from '@/lib/gold-dynamic-reward-risk';
@@ -160,6 +165,11 @@ function shouldSkipCooldown(position: Awaited<ReturnType<typeof listOpenPosition
   return elapsedSec < (urgent ? config.urgentCooldownSec : config.normalCooldownSec);
 }
 
+function isBasketManagedPosition(position: Awaited<ReturnType<typeof listOpenPositions>>[number]): boolean {
+  const metadata = position.metadata ?? {};
+  return Boolean(metadata.basketManaged || (metadata.batchEntry && Number(metadata.legCount ?? 0) >= 5));
+}
+
 export async function runTradeMonitorTick(now = Date.now(), options?: { force?: boolean }): Promise<{
   evaluated: number;
   actions: number;
@@ -178,10 +188,103 @@ export async function runTradeMonitorTick(now = Date.now(), options?: { force?: 
 
   const sync = await syncOpenPositionLiveMetrics();
   const positions = await listOpenPositions({ limit: 100 });
+  const basketManagedTickets = new Set(
+    positions.filter((position) => isBasketManagedPosition(position)).map((position) => position.ticket),
+  );
   let actions = 0;
   let dispatched = 0;
 
   for (const group of groupOpenPositions(positions)) {
+    if (!isGoldBasketGroup(group)) continue;
+
+    const basketDecision = evaluateBasketProfitLock(group);
+    const basketPatch = basketMetadataPatch({
+      basketId: group.setupGroupId,
+      peakProfitUsd: basketDecision.peakProfitUsd,
+      lockedProfitUsd: basketDecision.lockedProfitUsd,
+      tierLabel: basketDecision.tierLabel,
+    });
+
+    if (basketDecision.action === 'close_all') {
+      for (const position of group.positions) {
+        if (shouldSkipCooldown(position, true)) continue;
+        actions += 1;
+        const ok = await dispatchManagementCommand({
+          terminalId: position.terminalId,
+          type: 'close_order',
+          ticket: position.ticket,
+          symbol: group.symbol,
+          payload: { reason: basketDecision.reason },
+          reason: basketDecision.reason,
+        });
+        if (ok) {
+          dispatched += 1;
+          await updatePositionEvaluation({
+            id: position.id,
+            currentPrice: position.currentPrice,
+            profitLoss: position.profitLoss,
+            lastAction: 'basket_profit_lock_close',
+            lastActionReason: basketDecision.reason,
+            metadata: basketPatch,
+          });
+        }
+      }
+      continue;
+    }
+
+    if (basketDecision.action === 'update_lock' || basketDecision.lockedProfitUsd > 0) {
+      for (const position of group.positions) {
+        await updatePositionEvaluation({
+          id: position.id,
+          currentPrice: position.currentPrice,
+          profitLoss: position.profitLoss,
+          lastAction: basketDecision.action === 'update_lock' ? 'basket_profit_lock_update' : 'basket_hold',
+          lastActionReason: basketDecision.reason,
+          metadata: basketPatch,
+        });
+      }
+    }
+
+    const groupDecision = evaluateGroupBreakeven(group);
+    if (groupDecision.shouldApply) {
+      for (const position of group.positions) {
+        const management = parsePositionManagementMetadata(position.metadata);
+        if (management.breakEvenApplied || Boolean(position.metadata?.groupBreakEvenApplied)) continue;
+        if (shouldSkipCooldown(position, true)) continue;
+
+        actions += 1;
+        const ok = await dispatchManagementCommand({
+          terminalId: position.terminalId,
+          type: 'move_to_breakeven',
+          ticket: position.ticket,
+          symbol: group.symbol,
+          payload: { bufferPoints: groupDecision.bufferPoints },
+          reason: groupDecision.reason,
+        });
+        if (ok) {
+          dispatched += 1;
+          await updatePositionEvaluation({
+            id: position.id,
+            currentPrice: position.currentPrice,
+            profitLoss: position.profitLoss,
+            lastAction: 'move_to_break_even',
+            lastActionReason: groupDecision.reason,
+            metadata: {
+              ...basketPatch,
+              groupBreakEvenRequested: true,
+              groupBreakEvenApplied: true,
+              groupProfitUsd: group.totalProfitLoss,
+              groupRMultiple: group.aggregateRMultiple,
+              lastActionAt: new Date().toISOString(),
+            },
+          });
+        }
+      }
+    }
+  }
+
+  for (const group of groupOpenPositions(positions)) {
+    if (isGoldBasketGroup(group)) continue;
     const groupDecision = evaluateGroupBreakeven(group);
     if (!groupDecision.shouldApply) continue;
 
@@ -219,6 +322,17 @@ export async function runTradeMonitorTick(now = Date.now(), options?: { force?: 
   }
 
   for (const position of positions) {
+    if (basketManagedTickets.has(position.ticket)) {
+      await updatePositionEvaluation({
+        id: position.id,
+        currentPrice: position.currentPrice,
+        profitLoss: position.profitLoss,
+        lastAction: 'basket_managed_hold',
+        lastActionReason: 'Basket-level management active — individual leg actions suppressed.',
+      });
+      continue;
+    }
+
     const snapshot = buildEnrichedSnapshot(position);
     const config = resolveGoldAdaptiveManagementConfig(getPositionManagementConfig(), {
       symbol: snapshot.symbol,

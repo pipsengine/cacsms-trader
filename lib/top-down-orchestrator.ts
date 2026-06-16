@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 
 import { AUTONOMY_TIMEFRAME_SEQUENCE } from './autonomous-pipeline';
+import { resolveCaptureTimeframeSequence } from './gold-top-down-timeframes';
 import { enforceGoldPipelineSymbol } from './gold-trading-engine';
 import { captureChartOnTerminal, openChartOnTerminal, setChartTimeframe } from './mt5-chart-control';
 import { queryPostgres } from './postgres';
@@ -94,8 +95,8 @@ export async function startTopDownSession(input: {
     await openChartOnTerminal(input.terminalId, symbol, sessionId);
     await logPipelineEvent(sessionId, 'chart-navigation', 'command.open_chart', `Opened chart for ${symbol}.`, { symbol });
 
-    for (let index = 0; index < AUTONOMY_TIMEFRAME_SEQUENCE.length; index += 1) {
-      const timeframe = AUTONOMY_TIMEFRAME_SEQUENCE[index];
+    for (let index = 0; index < resolveCaptureTimeframeSequence(symbol).length; index += 1) {
+      const timeframe = resolveCaptureTimeframeSequence(symbol)[index];
       await updateSession(sessionId, {
         currentStage: 'top-down-capture',
         currentTimeframe: timeframe,
@@ -215,12 +216,14 @@ export async function updateTimeframeCaptureState(
 
 export async function finalizeTopDownCaptureStage(sessionId: string) {
   await ensurePipelineSchema();
-  const current = await queryPostgres('SELECT timeframe_capture_json, stage_status_json FROM autonomous_pipeline_sessions WHERE id = $1', [sessionId]);
+  const current = await queryPostgres('SELECT symbol, timeframe_capture_json, stage_status_json FROM autonomous_pipeline_sessions WHERE id = $1', [sessionId]);
   const row = current.rows[0];
   if (!row) return;
 
+  const symbol = String(row.symbol ?? 'XAUUSD');
   const captureMap = objectValue(row.timeframe_capture_json);
-  const allStored = AUTONOMY_TIMEFRAME_SEQUENCE.every((timeframe) => captureMap[timeframe] === 'stored');
+  const captureSequence = resolveCaptureTimeframeSequence(symbol);
+  const allStored = captureSequence.every((timeframe) => captureMap[timeframe] === 'stored');
   if (!allStored) return;
 
   const stageStatus = objectValue(row.stage_status_json);
@@ -228,7 +231,7 @@ export async function finalizeTopDownCaptureStage(sessionId: string) {
 
   await updateSessionStage(sessionId, 'top-down-capture', 'completed', 100);
   await logPipelineEvent(sessionId, 'top-down-capture', 'capture.completed', 'All top-down timeframe captures stored.', {
-    timeframes: AUTONOMY_TIMEFRAME_SEQUENCE,
+    timeframes: [...captureSequence],
   });
 }
 

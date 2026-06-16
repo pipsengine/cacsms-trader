@@ -141,7 +141,16 @@ export interface AutonomousDecisionOutput {
   strategyBookConsensus?: string | null;
   institutionalPlan?: {
     sequence: Array<{
-      stage: 'W/D bias' | 'H4 structure' | 'H1 setup' | 'M15 trigger' | 'execution confirmation';
+      stage:
+        | 'W/D bias'
+        | 'D bias'
+        | 'H4 structure'
+        | 'H1 setup'
+        | 'M30 confirmation'
+        | 'M15 trigger'
+        | 'M5 precision'
+        | 'M1 scalp'
+        | 'execution confirmation';
       timeframe: string;
       bias: string;
       status: 'aligned' | 'conflict' | 'missing' | 'confirmed' | 'pending';

@@ -1,4 +1,4 @@
-import { AUTONOMY_TIMEFRAME_SEQUENCE } from './autonomous-pipeline';
+import { resolveCaptureTimeframeSequence } from './gold-top-down-timeframes';
 import { resolveConnectedTerminalId } from './autonomy-execution-adapter';
 import { getTopDownCaptureSymbols } from './focus-symbols';
 import { enforceGoldPipelineSymbol, isGoldOnlyTradingEngine } from './gold-trading-engine';
@@ -15,6 +15,7 @@ function captureCoverageMaxAgeHours(): number {
 
 async function hasFreshCaptureCoverage(symbol: string): Promise<boolean> {
   const maxAgeHours = captureCoverageMaxAgeHours();
+  const requiredFrames = resolveCaptureTimeframeSequence(symbol).length;
   const result = await queryPostgres(
     `SELECT COUNT(DISTINCT upper(timeframe))::int AS count
      FROM chart_captures
@@ -22,7 +23,7 @@ async function hasFreshCaptureCoverage(symbol: string): Promise<boolean> {
        AND captured_at > now() - ($2::text || ' hours')::interval`,
     [symbol.toUpperCase(), String(maxAgeHours)],
   );
-  return Number(result.rows[0]?.count ?? 0) >= AUTONOMY_TIMEFRAME_SEQUENCE.length;
+  return Number(result.rows[0]?.count ?? 0) >= requiredFrames;
 }
 
 function navigationSessionActive(session: Record<string, unknown> | null): boolean {

@@ -212,10 +212,13 @@ function buildInstitutionalPlan(input: {
   );
   return {
     sequence: [
-      stage('W/D bias', wdBias === 'neutral' ? 'D' : 'W', htfBias, 'Weekly/daily directional bias inferred from latest visual fusion.'),
-      stage('H4 structure', 'H4', htfBias, 'H4 structure must support the higher-timeframe story.'),
-      stage('H1 setup', 'H1', ltfBias, 'H1 setup waits for structure and liquidity alignment.'),
-      stage('M15 trigger', 'M15', ltfBias, 'M15 trigger is the execution timeframe confirmation.'),
+      stage('D bias', 'D', htfBias, 'Daily trend, structure, and liquidity zones set directional bias.'),
+      stage('H4 structure', 'H4', htfBias, 'H4 market structure and liquidity must align with HTF bias.'),
+      stage('H1 setup', 'H1', ltfBias, 'H1 setup formation and institutional confirmation.'),
+      stage('M30 confirmation', 'M30', ltfBias, 'M30 intermediate confirmation before execution.'),
+      stage('M15 trigger', 'M15', ltfBias, 'M15 execution trigger — primary entry timeframe.'),
+      stage('M5 precision', 'M5', ltfBias, 'M5 precision entry and micro-structure alignment.'),
+      stage('M1 scalp', 'M1', ltfBias, 'M1 scalping trigger for rapid Gold extraction.'),
       {
         stage: 'execution confirmation',
         timeframe: 'execution',

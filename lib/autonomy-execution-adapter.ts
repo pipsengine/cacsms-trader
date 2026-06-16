@@ -24,7 +24,8 @@ import { evaluateGoldInstitutionalQuality } from '@/lib/gold-institutional-quali
 import { evaluateGoldPositionScaling } from '@/lib/gold-position-scaling';
 import { evaluateGoldExecutionRewardRisk } from '@/lib/gold-trade-context';
 import { buildBatchLegVolumes, goldLegLotsPerPosition, totalBatchExposureLots } from '@/lib/gold-batch-entry';
-import { isGoldSymbol, goldBatchEntryEnabled, goldEntryLegCount } from '@/lib/gold-trading-engine';
+import { evaluateGoldMandatoryTopDown } from '@/lib/gold-top-down-gate';
+import { isGoldSymbol, goldBatchEntryEnabled, goldEntryLegCount, resolveGoldEntryLegCount } from '@/lib/gold-trading-engine';
 import { evaluateStrategyGovernance, resolveStrategyIdFromDecision } from '@/lib/strategy-governance';
 import { logAutonomyDirectionAudit } from '@/lib/autonomy-direction-monitor';
 import { isRetracementEntryEnabled, planAutonomousRetracementEntry } from '@/lib/autonomous-entry-planner';
@@ -232,6 +233,8 @@ export async function evaluateAutonomyExecutionChecklist(input: {
       blockers.push(...goldQuality.blockers);
       const institutional = evaluateGoldInstitutionalQuality(input.decision);
       blockers.push(...institutional.blockers);
+      const topDown = await evaluateGoldMandatoryTopDown(input.decision);
+      blockers.push(...topDown.blockers);
       const goldStack = await evaluateGoldPositionScaling({
         decision: input.decision,
         terminalId,
@@ -385,6 +388,7 @@ function buildExecutionPayload(input: {
   leg: string;
   entryPlan?: Record<string, unknown> | null;
   setupGroupId?: string;
+  basketId?: string;
   legIndex?: number;
   legCount?: number;
   batchEntry?: boolean;
@@ -398,9 +402,11 @@ function buildExecutionPayload(input: {
     decisionLogId: input.sourceDecision.decisionLogId,
     intentId: input.sourceDecision.decisionLogId,
     setupGroupId: input.setupGroupId ?? input.sourceDecision.decisionLogId,
+    basketId: input.basketId ?? input.setupGroupId ?? input.sourceDecision.decisionLogId,
     legIndex: input.legIndex ?? 1,
     legCount: input.legCount ?? 1,
     batchEntry: Boolean(input.batchEntry),
+    basketManaged: Boolean(input.batchEntry && (input.legCount ?? 1) >= 5),
     symbol: input.executableDecision.symbol,
     side: input.side,
     orderType: input.orderType,
@@ -658,7 +664,11 @@ export async function dispatchAutonomyDecision(input: {
   const useRetracementEntry = !useBatchEntry && Boolean(entryPlan && isRetracementEntryEnabled());
   const split = splitHybridLots(volumeLots, entryPlan?.marketFraction ?? 0);
   const setupGroupId = input.decisionLogId;
-  const batchLegCount = useBatchEntry ? goldEntryLegCount() : 1;
+  const basketId = input.decisionLogId;
+  const institutionalScore = evaluateGoldInstitutionalQuality(executableDecision).score;
+  const batchLegCount = useBatchEntry
+    ? resolveGoldEntryLegCount({ qualityScore: institutionalScore, confidenceScore: executableDecision.confidenceScore })
+    : 1;
   const batchLegLots = useBatchEntry ? buildBatchLegVolumes(volumeLots, batchLegCount) : [volumeLots];
   const batchTotalLots = useBatchEntry ? totalBatchExposureLots(batchLegLots) : volumeLots;
   const commandId = `autonomy-${input.decisionLogId.slice(0, 8)}-${randomUUID()}`;
@@ -738,6 +748,7 @@ export async function dispatchAutonomyDecision(input: {
             comment: `Cacsms autonomy ${side} batch leg ${index + 1}/${batchLegLots.length} ${executableDecision.symbol}`,
             leg: `batch_leg_${index + 1}`,
             setupGroupId,
+            basketId,
             legIndex: index + 1,
             legCount: batchLegCount,
             batchEntry: true,

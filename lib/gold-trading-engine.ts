@@ -72,7 +72,31 @@ export function goldIntelligentScalingEnabled(): boolean {
 
 /** Max concurrent XAUUSD positions (scaling cap). */
 export function goldMaxConcurrentPositions(): number {
-  return Math.max(1, Math.min(10, Math.round(envNumber('CACSMS_GOLD_MAX_CONCURRENT_POSITIONS', 5))));
+  return Math.max(goldMinEntryLegCount(), Math.min(10, Math.round(envNumber('CACSMS_GOLD_MAX_CONCURRENT_POSITIONS', 10))));
+}
+
+/** Minimum basket legs per Gold signal. */
+export function goldMinEntryLegCount(): number {
+  return Math.max(1, Math.min(10, Math.round(envNumber('CACSMS_GOLD_MIN_ENTRY_LEGS', 5))));
+}
+
+/** Maximum basket legs when conditions are strong. */
+export function goldMaxEntryLegCount(): number {
+  return Math.max(
+    goldMinEntryLegCount(),
+    Math.min(goldMaxConcurrentPositions(), Math.round(envNumber('CACSMS_GOLD_MAX_ENTRY_LEGS', 10))),
+  );
+}
+
+/** Resolve leg count (5–10) from institutional quality / confidence. */
+export function resolveGoldEntryLegCount(input?: { qualityScore?: number; confidenceScore?: number }): number {
+  const min = goldMinEntryLegCount();
+  const max = goldMaxEntryLegCount();
+  const score = Math.max(input?.qualityScore ?? 0, input?.confidenceScore ?? 0);
+  if (score >= 88) return max;
+  if (score >= 80) return Math.min(max, Math.max(min, max - 1));
+  if (score >= 72) return Math.min(max, Math.max(min, Math.ceil((min + max) / 2)));
+  return min;
 }
 
 /** Max new Gold entries per maintenance cycle. */
@@ -135,9 +159,10 @@ export function goldMaxSetupExposure(): number {
 }
 
 /** Parallel market legs opened together on each new Gold entry signal. */
-export function goldEntryLegCount(): number {
-  const configured = Math.round(envNumber('CACSMS_GOLD_ENTRY_LEGS', 5));
-  return Math.max(1, Math.min(goldMaxConcurrentPositions(), configured));
+export function goldEntryLegCount(input?: { qualityScore?: number; confidenceScore?: number }): number {
+  if (input) return resolveGoldEntryLegCount(input);
+  const configured = Math.round(envNumber('CACSMS_GOLD_ENTRY_LEGS', goldMinEntryLegCount()));
+  return Math.max(goldMinEntryLegCount(), Math.min(goldMaxEntryLegCount(), configured));
 }
 
 /** When true, each signal dispatches `goldEntryLegCount()` market legs in one batch. */
@@ -183,6 +208,9 @@ export interface GoldEngineStatus {
   serialTrading: boolean;
   intelligentScaling: boolean;
   batchEntryEnabled: boolean;
+  basketManagementEnabled: boolean;
+  minEntryLegCount: number;
+  maxEntryLegCount: number;
   entryLegCount: number;
   minInstitutionalQuality: number;
   maxSetupExposure: number;
@@ -194,9 +222,12 @@ export interface GoldEngineStatus {
   targetRewardRisk: number;
   institutionalTargetRewardRisk: number;
   maxTargetRewardRisk: number;
+  topDownCaptureTimeframes: readonly string[];
   preferredStyles: string[];
   sessions24h: boolean;
 }
+
+import { GOLD_TOP_DOWN_CAPTURE_SEQUENCE } from '@/lib/gold-top-down-timeframes';
 
 export function getGoldEngineStatus(): GoldEngineStatus {
   return {
@@ -205,6 +236,9 @@ export function getGoldEngineStatus(): GoldEngineStatus {
     serialTrading: goldSerialTradingEnabled(),
     intelligentScaling: goldIntelligentScalingEnabled(),
     batchEntryEnabled: goldBatchEntryEnabled(),
+    basketManagementEnabled: isGoldOnlyTradingEngine() && goldBatchEntryEnabled(),
+    minEntryLegCount: goldMinEntryLegCount(),
+    maxEntryLegCount: goldMaxEntryLegCount(),
     entryLegCount: goldEntryLegCount(),
     minInstitutionalQuality: goldMinInstitutionalQuality(),
     maxSetupExposure: goldMaxSetupExposure(),
@@ -216,6 +250,7 @@ export function getGoldEngineStatus(): GoldEngineStatus {
     targetRewardRisk: goldTargetRewardRisk(),
     institutionalTargetRewardRisk: goldInstitutionalTargetRewardRisk(),
     maxTargetRewardRisk: goldMaxTargetRewardRisk(),
+    topDownCaptureTimeframes: GOLD_TOP_DOWN_CAPTURE_SEQUENCE,
     preferredStyles: goldPreferredStyles(),
     sessions24h: envBool('CACSMS_24H_TRADING_ENABLED', true),
   };

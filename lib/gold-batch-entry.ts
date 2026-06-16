@@ -62,15 +62,18 @@ export function buildBatchLegVolumes(totalLots: number, legCount = goldEntryLegC
 
 export function buildBatchLegMetadata(input: {
   setupGroupId: string;
+  basketId: string;
   legIndex: number;
   legCount: number;
   batchEntry: boolean;
 }): Record<string, unknown> {
   return {
     setupGroupId: input.setupGroupId,
+    basketId: input.basketId,
     legIndex: input.legIndex,
     legCount: input.legCount,
     batchEntry: input.batchEntry,
+    basketManaged: input.batchEntry && input.legCount >= 5,
   };
 }
 
