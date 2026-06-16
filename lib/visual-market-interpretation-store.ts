@@ -19,7 +19,7 @@ import { listCaptures, publishVisualIntelligenceEvent } from './visual-intellige
 
 type Row = Record<string, unknown>;
 
-const fixedTimeframes = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const fixedTimeframes = ['W', 'D', 'H4', 'H1', 'M15', 'M5', 'M1'] as const;
 
 export const MARKET_INTERPRETATION_TIMEFRAMES = fixedTimeframes;
 export type MarketInterpretationTimeframe = (typeof fixedTimeframes)[number];
@@ -173,6 +173,8 @@ export async function analyzeVisualMarketInterpretation(input: { symbol: string;
       timeframeStates: collected.timeframeStates,
       previousDecision: previous?.finalDecision ?? null,
       accountClass: account?.accountClass ?? 'demo',
+      ltfScalpMode: collected.ltfScalpMode,
+      mtfScalpOnly: collected.mtfScalpOnly,
     });
     const stored = await persistInterpretation(jobId, symbol, timeframe, fused, previous, collected.raw);
     await updateJob(jobId, 'completed', 'decision.ready', { interpretationId: stored.id, finalDecision: stored.finalDecision });
@@ -280,7 +282,13 @@ export async function getMarketInterpretationReadiness(symbol: string): Promise<
   };
 }
 
-async function collectOutputs(symbol: string, timeframe: string): Promise<{ signals: FusionSignal[]; timeframeStates: VisualMarketInterpretationResult['timeframeStates']; raw: Record<string, unknown> }> {
+async function collectOutputs(symbol: string, timeframe: string): Promise<{
+  signals: FusionSignal[];
+  timeframeStates: VisualMarketInterpretationResult['timeframeStates'];
+  raw: Record<string, unknown>;
+  ltfScalpMode: boolean;
+  mtfScalpOnly: boolean;
+}> {
   const [mtf, ai, anomaly, segmentation, comparison] = await Promise.all([
     safe(() => getSymbolMultiTimeframe(symbol)),
     safe(() => getLatestAiVisualInterpretation(symbol, timeframe)),
@@ -302,6 +310,8 @@ async function collectOutputs(symbol: string, timeframe: string): Promise<{ sign
   ]) : [null, null, null, null, null, null];
   const patternAction = textValue(read(patterns, ['summary', 'recommendedAction']) ?? read(patterns, ['summary', 'dominantPattern']));
   const patternNarrative = textValue(read(patterns, ['summary', 'explanation']) ?? read(patterns, ['summary', 'dominantPattern']));
+  const mtfScalpOnly = Boolean(mtf?.decision.scalpOnly);
+  const timeframeStates = await buildTimeframeStates(symbol, mtf);
 
   return {
     signals: [
@@ -315,18 +325,60 @@ async function collectOutputs(symbol: string, timeframe: string): Promise<{ sign
       signal('Pattern context', marketInterpretationWeights.patternContext, biasFromText(patternAction), score01(read(patterns, ['summary', 'confidence'])), Boolean(read(patterns, ['summary', 'dominantPattern'])), patternNarrative),
       signal('Segmentation/market phase', marketInterpretationWeights.segmentationMarketPhase, biasFromText(segmentation?.segments[0]?.segmentType), score01(segmentation?.segments[0]?.confidenceScore), Boolean(segmentation?.segments.length), segmentation?.explanation),
     ],
-    timeframeStates: fixedTimeframes.map((item) => {
-      const snapshot = (mtf?.snapshots ?? []).find((candidate) => candidate.timeframe === item);
-      return {
-        timeframe: item,
-        bias: biasFromText(snapshot?.bias),
-        controlScore: score01(snapshot?.aiConfidenceScore) * 100,
-        confirmsEntry: ['BUY', 'SELL'].includes(snapshot?.decisionState ?? ''),
-        narrative: snapshot ? `${snapshot.marketStructure}; ${snapshot.liquidityStatus}; ${snapshot.orderBlockStatus}` : `${item} control state is waiting for visual-analysis output.`,
-      };
-    }),
+    timeframeStates,
+    ltfScalpMode: mtfScalpOnly || timeframeStates.some((state) => ['H4', 'H1'].includes(state.timeframe) && (state.bias === 'neutral' || state.bias === 'mixed' || /range|ranging|consolidat|compress|sideways/i.test(state.narrative))),
+    mtfScalpOnly,
     raw: { mtf, ai, anomaly, segmentation, comparison, structure, liquidity, orderBlocks, supportResistance, candles, patterns },
   };
+}
+
+async function buildTimeframeStates(
+  symbol: string,
+  mtf: Awaited<ReturnType<typeof getSymbolMultiTimeframe>> | null,
+): Promise<VisualMarketInterpretationResult['timeframeStates']> {
+  const states: VisualMarketInterpretationResult['timeframeStates'] = [];
+  for (const item of fixedTimeframes) {
+    const snapshot = (mtf?.snapshots ?? []).find((candidate) => candidate.timeframe === item);
+    if (snapshot) {
+      states.push({
+        timeframe: item,
+        bias: biasFromText(snapshot.bias),
+        controlScore: score01(snapshot.aiConfidenceScore) * 100,
+        confirmsEntry: ['BUY', 'SELL'].includes(snapshot.decisionState ?? ''),
+        narrative: `${snapshot.marketStructure}; ${snapshot.liquidityStatus}; ${snapshot.orderBlockStatus}`,
+      });
+      continue;
+    }
+
+    if (item === 'M5' || item === 'M1') {
+      const captureId = await resolveLatestCaptureId(symbol, item).catch(() => null);
+      if (captureId) {
+        const [structure, candles] = await Promise.all([
+          safe(() => getStructureAnalysis(captureId)),
+          safe(() => getCandleAnalysis(captureId)),
+        ]);
+        const action = String(structure?.output.tradeDecision ?? candles?.summary.recommendedDecision ?? '');
+        const bias = biasFromText(action || structure?.output.institutionalBias || candles?.summary.dominantDirection);
+        states.push({
+          timeframe: item,
+          bias,
+          controlScore: score01(structure?.output.confidenceScore ?? candles?.summary.confidence) * 100,
+          confirmsEntry: ['BUY', 'SELL'].includes(action.toUpperCase()),
+          narrative: String(structure?.output.reasoningText ?? candles?.summary.explanation ?? `${item} micro-structure from latest capture.`),
+        });
+        continue;
+      }
+    }
+
+    states.push({
+      timeframe: item,
+      bias: 'neutral',
+      controlScore: 0,
+      confirmsEntry: false,
+      narrative: `${item} control state is waiting for visual-analysis output.`,
+    });
+  }
+  return states;
 }
 
 async function persistInterpretation(jobId: string, symbol: string, timeframe: string, fused: VisualMarketInterpretationResult, previous: StoredVisualMarketInterpretation | null, raw: Record<string, unknown>): Promise<StoredVisualMarketInterpretation> {
@@ -506,7 +558,7 @@ function inferRetailTrapWarning(signals: unknown): string {
 function normalizeTimeframe(value?: string): string {
   const timeframe = (value ?? 'H1').toUpperCase();
   if (!fixedTimeframes.includes(timeframe as typeof fixedTimeframes[number])) {
-    throw new Error(`Unsupported timeframe "${timeframe}". Supported timeframes are W, D, H4, H1, M15.`);
+    throw new Error(`Unsupported timeframe "${timeframe}". Supported timeframes are W, D, H4, H1, M15, M5, M1.`);
   }
   return timeframe;
 }

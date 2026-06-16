@@ -41,6 +41,8 @@ export interface StyleFitnessContext {
   macroRiskScore: number;
   mtfAlignmentScore: number;
   mtfConflictCount: number;
+  htfRanging?: boolean;
+  ltfScalpPreferred?: boolean;
 }
 
 export interface StyleFitnessResult {

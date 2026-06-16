@@ -1,4 +1,5 @@
 import { getContinuousRefillDecisionThresholds, getDecisionThresholds } from './autonomy-account-profiles';
+import { detectGoldLtfScalpContext } from './gold-ltf-scalp-mode';
 import { isRangeOrientedContext } from './gold-trade-context';
 import { getTradingStyleProfile } from './trading-styles/registry';
 import { shouldBypassNewsBlackout } from './trading-session-policy';
@@ -198,11 +199,22 @@ function buildInstitutionalPlan(input: {
   const ltfBias = m15Bias === 'neutral' || m15Bias === 'mixed' ? h1Bias : m15Bias;
   const conflict = isDirectional(htfBias) && isDirectional(ltfBias) && htfBias !== ltfBias;
   const leader = input.strategyBook?.bestStrategy;
-  const rangingContextActive = isRangeOrientedContext({
+  const scalpContext = detectGoldLtfScalpContext({
+    timeframeStates: states,
+    marketPhase: String(input.visual.marketPhase ?? ''),
+    regime: input.regime,
     selectedStrategyId: input.selectedStrategyId,
     setupType: input.setupType,
     regimeClassification: { primary: input.regime, tags: [input.regime], confidence: 0, source: 'plan' },
-  }) || !isDirectional(htfBias);
+    mtfFinalBias: String(input.visual.finalMarketBias ?? input.finalBias),
+  });
+  const rangingContextActive = scalpContext.active
+    || isRangeOrientedContext({
+      selectedStrategyId: input.selectedStrategyId,
+      setupType: input.setupType,
+      regimeClassification: { primary: input.regime, tags: [input.regime], confidence: 0, source: 'plan' },
+    })
+    || !isDirectional(htfBias);
   const countertrendAllowed = Boolean(
     conflict
     && leader
@@ -240,7 +252,9 @@ function buildInstitutionalPlan(input: {
           : 'HTF/LTF conflict accepted only because the selected strategy has promoted countertrend evidence.'
         : 'No trade: HTF and LTF disagree and no tested countertrend strategy qualifies.'
       : rangingContextActive
-        ? 'Non-directional HTF or range regime — directional side match is not required.'
+        ? scalpContext.active
+          ? `HTF ranging (${scalpContext.htfTimeframesRanging.join('/') || 'regime'}) — ${scalpContext.ltfEntryTimeframe} scalp execution path active.`
+          : 'Non-directional HTF or range regime — directional side match is not required.'
         : 'Top-down path is aligned or non-directional; normal risk gates apply.',
   };
 }

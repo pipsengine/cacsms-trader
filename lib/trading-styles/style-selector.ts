@@ -213,7 +213,15 @@ function styleFitness(styleId: TradingStyleId, context: StyleFitnessContext): St
 
     if (context.volatilityScore < 35) score -= 12;
 
-    reasons.push('Scalp model favors liquid session volatility and tight spreads.');
+    if (context.ltfScalpPreferred || context.htfRanging) score += 18;
+
+    if (context.mtfConflictCount > 0 && (context.ltfScalpPreferred || context.htfRanging)) score += 8;
+
+    reasons.push(context.ltfScalpPreferred || context.htfRanging
+
+      ? 'Scalp model prioritized — HTF is ranging; execute on M15/M5 micro-structure.'
+
+      : 'Scalp model favors liquid session volatility and tight spreads.');
 
   }
 
@@ -225,7 +233,13 @@ function styleFitness(styleId: TradingStyleId, context: StyleFitnessContext): St
 
     if (context.mtfAlignmentScore >= 60) score += 10;
 
-    reasons.push('Intraday model uses M15 trigger with H1/H4 institutional alignment.');
+    if (context.ltfScalpPreferred || context.htfRanging) score += 12;
+
+    reasons.push(context.ltfScalpPreferred || context.htfRanging
+
+      ? 'Intraday M15 trigger prioritized while HTF is ranging.'
+
+      : 'Intraday model uses M15 trigger with H1/H4 institutional alignment.');
 
   }
 
@@ -250,6 +264,8 @@ function styleFitness(styleId: TradingStyleId, context: StyleFitnessContext): St
     if (context.mtfAlignmentScore >= 65) score += 12;
 
     if (context.macroRiskScore > 70) score -= 10;
+
+    if (context.htfRanging || context.ltfScalpPreferred) score -= 14;
 
     reasons.push('Swing model requires H4/D structure and controlled macro risk.');
 
@@ -328,6 +344,10 @@ export async function buildStyleFitnessMatrix(symbols: string[]): Promise<StyleF
       mtfAlignmentScore: mtf.alignmentScore,
 
       mtfConflictCount: mtf.conflictCount,
+
+      htfRanging: mtf.htfRanging,
+
+      ltfScalpPreferred: mtf.ltfScalpPreferred,
 
     };
 

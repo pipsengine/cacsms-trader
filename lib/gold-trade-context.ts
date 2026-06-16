@@ -1,4 +1,5 @@
 import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
+import { resolveGoldRewardRiskFloorForDecision } from '@/lib/gold-ltf-scalp-mode';
 import { resolveGoldDynamicRewardRisk } from '@/lib/gold-dynamic-reward-risk';
 import { goldMinRewardRisk, isGoldSymbol } from '@/lib/gold-trading-engine';
 
@@ -127,6 +128,8 @@ export function resolveGoldMinRewardRiskForDecision(
     | 'institutionalPlan'
   >,
 ): number {
-  void decision;
+  if (isGoldSymbol(decision.symbol) && (decision.tradingStyle === 'scalp' || decision.institutionalPlan?.rangingContextActive)) {
+    return resolveGoldRewardRiskFloorForDecision(decision, goldMinRewardRisk());
+  }
   return goldMinRewardRisk();
 }

@@ -1,4 +1,5 @@
 import { getSymbolMultiTimeframe } from '@/lib/multi-timeframe-analysis-store';
+import { detectHtfRangingFromStates } from '@/lib/gold-ltf-scalp-mode';
 
 export interface InstitutionalMtfConfluence {
   symbol: string;
@@ -6,6 +7,8 @@ export interface InstitutionalMtfConfluence {
   conflictCount: number;
   dominantBias: 'bullish' | 'bearish' | 'neutral' | 'mixed';
   tradable: boolean;
+  htfRanging: boolean;
+  ltfScalpPreferred: boolean;
   reasons: string[];
 }
 
@@ -25,6 +28,8 @@ export async function scoreInstitutionalMtfConfluence(symbol: string): Promise<I
       conflictCount: 0,
       dominantBias: 'neutral',
       tradable: true,
+      htfRanging: false,
+      ltfScalpPreferred: false,
       reasons: ['MTF fusion pending — using neutral institutional prior.'],
     };
   }
@@ -32,6 +37,15 @@ export async function scoreInstitutionalMtfConfluence(symbol: string): Promise<I
   const alignments = mtf.alignments ?? [];
   const conflicts = mtf.conflicts ?? [];
   const snapshots = mtf.snapshots ?? [];
+  const { htfRanging, htfTimeframesRanging } = detectHtfRangingFromStates(
+    snapshots.map((row) => ({
+      timeframe: row.timeframe,
+      bias: row.bias,
+      marketStructure: row.marketStructure,
+      trendDirection: row.trendDirection,
+      narrative: `${row.marketStructure}; ${row.liquidityStatus}`,
+    })),
+  );
   const alignmentScore = alignments.length
     ? Math.round(alignments.reduce((sum, row) => sum + Number(row.alignmentScore ?? 0), 0) / alignments.length)
     : Number(mtf.decision?.confidenceScore ?? 50);
@@ -52,6 +66,7 @@ export async function scoreInstitutionalMtfConfluence(symbol: string): Promise<I
     conflictCount > 0 ? `${conflictCount} timeframe conflict(s) detected` : 'No major timeframe conflicts',
     `Dominant institutional bias: ${dominantBias}`,
   ];
+  if (htfRanging) reasons.push(`HTF ranging on ${htfTimeframesRanging.join(', ') || 'H4/H1'} — prefer M15/M5 scalp styles.`);
 
   return {
     symbol: symbol.toUpperCase(),
@@ -59,6 +74,8 @@ export async function scoreInstitutionalMtfConfluence(symbol: string): Promise<I
     conflictCount,
     dominantBias,
     tradable: alignmentScore >= 40 && conflictCount <= 2,
+    htfRanging,
+    ltfScalpPreferred: htfRanging || dominantBias === 'neutral' || dominantBias === 'mixed' || Boolean(mtf.decision?.scalpOnly),
     reasons,
   };
 }

@@ -294,6 +294,18 @@ function buildDecision(symbol: string, snapshots: TimeframeAnalysisSnapshot[], a
     finalDecision = h4H1M15Bull ? 'BUY' : 'SELL';
     scalpOnly = true;
     lowerConfirmation = 'M15 aligns with H1 and H4 but conflicts with W/D control; short-term scalp only.';
+  } else if ((isHtfRangingSnapshot(h4Snapshot) || isHtfRangingSnapshot(h1Snapshot)) && m15Dir === 'bullish') {
+    finalDecision = 'BUY';
+    scalpOnly = true;
+    lowerConfirmation = 'H4/H1 ranging or non-directional — M15 bullish scalp opportunity inside the range.';
+  } else if ((isHtfRangingSnapshot(h4Snapshot) || isHtfRangingSnapshot(h1Snapshot)) && m15Dir === 'bearish') {
+    finalDecision = 'SELL';
+    scalpOnly = true;
+    lowerConfirmation = 'H4/H1 ranging or non-directional — M15 bearish scalp opportunity inside the range.';
+  } else if (h4Dir === 'neutral' && h1Dir === 'neutral' && (m15Dir === 'bullish' || m15Dir === 'bearish')) {
+    finalDecision = m15Dir === 'bullish' ? 'BUY' : 'SELL';
+    scalpOnly = true;
+    lowerConfirmation = 'H4 and H1 are balanced/ranging — execute tactical M15 scalp only.';
   } else if (conflictSeverity > 0.58) {
     finalDecision = conflictSeverity > 0.75 ? 'AVOID' : 'WAIT';
     lowerConfirmation = 'Timeframe conflict prevents institutional confirmation.';
@@ -382,11 +394,18 @@ function snapshotFor(snapshots: TimeframeAnalysisSnapshot[], timeframe: MtfTimef
 
 function directional(value: string): 'bullish' | 'bearish' | 'neutral' {
   const text = value.toLowerCase();
+  if (text.includes('ranging') || text.includes('range-bound') || text.includes('sideways')) return 'neutral';
   if (/\bbuy[_\s-]?side[_\s-]?(sweep|liquidity|stop|pool)/.test(text)) return 'bearish';
   if (/\bsell[_\s-]?side[_\s-]?(sweep|liquidity|stop|pool)/.test(text)) return 'bullish';
   if (/\b(bull|buy|long|demand|accumulation)\b/.test(text)) return 'bullish';
   if (/\b(bear|sell|short|supply|distribution)\b/.test(text)) return 'bearish';
   return 'neutral';
+}
+
+function isHtfRangingSnapshot(snapshot: TimeframeAnalysisSnapshot): boolean {
+  if (directional(snapshot.bias) === 'neutral') return true;
+  const text = `${snapshot.marketStructure} ${snapshot.trendDirection} ${snapshot.volatilityCondition}`.toLowerCase();
+  return /range|ranging|consolidat|compress|sideways|balance|chop/.test(text);
 }
 
 function sameDirection(a: string | null, b: string | null): boolean {

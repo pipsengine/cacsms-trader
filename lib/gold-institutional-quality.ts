@@ -11,6 +11,7 @@ import {
   goldMinInstitutionalQuality,
   isGoldSymbol,
 } from '@/lib/gold-trading-engine';
+import { isGoldLtfScalpDecision, resolveGoldMinQualityForDecision } from '@/lib/gold-ltf-scalp-mode';
 
 export type GoldInstitutionalQualityResult = {
   ok: boolean;
@@ -58,7 +59,7 @@ export function evaluateGoldInstitutionalQuality(
 
   const blockers: string[] = [];
   const breakdown: Record<string, number> = {};
-  const minRequired = goldMinInstitutionalQuality();
+  const minRequired = resolveGoldMinQualityForDecision(decision, goldMinInstitutionalQuality());
 
   if (decision.decision !== 'BUY' && decision.decision !== 'SELL') {
     return { ok: true, score: 0, minRequired, blockers: [], breakdown, tier: 'reject' };
@@ -140,7 +141,7 @@ export function evaluateGoldInstitutionalQuality(
   const score = Math.min(100, Object.values(breakdown).reduce((sum, value) => sum + value, 0));
 
   if (score < minRequired) {
-    blockers.push(`Gold institutional quality ${score}% below minimum ${minRequired}%.`);
+    blockers.push(`Gold institutional quality ${score}% below minimum ${minRequired}%${isGoldLtfScalpDecision(decision) ? ' (LTF scalp mode)' : ''}.`);
   }
 
   const tier = score >= minRequired + 10 && dynamicPlan.tier === 'institutional'

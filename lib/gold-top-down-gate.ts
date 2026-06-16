@@ -1,4 +1,5 @@
 import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
+import { detectGoldLtfScalpContext } from '@/lib/gold-ltf-scalp-mode';
 import { isNonDirectionalBias } from '@/lib/gold-trade-context';
 import { isGoldSymbol } from '@/lib/gold-trading-engine';
 import {
@@ -92,12 +93,6 @@ export async function evaluateGoldMandatoryTopDown(
   const coverage = await loadCaptureCoverage(decision.symbol);
   const plan = decision.institutionalPlan;
 
-  const requiredTfs = [...GOLD_TOP_DOWN_HTF, ...GOLD_TOP_DOWN_INTERMEDIATE, 'M15'];
-  const missing = requiredTfs.filter((tf) => !coverage[tf]);
-  if (missing.length > 0) {
-    blockers.push(`Mandatory Gold top-down incomplete — missing fresh captures: ${missing.join(', ')}.`);
-  }
-
   if (!plan) {
     blockers.push('Institutional top-down plan missing — trade blocked until MTF analysis completes.');
     return {
@@ -110,6 +105,19 @@ export async function evaluateGoldMandatoryTopDown(
     };
   }
 
+  const scalpContext = detectGoldLtfScalpContext({
+    institutionalPlan: plan,
+    regimeClassification: null,
+  });
+
+  const requiredTfs = scalpContext.active
+    ? [...GOLD_TOP_DOWN_HTF, 'M15', scalpContext.ltfEntryTimeframe === 'M5' ? 'M5' : 'M15']
+    : [...GOLD_TOP_DOWN_HTF, ...GOLD_TOP_DOWN_INTERMEDIATE, 'M15'];
+  const missing = [...new Set(requiredTfs)].filter((tf) => !coverage[tf]);
+  if (missing.length > 0) {
+    blockers.push(`Mandatory Gold top-down incomplete — missing fresh captures: ${missing.join(', ')}.`);
+  }
+
   const htfBias = planStageBias(plan, GOLD_TOP_DOWN_HTF);
   const intermediateBias = planStageBias(plan, GOLD_TOP_DOWN_INTERMEDIATE);
   const executionBias = planStageBias(plan, GOLD_TOP_DOWN_EXECUTION);
@@ -118,6 +126,7 @@ export async function evaluateGoldMandatoryTopDown(
 
   const alignedWithHtf = sideMatchesBias(decision.decision, htfBias)
     || plan.rangingContextActive
+    || scalpContext.active
     || reversalConfirmed;
 
   if (!alignedWithHtf && plan.conflict && !plan.countertrendAllowed) {
@@ -130,7 +139,7 @@ export async function evaluateGoldMandatoryTopDown(
     (stage) => (GOLD_TOP_DOWN_HTF as readonly string[]).includes(String(stage.timeframe ?? '').toUpperCase())
       && stage.status === 'conflict',
   );
-  if (htfConflict && !reversalConfirmed && !plan.rangingContextActive) {
+  if (htfConflict && !reversalConfirmed && !plan.rangingContextActive && !scalpContext.active) {
     blockers.push('HTF structure conflict — D/H4 disagree; wait for alignment or confirmed CHoCH reversal.');
   }
 
@@ -138,12 +147,18 @@ export async function evaluateGoldMandatoryTopDown(
     (stage) => (GOLD_TOP_DOWN_INTERMEDIATE as readonly string[]).includes(String(stage.timeframe ?? '').toUpperCase())
       && (stage.status === 'aligned' || stage.status === 'confirmed'),
   );
-  if (!intermediateReady && !plan.rangingContextActive) {
+  if (!intermediateReady && !plan.rangingContextActive && !scalpContext.active) {
     blockers.push('Intermediate setup (H1/M30) not confirmed — waiting for institutional setup formation.');
   }
 
   const m15Ready = plan.sequence.find((stage) => String(stage.timeframe ?? '').toUpperCase() === 'M15');
-  if (m15Ready && m15Ready.status === 'conflict' && !reversalConfirmed) {
+  const m5Ready = plan.sequence.find((stage) => String(stage.timeframe ?? '').toUpperCase() === 'M5');
+  if (scalpContext.active) {
+    const ltfReady = [m15Ready, m5Ready].some((stage) => stage && (stage.status === 'aligned' || stage.status === 'confirmed' || sideMatchesBias(decision.decision, stage.bias)));
+    if (!ltfReady && !reversalConfirmed) {
+      blockers.push('LTF scalp mode active but neither M15 nor M5 confirms the execution side.');
+    }
+  } else if (m15Ready && m15Ready.status === 'conflict' && !reversalConfirmed) {
     blockers.push('M15 execution trigger conflicts with intermediate structure.');
   }
 
@@ -151,6 +166,7 @@ export async function evaluateGoldMandatoryTopDown(
     !sideMatchesBias(decision.decision, intermediateBias)
     && !sideMatchesBias(decision.decision, executionBias)
     && !plan.rangingContextActive
+    && !scalpContext.active
     && !reversalConfirmed
   ) {
     blockers.push(`Execution timeframes (M15/M5/M1) do not confirm ${decision.decision} side.`);

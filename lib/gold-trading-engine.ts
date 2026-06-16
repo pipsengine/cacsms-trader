@@ -153,6 +153,16 @@ export function goldMinInstitutionalQuality(): number {
   return Math.max(50, Math.round(envNumber('CACSMS_GOLD_MIN_INSTITUTIONAL_QUALITY', 62)));
 }
 
+/** Lower quality floor for confirmed LTF scalps when H1/H4 are ranging. */
+export function goldScalpMinInstitutionalQuality(): number {
+  return Math.max(45, Math.round(envNumber('CACSMS_GOLD_SCALP_MIN_INSTITUTIONAL_QUALITY', 52)));
+}
+
+/** Lower R:R floor for M15/M5 scalps in HTF range (default 1.2). */
+export function goldScalpMinRewardRisk(): number {
+  return Math.max(1.1, envNumber('CACSMS_GOLD_SCALP_MIN_REWARD_RISK', 1.2));
+}
+
 /** Max scale-in legs per setup type before requiring fresh confirmation. */
 export function goldMaxSetupExposure(): number {
   return Math.max(1, Math.min(goldMaxConcurrentPositions(), Math.round(envNumber('CACSMS_GOLD_MAX_SETUP_EXPOSURE', 5))));
@@ -213,6 +223,8 @@ export interface GoldEngineStatus {
   maxEntryLegCount: number;
   entryLegCount: number;
   minInstitutionalQuality: number;
+  scalpMinInstitutionalQuality: number;
+  scalpMinRewardRisk: number;
   maxSetupExposure: number;
   maxConcurrentPositions: number;
   maxEntriesPerCycle: number;
@@ -241,6 +253,8 @@ export function getGoldEngineStatus(): GoldEngineStatus {
     maxEntryLegCount: goldMaxEntryLegCount(),
     entryLegCount: goldEntryLegCount(),
     minInstitutionalQuality: goldMinInstitutionalQuality(),
+    scalpMinInstitutionalQuality: goldScalpMinInstitutionalQuality(),
+    scalpMinRewardRisk: goldScalpMinRewardRisk(),
     maxSetupExposure: goldMaxSetupExposure(),
     maxConcurrentPositions: goldMaxConcurrentPositions(),
     maxEntriesPerCycle: goldMaxEntriesPerCycle(),

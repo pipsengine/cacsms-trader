@@ -8,6 +8,7 @@ import {
   isGoldSymbol,
 } from '@/lib/gold-trading-engine';
 import { isNonDirectionalBias, isRangeOrientedContext } from '@/lib/gold-trade-context';
+import { resolveGoldRewardRiskFloorForDecision } from '@/lib/gold-ltf-scalp-mode';
 
 export type GoldRewardRiskTier = 'standard' | 'elevated' | 'institutional';
 
@@ -220,7 +221,7 @@ export function resolveGoldDynamicRewardRisk(
     | 'selectedStrategyId'
   >,
 ): GoldDynamicRewardRiskPlan {
-  const floor = goldMinRewardRisk();
+  const floor = resolveGoldRewardRiskFloorForDecision(decision, goldMinRewardRisk());
   const rangeOriented = isRangeOrientedContext(decision);
   const { score, breakdown } = scoreGoldSetupRewardPotential(decision);
   const { tier, targetR, extendedTargetR } = resolveTierAndTargets(score, rangeOriented);

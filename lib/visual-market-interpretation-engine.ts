@@ -52,6 +52,8 @@ export function fuseVisualMarketInterpretation(input: {
   timeframeStates: VisualMarketInterpretationResult['timeframeStates'];
   previousDecision?: FinalMarketDecision | null;
   accountClass?: TradingAccountClass;
+  ltfScalpMode?: boolean;
+  mtfScalpOnly?: boolean;
 }): VisualMarketInterpretationResult {
   const signals = normalizeSignals(input.signals);
   const timeframeStates = input.timeframeStates.length ? input.timeframeStates : [{
@@ -66,6 +68,9 @@ export function fuseVisualMarketInterpretation(input: {
   const bear = directionalScore(signals, 'bearish');
   const neutral = directionalScore(signals, 'neutral') + directionalScore(signals, 'mixed') * 0.5;
   const finalMarketBias = resolveBias(bull, bear, neutral);
+  const htfRanging = detectVisualHtfRanging(timeframeStates, inferMarketPhase(signals));
+  const ltfScalpMode = input.ltfScalpMode === true || input.mtfScalpOnly === true || htfRanging;
+  const ltfExecutionBias = resolveVisualLtfBias(timeframeStates);
   const htfSignal = signalByName(signals, 'Higher timeframe bias');
   const mtfPullbackConfirm = Boolean(htfSignal?.confirmsEntry);
   const accountClass = input.accountClass ?? 'demo';
@@ -73,7 +78,8 @@ export function fuseVisualMarketInterpretation(input: {
   const thresholds = getDecisionThresholds(accountClass);
   const confidenceBoost = demoMode && mtfPullbackConfirm ? 14 : 0;
   const confidenceScore = Math.round(clamp((Math.max(bull, bear, neutral) / totalWeight(signals)) * 100 + confidenceBoost, 0, 100));
-  const lowerConfirms = timeframeStates.some((state) => ['H1', 'M15'].includes(state.timeframe) && state.confirmsEntry && state.bias === finalMarketBias)
+  const lowerConfirms = timeframeStates.some((state) => ['H1', 'M15', 'M5', 'M1'].includes(state.timeframe) && state.confirmsEntry && ['bullish', 'bearish'].includes(state.bias))
+    || (ltfScalpMode && ltfExecutionBias !== 'neutral')
     || mtfPullbackConfirm;
   const htfClear = ['bullish', 'bearish'].includes(finalMarketBias) && dominant.controlScore >= (demoMode ? 32 : 45);
   const anomalyRisk = signalByName(signals, 'Visual anomalies')?.narrative.toLowerCase().includes('critical')
@@ -81,12 +87,14 @@ export function fuseVisualMarketInterpretation(input: {
   const liquidityThreshold = demoMode ? 0.25 : 0.45;
   const liquidityClear = (signalByName(signals, 'Liquidity condition')?.confidence ?? 0) >= liquidityThreshold
     || (demoMode && mtfPullbackConfirm);
+  const scalpReadinessThreshold = Math.max(24, Math.round(thresholds.visualReadiness * (ltfScalpMode ? 0.82 : 1)));
   const setupReadinessScore = Math.round(clamp(
     confidenceScore * 0.45
-    + (lowerConfirms ? 22 : 4)
+    + (lowerConfirms ? (ltfScalpMode ? 28 : 22) : 4)
     + (liquidityClear ? 14 : 0)
     + (anomalyRisk ? -20 : 8)
-    + (demoMode && mtfPullbackConfirm ? 20 : 0),
+    + (demoMode && mtfPullbackConfirm ? 20 : 0)
+    + (ltfScalpMode && lowerConfirms ? 8 : 0),
     0,
     100,
   ));
@@ -97,7 +105,9 @@ export function fuseVisualMarketInterpretation(input: {
     anomalyRisk,
     liquidityClear,
     setupReadinessScore,
-    readinessThreshold: thresholds.visualReadiness,
+    readinessThreshold: scalpReadinessThreshold,
+    ltfScalpMode,
+    ltfExecutionBias,
   });
   if (demoMode && mtfPullbackConfirm && finalMarketBias === 'bullish' && ['AVOID', 'MONITOR', 'WAIT'].includes(finalDecision)) {
     finalDecision = setupReadinessScore >= thresholds.visualReadiness ? 'BUY' : 'MONITOR';
@@ -107,7 +117,7 @@ export function fuseVisualMarketInterpretation(input: {
   const marketPhase = inferMarketPhase(signals);
   const liquidityObjective = inferLiquidityObjective(signals);
   const institutionalInterpretation = inferInstitutional(signals, finalMarketBias, marketPhase);
-  const entryReadiness = entryReadinessText(finalDecision, lowerConfirms, setupReadinessScore);
+  const entryReadiness = entryReadinessText(finalDecision, lowerConfirms, setupReadinessScore, ltfScalpMode);
   const invalidationCondition = invalidationText(finalDecision, finalMarketBias);
   const riskWarning = riskText(finalDecision, anomalyRisk, liquidityClear, confidenceScore);
   const decisionScores = {
@@ -121,7 +131,7 @@ export function fuseVisualMarketInterpretation(input: {
     { stage: 'Output collection', finding: `Collected ${signals.filter((signal) => signal.confidence > 0).length} visual intelligence signal groups.`, score: confidenceScore },
     { stage: 'Timeframe control', finding: `${dominant.timeframe} is controlling with ${Math.round(dominant.controlScore)} control score.`, score: Math.round(dominant.controlScore) },
     { stage: 'Liquidity and manipulation', finding: `${liquidityObjective} ${anomalyRisk ? 'Anomaly risk is elevated.' : 'No critical anomaly conflict is dominating.'}`, score: Math.round((signalByName(signals, 'Liquidity condition')?.confidence ?? 0) * 100) },
-    { stage: 'Final decision', finding: `${finalDecision} selected from weighted visual fusion.`, score: setupReadinessScore },
+    { stage: 'Final decision', finding: `${finalDecision} selected from weighted visual fusion${ltfScalpMode ? ' (HTF range → LTF scalp mode)' : ''}.`, score: setupReadinessScore },
   ];
 
   return {
@@ -201,13 +211,39 @@ function decide(input: {
   liquidityClear: boolean;
   setupReadinessScore: number;
   readinessThreshold: number;
+  ltfScalpMode?: boolean;
+  ltfExecutionBias?: MarketBias;
 }): FinalMarketDecision {
   if (input.anomalyRisk || !input.liquidityClear) return 'AVOID';
+  if (input.ltfScalpMode && input.lowerConfirms && input.ltfExecutionBias && ['bullish', 'bearish'].includes(input.ltfExecutionBias)) {
+    if (input.setupReadinessScore < input.readinessThreshold) return 'MONITOR';
+    return input.ltfExecutionBias === 'bullish' ? 'BUY' : 'SELL';
+  }
   if (!input.htfClear) return 'MONITOR';
   if (!input.lowerConfirms) return 'WAIT';
   const readinessThreshold = input.readinessThreshold;
   if (input.setupReadinessScore < readinessThreshold) return 'MONITOR';
   return input.finalMarketBias === 'bullish' ? 'BUY' : input.finalMarketBias === 'bearish' ? 'SELL' : 'WAIT';
+}
+
+function detectVisualHtfRanging(
+  timeframeStates: VisualMarketInterpretationResult['timeframeStates'],
+  marketPhase: string,
+): boolean {
+  const htfStates = timeframeStates.filter((state) => ['H4', 'H1'].includes(state.timeframe));
+  const htfRanging = htfStates.some((state) => state.bias === 'neutral' || state.bias === 'mixed' || /range|ranging|consolidat|compress|sideways|balance|chop/i.test(state.narrative));
+  return htfRanging || /consolidation|compression|range|sideways|balanced|mean reversion/i.test(marketPhase.toLowerCase());
+}
+
+function resolveVisualLtfBias(
+  timeframeStates: VisualMarketInterpretationResult['timeframeStates'],
+): MarketBias {
+  for (const timeframe of ['M15', 'M5', 'M1', 'H1']) {
+    const state = timeframeStates.find((item) => item.timeframe === timeframe);
+    if (!state) continue;
+    if (state.bias === 'bullish' || state.bias === 'bearish') return state.bias;
+  }
+  return 'neutral';
 }
 
 function inferMarketPhase(signals: FusionSignal[]) {
@@ -233,9 +269,17 @@ function inferInstitutional(signals: FusionSignal[], bias: MarketBias, phase: st
   return `Institutional activity is not decisive yet. ${ob}`;
 }
 
-function entryReadinessText(decision: FinalMarketDecision, lowerConfirms: boolean, score: number) {
-  if (decision === 'BUY' || decision === 'SELL') return `Entry is ready only if execution confirms risk controls; readiness score ${score}%.`;
-  if (lowerConfirms) return `Lower timeframe confirmation exists, but overall readiness remains ${score}%.`;
+function entryReadinessText(decision: FinalMarketDecision, lowerConfirms: boolean, score: number, ltfScalpMode = false) {
+  if (decision === 'BUY' || decision === 'SELL') {
+    return ltfScalpMode
+      ? `LTF scalp entry ready on M15/M5 with readiness ${score}% — HTF is ranging so execution uses lower-timeframe structure only.`
+      : `Entry is ready only if execution confirms risk controls; readiness score ${score}%.`;
+  }
+  if (lowerConfirms) {
+    return ltfScalpMode
+      ? `Lower timeframe scalp confirmation exists, but overall readiness remains ${score}%.`
+      : `Lower timeframe confirmation exists, but overall readiness remains ${score}%.`;
+  }
   return `Entry is not ready; lower timeframe confirmation is missing and readiness is ${score}%.`;
 }
 
