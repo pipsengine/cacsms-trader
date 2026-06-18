@@ -12,7 +12,8 @@ import {
 } from '@/lib/gold-trading-engine';
 import { validateGoldInstitutionalReentry } from '@/lib/gold-reentry-validator';
 import { resolveGoldLivePrice } from '@/lib/gold-execution-quality';
-import { getOpenPositionExposureForSymbol, listOpenPositions } from '@/lib/execution-open-positions';
+import { getOpenPositionMetrics, syncOpenPositionRegistry } from '@/lib/execution-open-positions';
+import { resolveExecutionAccountContext } from '@/lib/execution-account-context';
 import { countTradesOpenedTodayForSymbol } from '@/lib/execution-risk-limits';
 import { queryPostgres } from '@/lib/postgres';
 
@@ -87,9 +88,21 @@ export async function evaluateGoldPositionScaling(input: {
 
   await import('@/lib/gold-pending-order-cleanup').then((m) => m.cleanupGoldPendingOrders()).catch(() => 0);
 
-  const exposure = await getOpenPositionExposureForSymbol(symbol).catch(() => ({ count: 0, volumeLots: 0 }));
-  const positions = await listOpenPositions({ limit: 50 }).catch(() => []);
+  const account = await resolveExecutionAccountContext(input.terminalId).catch(() => null);
+  const positionFilter = account
+    ? { terminalId: account.terminalId, accountNumber: account.accountNumber }
+    : input.terminalId
+      ? { terminalId: input.terminalId }
+      : undefined;
+  const metrics = await syncOpenPositionRegistry(positionFilter);
+  const positions = metrics.positions;
   const accountOpenCount = positions.length;
+  const exposure = {
+    count: metrics.positions.filter((p) => p.symbol?.toUpperCase() === symbol).length,
+    volumeLots: metrics.positions
+      .filter((p) => p.symbol?.toUpperCase() === symbol)
+      .reduce((sum, p) => sum + Number(p.volumeLots ?? 0), 0),
+  };
   const openCount = serialMode ? accountOpenCount : exposure.count;
   const sameSideCount = positions.filter(
     (p) => p.symbol?.toUpperCase() === symbol && String(p.side ?? '').toUpperCase() === side,
@@ -251,7 +264,11 @@ export async function gateGoldDecisionForOpenPositions(input: {
   const symbol = input.symbol.toUpperCase();
   const side = input.decision;
   const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
-  const positions = await listOpenPositions({ limit: 50 }).catch(() => []);
+  const account = await resolveExecutionAccountContext().catch(() => null);
+  const metrics = await syncOpenPositionRegistry(
+    account ? { terminalId: account.terminalId, accountNumber: account.accountNumber } : undefined,
+  );
+  const positions = metrics.positions;
   const goldPositions = positions.filter((p) => p.symbol?.toUpperCase() === symbol);
   if (goldPositions.length === 0) return null;
 

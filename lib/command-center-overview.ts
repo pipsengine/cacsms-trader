@@ -2,6 +2,8 @@ import { getAutonomousPipelineStatus, type AutonomousPipelineStatus } from './au
 import { getBridgeExecutionMetrics } from './autonomous-pipeline-risk-execution';
 import { getAutonomyStatus } from './autonomy-store';
 import { getExecutionKillSwitchStatus } from './execution-kill-switch';
+import { getTradeProtectionOverview, type TradeProtectionOverview } from './basket-protection-status';
+import { getTradingPeriodPnl, type TradingPeriodPnl } from './trading-period-pnl';
 import { getCommandCenterTick } from './command-center-tick';
 import { getContinuousTradingSessionStatus } from './continuous-trading-session';
 import { getLastInstitutionalMaintenanceSnapshot } from './institutional-position-maintenance';
@@ -66,6 +68,7 @@ export interface CommandCenterOverview {
       dispatchesAttempted: number;
       openCount: number | null;
     } | null;
+    periodPnl: TradingPeriodPnl;
   };
   risk: {
     continuousTradingEnabled: boolean;
@@ -144,6 +147,7 @@ export interface CommandCenterOverview {
     tickSequence: number;
     tickAt: string;
   };
+  tradeProtection: TradeProtectionOverview;
 }
 
 function currenciesFromSymbol(symbol: string): string[] {
@@ -373,6 +377,14 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
   const bridgeOnline = tick.bridge.online || pipeline.bridgeOnline;
   const connectedTerminals = Math.max(tick.bridge.connected, pipeline.connectedTerminals);
 
+  const primaryAccount = tick.trading.terminals.find((terminal) => terminal.status === 'connected')?.accountNumber
+    ?? tick.trading.terminals[0]?.accountNumber
+    ?? null;
+  const periodPnl = await getTradingPeriodPnl({
+    accountNumber: primaryAccount,
+    liveEquity: tick.trading.totalEquity,
+  });
+
   const terminalExecutionEnabled = tick.trading.terminals.some(
     (terminal) => terminal.status === 'connected' && terminal.enableExecution,
   );
@@ -405,7 +417,10 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
     .sort((a, b) => b.time.localeCompare(a.time))
     .slice(0, 12);
 
-  const execution = await getBridgeExecutionMetrics();
+  const [execution, tradeProtection] = await Promise.all([
+    getBridgeExecutionMetrics(),
+    getTradeProtectionOverview(),
+  ]);
 
   if (execution.executedToday > 0 || tick.trading.openPositions > 0) {
     recentActivity.unshift({
@@ -455,6 +470,7 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
         ? 'Institutional refill active — maintains uncorrelated open exposure until daily drawdown limit.'
         : 'Stopped — press Start on the command center to resume autonomous trading.',
       lastMaintenance,
+      periodPnl,
     },
     risk: {
       continuousTradingEnabled: riskSettings.continuousTradingEnabled,
@@ -518,5 +534,6 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
       tickSequence: tick.sequence,
       tickAt: tick.tickAt,
     },
+    tradeProtection,
   };
 }

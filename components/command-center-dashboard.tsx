@@ -14,17 +14,20 @@ import {
   Eye,
   Globe2,
   LayoutDashboard,
+  Lock,
   Menu,
   Network,
   PlayCircle,
   RefreshCw,
   Radio,
+  Shield,
   Square,
   ShieldAlert,
   Target,
   TrendingUp,
   Workflow,
   Zap,
+  MonitorCheck,
 } from 'lucide-react';
 
 import { useContinuousTradingSession } from '@/components/continuous-trading-session-provider';
@@ -201,6 +204,70 @@ type OverviewPayload = {
       dispatchesAttempted: number;
       openCount: number | null;
     } | null;
+    periodPnl: {
+      todayUsd: number;
+      weekUsd: number;
+      monthUsd: number;
+      timezone: string;
+    };
+  };
+  tradeProtection: {
+    monitorEnabled: boolean;
+    monitorTickMs: number;
+    summary: {
+      basketCount: number;
+      totalFloatingUsd: number;
+      highestLockedUsd: number;
+      anyReversal: boolean;
+    };
+    eaLocalBasketLock: boolean;
+    eaBasketProtectionEnabled: boolean;
+    baskets: Array<{
+      basketId: string;
+      symbol: string;
+      side: string;
+      legCount: number;
+      floatingProfitUsd: number;
+      peakProfitUsd: number;
+      lockedProfitUsd: number;
+      activationUsd: number;
+      nextTierTriggerUsd: number | null;
+      nextTierLockUsd: number | null;
+      tierLabel: string | null;
+      givebackToCloseUsd: number;
+      drawdownFromPeakUsd: number;
+      protectionSource: 'ea' | 'server';
+      eaManaged: boolean;
+      closeArmed: boolean;
+      status: 'inactive' | 'armed' | 'locked' | 'reversal' | 'closing';
+      statusLabel: string;
+      statusDetail: string;
+      reversalDetected: boolean;
+      brokerStopLoss: number | null;
+      brokerTakeProfit: number | null;
+      legs: Array<{
+        ticket: string;
+        profitLoss: number;
+        stopLoss: number | null;
+        takeProfit: number | null;
+        breakEvenApplied: boolean;
+        profitLockApplied: boolean;
+        lastLockedSl: number | null;
+      }>;
+    }>;
+    orphanLegs: Array<{
+      ticket: string;
+      symbol: string;
+      side: string;
+      profitLoss: number;
+      trailingPoints: number;
+      breakEvenApplied: boolean;
+      profitLockApplied: boolean;
+      lastLockedSl: number | null;
+      stopLoss: number | null;
+      takeProfit: number | null;
+      lastAction: string | null;
+    }>;
   };
 };
 
@@ -212,6 +279,57 @@ type DashboardTick = {
   propFirm: OverviewPayload['propFirm'];
   continuousTrading?: OverviewPayload['continuousTrading'];
 };
+
+const BASKET_STATUS_TONE: Record<
+  OverviewPayload['tradeProtection']['baskets'][number]['status'],
+  DashboardTone
+> = {
+  inactive: 'slate',
+  armed: 'amber',
+  locked: 'emerald',
+  reversal: 'rose',
+  closing: 'rose',
+};
+
+function formatUsd(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—';
+  return `$${value.toFixed(2)}`;
+}
+
+function formatPrice(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value <= 0) return '—';
+  return value.toFixed(2);
+}
+
+function floatingTone(value: number): DashboardTone {
+  if (value >= 20) return 'emerald';
+  if (value > 0.5) return 'cyan';
+  if (value <= -0.5) return 'rose';
+  return 'amber';
+}
+
+function protectionTone(overview: OverviewPayload['tradeProtection']): DashboardTone {
+  if (overview.summary.anyReversal) return 'rose';
+  if (overview.summary.highestLockedUsd > 0) return 'emerald';
+  if (overview.eaBasketProtectionEnabled) return 'cyan';
+  return 'slate';
+}
+
+function closeConditionTone(
+  basket: OverviewPayload['tradeProtection']['baskets'][number],
+): DashboardTone {
+  if (basket.closeArmed || basket.status === 'reversal' || basket.status === 'closing') return 'rose';
+  if (basket.lockedProfitUsd > 0 && basket.givebackToCloseUsd <= 5) return 'amber';
+  if (basket.lockedProfitUsd > 0) return 'emerald';
+  return 'slate';
+}
+
+function lockTierTone(lockedUsd: number): DashboardTone {
+  if (lockedUsd >= 80) return 'emerald';
+  if (lockedUsd >= 40) return 'cyan';
+  if (lockedUsd > 0) return 'violet';
+  return 'amber';
+}
 
 const HEALTH_TONE: Record<OverviewPayload['systemHealth']['level'], DashboardTone> = {
   healthy: 'emerald',
@@ -317,13 +435,28 @@ function createBootstrapOverviewFromTick(tick: DashboardTick): OverviewPayload {
     propFirm: tick.propFirm,
     live: { tickSequence: tick.sequence, tickAt: tick.tickAt },
     continuousTrading: {
-      active: false,
-      startedAt: null,
-      stoppedAt: null,
+      active: tick.continuousTrading?.active ?? false,
+      startedAt: tick.continuousTrading?.startedAt ?? null,
+      stoppedAt: tick.continuousTrading?.stoppedAt ?? null,
       minOpenPositions: 1,
       maxEntriesPerCycle: 3,
       targetDescription: 'Loading continuous trading session…',
       lastMaintenance: null,
+      periodPnl: {
+        todayUsd: tick.continuousTrading?.periodPnl?.todayUsd ?? 0,
+        weekUsd: tick.continuousTrading?.periodPnl?.weekUsd ?? 0,
+        monthUsd: tick.continuousTrading?.periodPnl?.monthUsd ?? 0,
+        timezone: 'Africa/Lagos',
+      },
+    },
+    tradeProtection: {
+      monitorEnabled: true,
+      monitorTickMs: 2000,
+      eaLocalBasketLock: true,
+      eaBasketProtectionEnabled: false,
+      summary: { basketCount: 0, totalFloatingUsd: 0, highestLockedUsd: 0, anyReversal: false },
+      baskets: [],
+      orphanLegs: [],
     },
   };
 }
@@ -388,6 +521,12 @@ export function CommandCenterDashboard() {
             active: tick.continuousTrading.active,
             startedAt: tick.continuousTrading.startedAt,
             stoppedAt: tick.continuousTrading.stoppedAt,
+            periodPnl: tick.continuousTrading.periodPnl
+              ? {
+                ...base.continuousTrading.periodPnl,
+                ...tick.continuousTrading.periodPnl,
+              }
+              : base.continuousTrading.periodPnl,
             targetDescription: tick.continuousTrading.active
               ? 'Institutional refill active — maintains uncorrelated open exposure until daily drawdown limit.'
               : 'Stopped — press Start on the command center to resume autonomous trading.',
@@ -651,59 +790,317 @@ export function CommandCenterDashboard() {
                   toneCard(sessionActive ? 'emerald' : 'slate'),
                 )}
               >
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                  <div>
-                    <p className={cn('text-[11px] font-bold uppercase tracking-[0.18em]', toneMuted(sessionActive ? 'emerald' : 'slate'))}>
-                      Institutional continuous trading
-                    </p>
-                    <p className={cn('text-lg font-semibold', toneTitle(sessionActive ? 'emerald' : 'slate'))}>
-                      {sessionActive ? 'Session running' : tradingSession.loaded ? 'Session stopped' : 'Checking session…'}
-                    </p>
-                    <p className={cn('text-sm', toneBody(sessionActive ? 'emerald' : 'slate'))}>
-                      {overview.continuousTrading.targetDescription}
-                    </p>
-                    {sessionMessage ? (
-                      <p className="mt-2 text-xs font-medium text-slate-700">{sessionMessage}</p>
-                    ) : null}
-                    <p className={cn('mt-2 text-xs', toneMuted(sessionActive ? 'emerald' : 'slate'))}>
-                      Min open positions: {overview.continuousTrading.minOpenPositions}
-                      {' · '}
-                      Max entries/cycle: {overview.continuousTrading.maxEntriesPerCycle}
-                      {' · '}
-                      Open now: {overview.trading.openPositions}
-                      {' · '}
-                      Slots left: {overview.risk.remainingOpenPositions}
-                      {' · '}
-                      Daily budget left: ${overview.risk.remainingDailyLossAmount?.toFixed(2) ?? '—'}
-                    </p>
-                    {overview.continuousTrading.lastMaintenance?.at ? (
-                      <p className={cn('mt-1 text-xs', toneMuted(sessionActive ? 'emerald' : 'slate'))}>
-                        Last refill: {overview.continuousTrading.lastMaintenance.dispatchesAttempted} dispatch(es)
-                        {overview.continuousTrading.lastMaintenance.targets.length > 0
-                          ? ` · ${overview.continuousTrading.lastMaintenance.targets.join(', ')}`
-                          : ''}
-                        {' · '}
-                        {formatRelativeTime(overview.continuousTrading.lastMaintenance.at, clockNow)}
+                <div className="flex flex-col gap-4">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div>
+                      <p className={cn('text-[11px] font-bold uppercase tracking-[0.18em]', toneMuted(sessionActive ? 'emerald' : 'slate'))}>
+                        Institutional continuous trading
                       </p>
-                    ) : null}
+                      <p className={cn('text-lg font-semibold', toneTitle(sessionActive ? 'emerald' : 'slate'))}>
+                        {sessionActive ? 'Session running' : tradingSession.loaded ? 'Session stopped' : 'Checking session…'}
+                      </p>
+                      <p className={cn('text-sm', toneBody(sessionActive ? 'emerald' : 'slate'))}>
+                        {overview.continuousTrading.targetDescription}
+                      </p>
+                      {sessionMessage ? (
+                        <p className="mt-2 text-xs font-medium text-slate-700">{sessionMessage}</p>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {sessionActive ? (
+                        <Button variant="destructive" disabled={sessionBusy} onClick={() => void tradingSession.stop()}>
+                          <Square className="mr-2 h-4 w-4" />
+                          {sessionBusy ? 'Stopping…' : 'Stop trading'}
+                        </Button>
+                      ) : (
+                        <Button
+                          className="bg-emerald-600 hover:bg-emerald-700"
+                          disabled={sessionBusy}
+                          onClick={() => void tradingSession.start()}
+                        >
+                          <PlayCircle className="mr-2 h-4 w-4" />
+                          {sessionBusy ? 'Starting…' : 'Start trading'}
+                        </Button>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex flex-wrap gap-2">
-                    {sessionActive ? (
-                      <Button variant="destructive" disabled={sessionBusy} onClick={() => void tradingSession.stop()}>
-                        <Square className="mr-2 h-4 w-4" />
-                        {sessionBusy ? 'Stopping…' : 'Stop trading'}
-                      </Button>
-                    ) : (
-                      <Button
-                        className="bg-emerald-600 hover:bg-emerald-700"
-                        disabled={sessionBusy}
-                        onClick={() => void tradingSession.start()}
-                      >
-                        <PlayCircle className="mr-2 h-4 w-4" />
-                        {sessionBusy ? 'Starting…' : 'Start trading'}
-                      </Button>
-                    )}
+
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    <Card className={cn('border shadow-none', toneCard(floatingTone(overview.tradeProtection.summary.totalFloatingUsd)))}>
+                      <CardHeader className={cn('pb-2 pt-3', toneCardHeader(floatingTone(overview.tradeProtection.summary.totalFloatingUsd)))}>
+                        <CardTitle className={cn('text-xs font-semibold uppercase tracking-wide', toneTitle(floatingTone(overview.tradeProtection.summary.totalFloatingUsd)))}>Exposure</CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-1 pb-3 text-sm">
+                        <p><span className="text-slate-600">Open now</span> <span className="font-semibold">{overview.trading.openPositions}</span></p>
+                        <p><span className="text-slate-600">Slots left</span> <span className="font-semibold">{overview.risk.remainingOpenPositions}</span></p>
+                        <p><span className="text-slate-600">Floating P/L</span> <span className={cn('font-semibold', toneTitle(floatingTone(overview.tradeProtection.summary.totalFloatingUsd)))}>{formatUsd(overview.tradeProtection.summary.totalFloatingUsd)}</span></p>
+                        <p><span className="text-slate-600">Daily budget</span> <span className="font-semibold">{formatUsd(overview.risk.remainingDailyLossAmount)}</span></p>
+                      </CardContent>
+                    </Card>
+
+                    <Card className={cn('border shadow-none', toneCard(floatingTone(overview.continuousTrading.periodPnl.todayUsd)))}>
+                      <CardHeader className={cn('pb-2 pt-3', toneCardHeader(floatingTone(overview.continuousTrading.periodPnl.todayUsd)))}>
+                        <CardTitle className={cn('flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide', toneTitle(floatingTone(overview.continuousTrading.periodPnl.todayUsd)))}>
+                          <TrendingUp className="h-3.5 w-3.5" />
+                          Total P/L
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-1 pb-3 text-sm">
+                        <p>
+                          <span className={toneMuted(floatingTone(overview.continuousTrading.periodPnl.todayUsd))}>Today</span>{' '}
+                          <span className={cn('font-semibold', toneTitle(floatingTone(overview.continuousTrading.periodPnl.todayUsd)))}>
+                            {formatUsd(overview.continuousTrading.periodPnl.todayUsd)}
+                          </span>
+                        </p>
+                        <p>
+                          <span className={toneMuted(floatingTone(overview.continuousTrading.periodPnl.weekUsd))}>This week</span>{' '}
+                          <span className={cn('font-semibold', toneTitle(floatingTone(overview.continuousTrading.periodPnl.weekUsd)))}>
+                            {formatUsd(overview.continuousTrading.periodPnl.weekUsd)}
+                          </span>
+                        </p>
+                        <p>
+                          <span className={toneMuted(floatingTone(overview.continuousTrading.periodPnl.monthUsd))}>This month</span>{' '}
+                          <span className={cn('font-semibold', toneTitle(floatingTone(overview.continuousTrading.periodPnl.monthUsd)))}>
+                            {formatUsd(overview.continuousTrading.periodPnl.monthUsd)}
+                          </span>
+                        </p>
+                      </CardContent>
+                    </Card>
+
+                    <Card className={cn('border shadow-none', toneCard(sessionActive ? 'blue' : 'slate'))}>
+                      <CardHeader className={cn('pb-2 pt-3', toneCardHeader(sessionActive ? 'blue' : 'slate'))}>
+                        <CardTitle className={cn('text-xs font-semibold uppercase tracking-wide', toneTitle(sessionActive ? 'blue' : 'slate'))}>Refill policy</CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-1 pb-3 text-sm">
+                        <p><span className="text-slate-600">Min open</span> <span className="font-semibold">{overview.continuousTrading.minOpenPositions}</span></p>
+                        <p><span className="text-slate-600">Max entries/cycle</span> <span className="font-semibold">{overview.continuousTrading.maxEntriesPerCycle}</span></p>
+                        {overview.continuousTrading.lastMaintenance?.at ? (
+                          <p className="text-xs text-slate-700">
+                            Last refill {overview.continuousTrading.lastMaintenance.dispatchesAttempted} dispatch(es)
+                            {overview.continuousTrading.lastMaintenance.targets.length > 0
+                              ? ` · ${overview.continuousTrading.lastMaintenance.targets.join(', ')}`
+                              : ''}
+                            {' · '}
+                            {formatRelativeTime(overview.continuousTrading.lastMaintenance.at, clockNow)}
+                          </p>
+                        ) : (
+                          <p className="text-xs text-slate-600">No refill cycle recorded yet.</p>
+                        )}
+                      </CardContent>
+                    </Card>
+
+                    <Card className={cn('border shadow-none', toneCard(overview.tradeProtection.monitorEnabled ? 'cyan' : 'slate'))}>
+                      <CardHeader className={cn('pb-2 pt-3', toneCardHeader(overview.tradeProtection.monitorEnabled ? 'cyan' : 'slate'))}>
+                        <CardTitle className={cn('flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide', toneTitle(overview.tradeProtection.monitorEnabled ? 'cyan' : 'slate'))}>
+                          <MonitorCheck className="h-3.5 w-3.5" />
+                          Trade monitor
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-1 pb-3 text-sm">
+                        <p>
+                          <span className="text-slate-600">Status</span>{' '}
+                          <span className="font-semibold">{overview.tradeProtection.monitorEnabled ? 'Active' : 'Off'}</span>
+                        </p>
+                        <p><span className="text-slate-600">Tick interval</span> <span className="font-semibold">{overview.tradeProtection.monitorTickMs}ms</span></p>
+                        <p><span className="text-slate-600">Tracked baskets</span> <span className="font-semibold">{overview.tradeProtection.summary.basketCount}</span></p>
+                        <p><span className="text-slate-600">Highest lock</span> <span className="font-semibold">{formatUsd(overview.tradeProtection.summary.highestLockedUsd)}</span></p>
+                      </CardContent>
+                    </Card>
+
+                    <Card className={cn('border shadow-none', toneCard(protectionTone(overview.tradeProtection)))}>
+                      <CardHeader className={cn('pb-2 pt-3', toneCardHeader(protectionTone(overview.tradeProtection)))}>
+                        <CardTitle className={cn('flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide', toneTitle(protectionTone(overview.tradeProtection)))}>
+                          <Shield className="h-3.5 w-3.5" />
+                          EA protection
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-1 pb-3 text-sm">
+                        <p>
+                          <span className="text-slate-600">OnTick lock</span>{' '}
+                          <span className="font-semibold">{overview.tradeProtection.eaBasketProtectionEnabled ? 'Live in EA' : 'Awaiting EA v001.007'}</span>
+                        </p>
+                        <p>
+                          <span className="text-slate-600">Close authority</span>{' '}
+                          <span className="font-semibold">{overview.tradeProtection.eaLocalBasketLock ? 'EA OnTick' : 'Server monitor'}</span>
+                        </p>
+                        <p><span className="text-slate-600">Open legs</span> <span className="font-semibold">{overview.trading.trackedOpen || overview.trading.openPositions}</span></p>
+                        <p><span className="text-slate-600">Server telemetry</span> <span className="font-semibold">{overview.tradeProtection.monitorEnabled ? 'Active' : 'Off'}</span></p>
+                      </CardContent>
+                    </Card>
+
+                    <Card className={cn(
+                      'border shadow-none',
+                      toneCard(overview.tradeProtection.summary.highestLockedUsd > 0 ? 'emerald' : 'violet'),
+                    )}>
+                      <CardHeader className={cn('pb-2 pt-3', toneCardHeader(overview.tradeProtection.summary.highestLockedUsd > 0 ? 'emerald' : 'violet'))}>
+                        <CardTitle className={cn('flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide', toneTitle(overview.tradeProtection.summary.highestLockedUsd > 0 ? 'emerald' : 'violet'))}>
+                          <Lock className="h-3.5 w-3.5" />
+                          Basket lock tiers
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-1 pb-3 text-xs">
+                        <p className="font-medium text-slate-800">$20 → $20 · $50 → $40 · $100 → $80</p>
+                        <p className="text-slate-600">EA closes all legs on the same tick when floating profit hits the locked floor. Server monitor is telemetry-only.</p>
+                      </CardContent>
+                    </Card>
                   </div>
+
+                  {overview.tradeProtection.baskets.length > 0 ? (
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      {overview.tradeProtection.baskets.map((basket) => {
+                        const basketTone = BASKET_STATUS_TONE[basket.status];
+                        return (
+                          <Card key={basket.basketId} className={cn('border shadow-none', toneCard(basketTone))}>
+                            <CardHeader className={cn('pb-2', toneCardHeader(basketTone))}>
+                              <div className="flex items-start justify-between gap-2">
+                                <div>
+                                  <CardTitle className={cn('text-sm font-semibold', toneTitle(basketTone))}>
+                                    {basket.symbol} {basket.side.toUpperCase()} basket · {basket.legCount} legs
+                                  </CardTitle>
+                                  <p className={cn('mt-0.5 text-xs', toneMuted(basketTone))}>{basket.statusDetail}</p>
+                                </div>
+                                <div className="flex shrink-0 flex-col items-end gap-1">
+                                  <span className={cn('rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase', toneBadge(basketTone))}>
+                                    {basket.statusLabel}
+                                  </span>
+                                  {basket.eaManaged ? (
+                                    <span className={cn('rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase', toneBadge('cyan'))}>
+                                      EA OnTick
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </CardHeader>
+                            <CardContent className="grid gap-3 sm:grid-cols-2">
+                              <div className={cn('rounded-xl border p-3', toneInsetSurface(floatingTone(basket.floatingProfitUsd)))}>
+                                <p className={cn('mb-2 text-[10px] font-bold uppercase tracking-wide', toneTitle(floatingTone(basket.floatingProfitUsd)))}>
+                                  Profit state
+                                </p>
+                                <div className="space-y-1 text-sm">
+                                  <p><span className={toneMuted(floatingTone(basket.floatingProfitUsd))}>Floating</span> <span className={cn('font-semibold', toneTitle(floatingTone(basket.floatingProfitUsd)))}>{formatUsd(basket.floatingProfitUsd)}</span></p>
+                                  <p><span className={toneMuted(floatingTone(basket.floatingProfitUsd))}>Peak</span> <span className={cn('font-semibold', toneTitle('emerald'))}>{formatUsd(basket.peakProfitUsd)}</span></p>
+                                  <p><span className={toneMuted(floatingTone(basket.floatingProfitUsd))}>Drawdown</span> <span className={cn('font-semibold', toneTitle(basket.drawdownFromPeakUsd > 5 ? 'amber' : 'slate'))}>{formatUsd(basket.drawdownFromPeakUsd)}</span></p>
+                                </div>
+                              </div>
+
+                              <div className={cn('rounded-xl border p-3', toneInsetSurface(lockTierTone(basket.lockedProfitUsd)))}>
+                                <p className={cn('mb-2 text-[10px] font-bold uppercase tracking-wide', toneTitle(lockTierTone(basket.lockedProfitUsd)))}>
+                                  Lock & tiers
+                                </p>
+                                <div className="space-y-1 text-sm">
+                                  <p><span className={toneMuted(lockTierTone(basket.lockedProfitUsd))}>Locked floor</span> <span className={cn('font-semibold', toneTitle(basket.lockedProfitUsd > 0 ? 'emerald' : 'slate'))}>{formatUsd(basket.lockedProfitUsd)}</span></p>
+                                  {basket.tierLabel ? (
+                                    <p><span className={toneMuted(lockTierTone(basket.lockedProfitUsd))}>Active tier</span> <span className="font-semibold">{basket.tierLabel}</span></p>
+                                  ) : null}
+                                  {basket.nextTierTriggerUsd != null ? (
+                                    <p className={cn('text-xs', toneBody(lockTierTone(basket.lockedProfitUsd)))}>
+                                      Next at {formatUsd(basket.nextTierTriggerUsd)} → lock {formatUsd(basket.nextTierLockUsd)}
+                                    </p>
+                                  ) : (
+                                    <p className={cn('text-xs', toneMuted(lockTierTone(basket.lockedProfitUsd)))}>Max tier reached</p>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className={cn('rounded-xl border p-3', toneInsetSurface(closeConditionTone(basket)))}>
+                                <p className={cn('mb-2 text-[10px] font-bold uppercase tracking-wide', toneTitle(closeConditionTone(basket)))}>
+                                  Close condition
+                                </p>
+                                <div className="space-y-1 text-sm">
+                                  <p>
+                                    <span className={toneMuted(closeConditionTone(basket))}>Status</span>{' '}
+                                    <span className={cn('font-semibold', toneTitle(closeConditionTone(basket)))}>
+                                      {basket.closeArmed ? 'Armed — close on this tick' : basket.lockedProfitUsd > 0 ? 'Protected' : 'Watching'}
+                                    </span>
+                                  </p>
+                                  <p><span className={toneMuted(closeConditionTone(basket))}>Cushion</span> <span className={cn('font-semibold', toneTitle(basket.givebackToCloseUsd <= 5 && basket.lockedProfitUsd > 0 ? 'rose' : 'slate'))}>{formatUsd(basket.givebackToCloseUsd)}</span></p>
+                                  <p className={cn('text-xs', toneBody(closeConditionTone(basket)))}>
+                                    {basket.lockedProfitUsd > 0
+                                      ? `EA closes all ${basket.legCount} legs when floating ≤ ${formatUsd(basket.lockedProfitUsd)}.`
+                                      : `Lock activates when combined floating profit reaches ${formatUsd(basket.activationUsd)}.`}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div className={cn('rounded-xl border p-3', toneInsetSurface('slate'))}>
+                                <p className={cn('mb-2 text-[10px] font-bold uppercase tracking-wide', toneTitle('slate'))}>
+                                  Broker levels
+                                </p>
+                                <div className="space-y-1 text-sm">
+                                  <p><span className={toneMuted('slate')}>S/L</span> <span className="font-semibold">{formatPrice(basket.brokerStopLoss)}</span></p>
+                                  <p><span className={toneMuted('slate')}>T/P</span> <span className="font-semibold">{formatPrice(basket.brokerTakeProfit)}</span></p>
+                                  <p className={cn('text-xs', toneMuted('slate'))}>Basket lock uses USD close-all, not S/L moves.</p>
+                                </div>
+                              </div>
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
+                    </div>
+                  ) : overview.trading.openPositions > 0 ? (
+                    <Card className={cn('border shadow-none', toneInsetSurface('amber'))}>
+                      <CardContent className="p-3 text-sm text-amber-900">
+                        {overview.trading.openPositions} open leg(s) not grouped as a Gold basket yet — profit lock applies when ≥2 same-side legs share a basket ID or batch entry.
+                      </CardContent>
+                    </Card>
+                  ) : (
+                    <div className="grid gap-3 lg:grid-cols-2">
+                      <Card className={cn('border shadow-none', toneCard('slate'))}>
+                        <CardHeader className={cn('pb-2 pt-3', toneCardHeader('slate'))}>
+                          <CardTitle className={cn('text-xs font-semibold uppercase tracking-wide', toneTitle('slate'))}>Basket protection</CardTitle>
+                        </CardHeader>
+                        <CardContent className="pb-3 text-sm text-slate-700">
+                          No active Gold basket — combined profit lock arms when ≥2 same-side legs are open on XAUUSD.
+                        </CardContent>
+                      </Card>
+                      <Card className={cn('border shadow-none', toneCard('slate'))}>
+                        <CardHeader className={cn('pb-2 pt-3', toneCardHeader('slate'))}>
+                          <CardTitle className={cn('text-xs font-semibold uppercase tracking-wide', toneTitle('slate'))}>Per-leg trailing</CardTitle>
+                        </CardHeader>
+                        <CardContent className="pb-3 text-sm text-slate-700">
+                          No open legs under monitor — break-even, trail, and profit-lock SL apply when positions are live.
+                        </CardContent>
+                      </Card>
+                    </div>
+                  )}
+
+                  {overview.tradeProtection.orphanLegs.length > 0 ? (
+                    <Card className="border border-slate-200 shadow-none">
+                      <CardHeader className="pb-2 pt-3">
+                        <CardTitle className="text-xs font-semibold uppercase tracking-wide text-slate-600">Per-leg protection & trailing</CardTitle>
+                      </CardHeader>
+                      <CardContent className="overflow-x-auto pb-3">
+                        <table className="w-full min-w-[640px] text-left text-xs">
+                          <thead>
+                            <tr className="border-b text-slate-500">
+                              <th className="py-1 pr-3 font-medium">Ticket</th>
+                              <th className="py-1 pr-3 font-medium">Symbol</th>
+                              <th className="py-1 pr-3 font-medium">P/L</th>
+                              <th className="py-1 pr-3 font-medium">S/L</th>
+                              <th className="py-1 pr-3 font-medium">T/P</th>
+                              <th className="py-1 pr-3 font-medium">Trail pts</th>
+                              <th className="py-1 pr-3 font-medium">BE</th>
+                              <th className="py-1 font-medium">Lock SL</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {overview.tradeProtection.orphanLegs.map((leg) => (
+                              <tr key={leg.ticket} className="border-b border-slate-100">
+                                <td className="py-1.5 pr-3 font-mono">{leg.ticket}</td>
+                                <td className="py-1.5 pr-3">{leg.symbol} {leg.side.toUpperCase()}</td>
+                                <td className="py-1.5 pr-3 font-semibold">{formatUsd(leg.profitLoss)}</td>
+                                <td className="py-1.5 pr-3">{formatPrice(leg.stopLoss)}</td>
+                                <td className="py-1.5 pr-3">{formatPrice(leg.takeProfit)}</td>
+                                <td className="py-1.5 pr-3">{leg.trailingPoints}</td>
+                                <td className="py-1.5 pr-3">{leg.breakEvenApplied ? 'Yes' : 'No'}</td>
+                                <td className="py-1.5">{formatPrice(leg.lastLockedSl)}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </CardContent>
+                    </Card>
+                  ) : null}
                 </div>
               </section>
 

@@ -165,6 +165,13 @@ async function countTrackedOpenPositions(filter?: OpenPositionFilter): Promise<n
 
 export async function alignTrackedPositionsWithTerminal(terminalOpen: number, filter?: OpenPositionFilter): Promise<number> {
   try {
+    if (terminalOpen <= 0) {
+      const liveOpen = await loadBridgeTerminalOpenCount(filter?.terminalId);
+      if (liveOpen != null && liveOpen > 0) {
+        terminalOpen = liveOpen;
+      }
+    }
+
     const params: Array<string | number> = [];
     const conditions = [`p.status IN ('open', 'partial')`];
     appendPositionFilter(params, conditions, filter, 'p');
@@ -298,8 +305,63 @@ export async function reconcileOpenPositionsFromExecutedCommands(terminalOpen: n
   }
 }
 
+type LiveBridgeTerminal = {
+  terminalId?: string;
+  connectionStatus?: string;
+  enableExecution?: boolean;
+  openPositions?: number;
+  openOrders?: number;
+  openPositionSnapshots?: unknown;
+  balance?: number;
+  equity?: number;
+  margin?: number;
+};
+
+function resolveLiveBridgeTerminal(
+  terminals: LiveBridgeTerminal[],
+  terminalId?: string | null,
+): LiveBridgeTerminal | null {
+  const connected = terminals.filter(
+    (terminal) => String(terminal?.connectionStatus ?? '').toLowerCase() === 'connected',
+  );
+  return terminalId
+    ? connected.find((terminal) => String(terminal.terminalId) === terminalId) ?? null
+    : connected.find((terminal) => terminal.enableExecution) ?? connected[0] ?? null;
+}
+
+function countLiveBridgeOpenPositions(terminal: LiveBridgeTerminal | null): number | null {
+  if (!terminal) return null;
+  const snapshots = Array.isArray(terminal.openPositionSnapshots) ? terminal.openPositionSnapshots.length : 0;
+  const reported = Number(terminal.openPositions ?? terminal.openOrders ?? NaN);
+  const resolved = Math.max(
+    Number.isFinite(reported) ? reported : 0,
+    snapshots,
+  );
+  return Number.isFinite(resolved) ? Math.max(0, resolved) : null;
+}
+
+async function fetchLiveBridgeTerminals(): Promise<LiveBridgeTerminal[]> {
+  try {
+    const bridgeUrl = process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787';
+    const response = await fetch(`${bridgeUrl}/terminal-operations`, { cache: 'no-store' });
+    if (!response.ok) return [];
+    const payload = await response.json();
+    return Array.isArray(payload.terminals) ? payload.terminals as LiveBridgeTerminal[] : [];
+  } catch {
+    return [];
+  }
+}
+
+async function loadBridgeTerminalOpenCount(terminalId?: string | null): Promise<number | null> {
+  const terminals = await fetchLiveBridgeTerminals();
+  return countLiveBridgeOpenPositions(resolveLiveBridgeTerminal(terminals, terminalId));
+}
+
 async function getTerminalOpenOrderCount(filter?: OpenPositionFilter): Promise<number> {
   try {
+    const liveOpen = await loadBridgeTerminalOpenCount(filter?.terminalId);
+    if (liveOpen != null) return liveOpen;
+
     const params: string[] = [];
     const conditions = [`t.connection_status IN ('connected', 'degraded')`];
     if (filter?.terminalId) {
@@ -313,29 +375,71 @@ async function getTerminalOpenOrderCount(filter?: OpenPositionFilter): Promise<n
     const result = await queryPostgres(
       `
         SELECT
-          COALESCE(SUM(GREATEST(t.open_orders, 0)), 0)::int AS tracked_total,
-          COALESCE(SUM(
-            CASE
-              WHEN GREATEST(t.open_orders, 0) > 0 THEN GREATEST(t.open_orders, 0)
-              WHEN COALESCE(a.margin, 0) > 0 THEN GREATEST(1, ROUND(COALESCE(a.margin, 0) / 2.8))
-              ELSE 0
-            END
-          ), 0)::int AS resolved_total
+          GREATEST(t.open_orders, 0)::int AS open_orders,
+          COALESCE(a.margin, 0)::numeric AS margin
         FROM mt5_terminals t
         JOIN trading_accounts a ON a.account_number = t.account_number
         WHERE ${conditions.join(' AND ')}
+        ORDER BY t.last_heartbeat_at DESC NULLS LAST
+        LIMIT 1
       `,
       params,
     );
-    const row = result.rows[0] as { tracked_total?: number; resolved_total?: number } | undefined;
-    return Math.max(Number(row?.tracked_total ?? 0), Number(row?.resolved_total ?? 0));
+    const row = result.rows[0] as { open_orders?: number; margin?: number } | undefined;
+    if (!row) return 0;
+    const openOrders = Number(row.open_orders ?? 0);
+    if (openOrders > 0) return openOrders;
+    const margin = Number(row.margin ?? 0);
+    return margin > 0 ? Math.max(1, Math.round(margin / 2.8)) : 0;
   } catch {
     return 0;
   }
 }
 
+/** Reconcile Postgres position registry with the live terminal before gating or monitoring. */
+export async function syncOpenPositionRegistry(filter?: OpenPositionFilter): Promise<OpenPositionMetrics> {
+  return getOpenPositionMetrics(filter);
+}
+
+async function isAccountFlat(filter?: OpenPositionFilter): Promise<boolean> {
+  const terminals = await fetchLiveBridgeTerminals();
+  const liveTerminal = resolveLiveBridgeTerminal(terminals, filter?.terminalId);
+  const liveOpen = countLiveBridgeOpenPositions(liveTerminal);
+  if (liveOpen != null && liveOpen > 0) return false;
+
+  if (liveTerminal) {
+    const balance = Number(liveTerminal.balance ?? 0);
+    const equity = Number(liveTerminal.equity ?? 0);
+    const margin = Number(liveTerminal.margin ?? 0);
+    if (margin > 0.01 || Math.abs(equity - balance) > 0.5) return false;
+    if (margin <= 0 && Math.abs(equity - balance) < 0.05) return true;
+  }
+
+  if (!filter?.accountNumber) return false;
+  try {
+    const result = await queryPostgres(
+      `SELECT balance, equity, margin FROM trading_accounts WHERE account_number = $1 LIMIT 1`,
+      [filter.accountNumber],
+    );
+    const row = result.rows[0] as { balance?: number; equity?: number; margin?: number } | undefined;
+    if (!row) return false;
+    const balance = Number(row.balance ?? 0);
+    const equity = Number(row.equity ?? 0);
+    const margin = Number(row.margin ?? 0);
+    return margin <= 0 && Math.abs(equity - balance) < 0.05;
+  } catch {
+    return false;
+  }
+}
+
 export async function getOpenPositionMetrics(filter?: OpenPositionFilter): Promise<OpenPositionMetrics> {
-  const terminalOpen = await getTerminalOpenOrderCount(filter);
+  const { syncOpenPositionLiveMetrics } = await import('./position-profit-sync');
+  await syncOpenPositionLiveMetrics().catch(() => null);
+
+  let terminalOpen = await getTerminalOpenOrderCount(filter);
+  if (await isAccountFlat(filter)) {
+    terminalOpen = 0;
+  }
   await alignTrackedPositionsWithTerminal(terminalOpen, filter);
   await reconcileOpenPositionsFromExecutedCommands(terminalOpen, filter);
   const positions = await listOpenPositions({ ...filter, limit: 100 });
@@ -376,8 +480,8 @@ export async function getOpenPositionExposureForSymbol(
 ): Promise<{ count: number; volumeLots: number }> {
   const normalized = symbol.toUpperCase().trim();
   if (!normalized) return { count: 0, volumeLots: 0 };
-  const positions = await listOpenPositions({ ...filter, limit: 200 });
-  const matching = positions.filter((position) => position.symbol?.toUpperCase() === normalized);
+  const metrics = await getOpenPositionMetrics(filter);
+  const matching = metrics.positions.filter((position) => position.symbol?.toUpperCase() === normalized);
   return {
     count: matching.length,
     volumeLots: Number(matching.reduce((sum, position) => sum + Number(position.volumeLots ?? 0), 0).toFixed(4)),

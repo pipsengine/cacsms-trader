@@ -522,7 +522,10 @@ async function getPersistedExecutionMetrics() {
 }
 
 export async function getBridgeExecutionMetrics() {
-  const openPositionMetrics = await getOpenPositionMetrics().catch(() => ({
+  const account = await resolveExecutionAccountContext().catch(() => null);
+  const openPositionMetrics = await getOpenPositionMetrics(
+    account ? { terminalId: account.terminalId, accountNumber: account.accountNumber } : undefined,
+  ).catch(() => ({
     trackedOpen: 0,
     terminalOpen: 0,
     openOrders: 0,

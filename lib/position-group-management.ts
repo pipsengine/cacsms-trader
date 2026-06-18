@@ -36,6 +36,8 @@ function defaultRiskPoints(symbol: string): number {
 
 function resolveSetupGroupId(position: ExecutionOpenPosition): string | null {
   const metadata = position.metadata ?? {};
+  const basketId = String(metadata.basketId ?? '').trim();
+  if (basketId) return basketId;
   const explicit = String(metadata.setupGroupId ?? '').trim();
   if (explicit) return explicit;
   const commandId = String(position.openCommandId ?? '').trim();
@@ -168,6 +170,17 @@ export function evaluateGroupBreakeven(group: PositionGroup): {
     peakRMultiple: group.aggregateRMultiple,
     breakEvenApplied: false,
   });
+
+  const basketActivationUsd = isGoldSymbol(group.symbol) && group.positions.length >= 2
+    ? Math.max(5, envNumber('CACSMS_GOLD_BASKET_PROFIT_LOCK_START_USD', 20))
+    : 0;
+  if (basketActivationUsd > 0 && group.totalProfitLoss >= basketActivationUsd) {
+    return {
+      shouldApply: true,
+      reason: `Basket combined profit $${group.totalProfitLoss.toFixed(2)} reached activation $${basketActivationUsd} — securing break-even across ${group.positions.length} legs.`,
+      bufferPoints: goldConfig.spreadBufferPoints,
+    };
+  }
 
   const expectedLegs = Math.max(
     group.positions.length,

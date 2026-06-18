@@ -1,6 +1,6 @@
 import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
 import { detectGoldLtfScalpContext } from '@/lib/gold-ltf-scalp-mode';
-import { isNonDirectionalBias } from '@/lib/gold-trade-context';
+import { isNonDirectionalBias, isRangeOrientedContext } from '@/lib/gold-trade-context';
 import { isGoldSymbol } from '@/lib/gold-trading-engine';
 import {
   GOLD_TOP_DOWN_EXECUTION,
@@ -64,7 +64,16 @@ function hasStrongReversalStructure(reason: string, setupType: string): boolean 
 export async function evaluateGoldMandatoryTopDown(
   decision: Pick<
     AutonomousDecisionOutput,
-    'symbol' | 'decision' | 'institutionalPlan' | 'reasonForDecision' | 'setupType' | 'finalBias'
+    | 'symbol'
+    | 'decision'
+    | 'institutionalPlan'
+    | 'reasonForDecision'
+    | 'setupType'
+    | 'finalBias'
+    | 'strategyBookScore'
+    | 'setupReadinessScore'
+    | 'regimeClassification'
+    | 'selectedStrategyId'
   >,
 ): Promise<GoldTopDownGateResult> {
   if (!isGoldSymbol(decision.symbol)) {
@@ -123,9 +132,17 @@ export async function evaluateGoldMandatoryTopDown(
   const executionBias = planStageBias(plan, GOLD_TOP_DOWN_EXECUTION);
   const reversalConfirmed = hasStrongReversalStructure(decision.reasonForDecision, decision.setupType)
     && (plan.countertrendAllowed || /choch|reversal/i.test(plan.conflictPolicy ?? ''));
+  const rangingContext = Boolean(
+    plan.rangingContextActive
+    || isRangeOrientedContext(decision)
+    || isNonDirectionalBias(htfBias),
+  );
+  const strongStrategyBook = Number(decision.strategyBookScore ?? 0) >= 85;
+  const highReadiness = Number(decision.setupReadinessScore ?? 0) >= 90;
+  const ltfConflictOverride = rangingContext || scalpContext.active || strongStrategyBook || highReadiness;
 
   const alignedWithHtf = sideMatchesBias(decision.decision, htfBias)
-    || plan.rangingContextActive
+    || rangingContext
     || scalpContext.active
     || reversalConfirmed;
 
@@ -139,7 +156,7 @@ export async function evaluateGoldMandatoryTopDown(
     (stage) => (GOLD_TOP_DOWN_HTF as readonly string[]).includes(String(stage.timeframe ?? '').toUpperCase())
       && stage.status === 'conflict',
   );
-  if (htfConflict && !reversalConfirmed && !plan.rangingContextActive && !scalpContext.active) {
+  if (htfConflict && !reversalConfirmed && !rangingContext && !scalpContext.active) {
     blockers.push('HTF structure conflict — D/H4 disagree; wait for alignment or confirmed CHoCH reversal.');
   }
 
@@ -147,7 +164,7 @@ export async function evaluateGoldMandatoryTopDown(
     (stage) => (GOLD_TOP_DOWN_INTERMEDIATE as readonly string[]).includes(String(stage.timeframe ?? '').toUpperCase())
       && (stage.status === 'aligned' || stage.status === 'confirmed'),
   );
-  if (!intermediateReady && !plan.rangingContextActive && !scalpContext.active) {
+  if (!intermediateReady && !rangingContext && !scalpContext.active) {
     blockers.push('Intermediate setup (H1/M30) not confirmed — waiting for institutional setup formation.');
   }
 
@@ -158,16 +175,17 @@ export async function evaluateGoldMandatoryTopDown(
     if (!ltfReady && !reversalConfirmed) {
       blockers.push('LTF scalp mode active but neither M15 nor M5 confirms the execution side.');
     }
-  } else if (m15Ready && m15Ready.status === 'conflict' && !reversalConfirmed) {
+  } else if (m15Ready && m15Ready.status === 'conflict' && !reversalConfirmed && !ltfConflictOverride) {
     blockers.push('M15 execution trigger conflicts with intermediate structure.');
   }
 
   if (
     !sideMatchesBias(decision.decision, intermediateBias)
     && !sideMatchesBias(decision.decision, executionBias)
-    && !plan.rangingContextActive
+    && !rangingContext
     && !scalpContext.active
     && !reversalConfirmed
+    && !ltfConflictOverride
   ) {
     blockers.push(`Execution timeframes (M15/M5/M1) do not confirm ${decision.decision} side.`);
   }

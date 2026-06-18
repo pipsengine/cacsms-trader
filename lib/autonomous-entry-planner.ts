@@ -1,3 +1,4 @@
+import { getLiquidityAnalysis } from '@/lib/liquidity-zone-store';
 import { resolveLatestCaptureId } from '@/lib/capture-analysis-bootstrap';
 import { loadGoldStructureEntryAnchors } from '@/lib/gold-structure-anchors';
 import { getOrderBlockAnalysis } from '@/lib/order-block-detection-store';
@@ -160,10 +161,11 @@ export async function planAutonomousRetracementEntry(input: {
 
   const captureId = await resolveLatestCaptureId(symbol, timeframe);
   if (captureId) {
-    const [swings, sr, orderBlocks] = await Promise.all([
+    const [swings, sr, orderBlocks, liquidity] = await Promise.all([
       getSwingDetections(captureId).catch(() => []),
       getSupportResistanceAnalysis(captureId).catch(() => null),
       getOrderBlockAnalysis(captureId).catch(() => null),
+      getLiquidityAnalysis(captureId).catch(() => null),
     ]);
     for (const swing of swings) {
       if (input.side === 'BUY' && swing.swingKind === 'low') candidates.push({ price: swing.priceLevel, weight: 0.5 + swing.strengthScore * 0.35, source: 'swing_low' });
@@ -176,6 +178,27 @@ export async function planAutonomousRetracementEntry(input: {
     for (const block of orderBlocks?.orderBlocks ?? []) {
       if (input.side === 'BUY' && block.blockType === 'bullish' && block.recommendedAction !== 'AVOID') candidates.push({ price: (block.zoneLow + block.zoneHigh) / 2, weight: 0.68 + block.qualityScore * 0.5, source: 'bullish_order_block' });
       if (input.side === 'SELL' && block.blockType === 'bearish' && block.recommendedAction !== 'AVOID') candidates.push({ price: (block.zoneLow + block.zoneHigh) / 2, weight: 0.68 + block.qualityScore * 0.5, source: 'bearish_order_block' });
+    }
+    for (const zone of liquidity?.liquidityZones ?? []) {
+      const favorable =
+        (input.side === 'BUY' && zone.liquiditySide === 'sell_side')
+        || (input.side === 'SELL' && zone.liquiditySide === 'buy_side');
+      if (!favorable) continue;
+      const sweepBonus = /sweep|reclaim/i.test(zone.sweepStatus) ? 0.12 : 0;
+      candidates.push({
+        price: zone.priceLevel,
+        weight: 0.62 + zone.confidenceScore * 0.45 + sweepBonus,
+        source: zone.sweepStatus === 'reclaimed' ? 'liquidity_reclaim' : 'liquidity_pool',
+      });
+    }
+    for (const voidZone of liquidity?.voids ?? []) {
+      const mid = (voidZone.zoneLow + voidZone.zoneHigh) / 2;
+      if (input.side === 'BUY' && voidZone.voidDirection === 'bullish_void') {
+        candidates.push({ price: mid, weight: 0.64 + voidZone.rebalanceProbability * 0.35, source: 'bullish_fvg_void' });
+      }
+      if (input.side === 'SELL' && voidZone.voidDirection === 'bearish_void') {
+        candidates.push({ price: mid, weight: 0.64 + voidZone.rebalanceProbability * 0.35, source: 'bearish_fvg_void' });
+      }
     }
   }
 
@@ -229,6 +252,7 @@ export async function planAutonomousRetracementEntry(input: {
       'volume or participation proxy expansion',
       'momentum resumption away from retracement zone',
       structureAnchors.length > 0 ? 'structure retest confirmation (BOS/CHoCH/FVG/OB)' : 'retracement zone confirmation',
+      selected?.source?.includes('liquidity') ? 'liquidity sweep reclaim or rejection confirmation' : 'institutional zone retest',
     ],
     method: selected?.source ?? 'atr_retracement_fallback',
     reasons: [

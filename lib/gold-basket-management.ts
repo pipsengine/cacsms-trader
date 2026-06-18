@@ -7,11 +7,16 @@ export type BasketProfitLockTier = {
 };
 
 export type BasketManagementDecision = {
-  action: 'hold' | 'close_all' | 'update_lock';
+  action: 'hold' | 'close_all' | 'activate_lock' | 'raise_lock';
+  basketId: string;
   reason: string;
+  floatingProfitUsd: number;
   lockedProfitUsd: number;
+  previousLockedUsd: number;
   peakProfitUsd: number;
   tierLabel: string | null;
+  reversalDetected: boolean;
+  peakIncreased: boolean;
 };
 
 function envNumber(name: string, fallback: number): number {
@@ -25,7 +30,7 @@ function envNumber(name: string, fallback: number): number {
 export function goldBasketProfitLockTiers(): BasketProfitLockTier[] {
   const raw = String(
     process.env.CACSMS_GOLD_BASKET_PROFIT_LOCK_TIERS
-    ?? '20:15,50:40,100:85,200:170,500:450',
+    ?? '20:20,50:40,100:80,200:170,500:450',
   ).trim();
   const tiers = raw
     .split(',')
@@ -40,15 +45,19 @@ export function goldBasketProfitLockTiers(): BasketProfitLockTier[] {
     .sort((a, b) => a.triggerUsd - b.triggerUsd);
   if (tiers.length > 0) return tiers;
   return [
-    { triggerUsd: 20, lockUsd: 15 },
+    { triggerUsd: 20, lockUsd: 20 },
     { triggerUsd: 50, lockUsd: 40 },
-    { triggerUsd: 100, lockUsd: 85 },
+    { triggerUsd: 100, lockUsd: 80 },
     { triggerUsd: 200, lockUsd: 170 },
   ];
 }
 
 export function goldBasketProfitLockActivationUsd(): number {
   return Math.max(5, envNumber('CACSMS_GOLD_BASKET_PROFIT_LOCK_START_USD', 20));
+}
+
+export function goldBasketMinLegs(): number {
+  return Math.max(2, envNumber('CACSMS_GOLD_BASKET_MIN_LEGS', 2));
 }
 
 export function isGoldBasketGroup(group: PositionGroup): boolean {
@@ -59,9 +68,10 @@ export function isGoldBasketGroup(group: PositionGroup): boolean {
   );
   const batchEntry = group.positions.some((position) => Boolean(position.metadata?.batchEntry));
   const basketManaged = group.positions.some((position) => Boolean(position.metadata?.basketManaged));
-  return batchEntry || basketManaged || expectedLegs >= 5;
+  return batchEntry || basketManaged || expectedLegs >= goldBasketMinLegs();
 }
 
+/** Lock floor from peak profit — never reduces below the prior locked amount. */
 export function resolveBasketLockedProfit(peakProfitUsd: number, currentLockedUsd = 0): {
   lockedProfitUsd: number;
   tierLabel: string | null;
@@ -69,7 +79,7 @@ export function resolveBasketLockedProfit(peakProfitUsd: number, currentLockedUs
   let locked = Math.max(0, currentLockedUsd);
   let tierLabel: string | null = null;
   for (const tier of goldBasketProfitLockTiers()) {
-    if (peakProfitUsd >= tier.triggerUsd) {
+    if (peakProfitUsd + 1e-9 >= tier.triggerUsd) {
       locked = Math.max(locked, tier.lockUsd);
       tierLabel = `$${tier.triggerUsd}→lock $${tier.lockUsd}`;
     }
@@ -82,76 +92,92 @@ export function readGroupBasketState(group: PositionGroup): {
   lockedProfitUsd: number;
   basketId: string;
 } {
-  let peakProfitUsd = group.peakTotalProfit;
+  let storedPeak = 0;
   let lockedProfitUsd = 0;
   let basketId = group.setupGroupId;
 
   for (const position of group.positions) {
     const metadata = position.metadata ?? {};
-    peakProfitUsd = Math.max(
-      peakProfitUsd,
-      Number(metadata.basketPeakProfitUsd ?? 0),
-      Number(position.profitLoss ?? 0),
-    );
+    storedPeak = Math.max(storedPeak, Number(metadata.basketPeakProfitUsd ?? 0));
     lockedProfitUsd = Math.max(lockedProfitUsd, Number(metadata.basketLockedProfitUsd ?? 0));
-    basketId = String(metadata.basketId ?? basketId);
+    basketId = String(metadata.basketId ?? metadata.setupGroupId ?? basketId);
   }
 
-  peakProfitUsd = Math.max(peakProfitUsd, group.totalProfitLoss);
+  const floatingProfitUsd = group.totalProfitLoss;
+  const peakProfitUsd = Math.max(storedPeak, floatingProfitUsd);
+
   return { peakProfitUsd, lockedProfitUsd, basketId };
 }
 
 export function evaluateBasketProfitLock(group: PositionGroup): BasketManagementDecision {
+  const floatingProfitUsd = group.totalProfitLoss;
+
   if (!isGoldBasketGroup(group)) {
     return {
       action: 'hold',
+      basketId: group.setupGroupId,
       reason: 'Not a Gold basket-managed group.',
+      floatingProfitUsd,
       lockedProfitUsd: 0,
-      peakProfitUsd: group.totalProfitLoss,
+      previousLockedUsd: 0,
+      peakProfitUsd: floatingProfitUsd,
       tierLabel: null,
+      reversalDetected: false,
+      peakIncreased: false,
     };
   }
 
   const state = readGroupBasketState(group);
-  const { lockedProfitUsd, tierLabel } = resolveBasketLockedProfit(state.peakProfitUsd, state.lockedProfitUsd);
+  const previousLockedUsd = state.lockedProfitUsd;
+  const previousPeakUsd = state.peakProfitUsd;
+  const peakProfitUsd = Math.max(previousPeakUsd, floatingProfitUsd);
+  const peakIncreased = peakProfitUsd > previousPeakUsd + 1e-9;
+  const { lockedProfitUsd, tierLabel } = resolveBasketLockedProfit(peakProfitUsd, previousLockedUsd);
   const activation = goldBasketProfitLockActivationUsd();
 
-  if (state.peakProfitUsd < activation) {
-    return {
-      action: 'hold',
-      reason: `Basket profit $${group.totalProfitLoss.toFixed(2)} below activation $${activation}.`,
-      lockedProfitUsd: 0,
-      peakProfitUsd: state.peakProfitUsd,
-      tierLabel: null,
-    };
-  }
+  const base = {
+    basketId: state.basketId,
+    floatingProfitUsd,
+    lockedProfitUsd,
+    previousLockedUsd,
+    peakProfitUsd,
+    tierLabel,
+    reversalDetected: false,
+    peakIncreased,
+  };
 
-  if (lockedProfitUsd > 0 && group.totalProfitLoss <= lockedProfitUsd) {
+  if (lockedProfitUsd > 0 && floatingProfitUsd <= lockedProfitUsd + 1e-9) {
     return {
+      ...base,
       action: 'close_all',
-      reason: `Basket profit reversed to $${group.totalProfitLoss.toFixed(2)} — securing locked profit $${lockedProfitUsd.toFixed(2)} across ${group.positions.length} legs.`,
-      lockedProfitUsd,
-      peakProfitUsd: state.peakProfitUsd,
-      tierLabel,
+      reversalDetected: true,
+      reason: `Basket reversal: floating profit $${floatingProfitUsd.toFixed(2)} fell to locked floor $${lockedProfitUsd.toFixed(2)} — closing all ${group.positions.length} legs immediately.`,
     };
   }
 
-  if (lockedProfitUsd > state.lockedProfitUsd) {
+  if (lockedProfitUsd > previousLockedUsd + 1e-9) {
+    const action = previousLockedUsd <= 0 ? 'activate_lock' : 'raise_lock';
     return {
-      action: 'update_lock',
-      reason: `Basket peak $${state.peakProfitUsd.toFixed(2)} — progressive lock raised to $${lockedProfitUsd.toFixed(2)} (${tierLabel ?? 'tier'}).`,
-      lockedProfitUsd,
-      peakProfitUsd: state.peakProfitUsd,
-      tierLabel,
+      ...base,
+      action,
+      reason: action === 'activate_lock'
+        ? `Basket profit lock activated at peak $${peakProfitUsd.toFixed(2)} — floor locked at $${lockedProfitUsd.toFixed(2)} (${tierLabel ?? 'tier'}).`
+        : `Basket profit lock raised to $${lockedProfitUsd.toFixed(2)} after peak $${peakProfitUsd.toFixed(2)} (${tierLabel ?? 'tier'}).`,
+    };
+  }
+
+  if (peakProfitUsd < activation) {
+    return {
+      ...base,
+      action: 'hold',
+      reason: `Basket floating $${floatingProfitUsd.toFixed(2)} · peak $${peakProfitUsd.toFixed(2)} below activation $${activation}.`,
     };
   }
 
   return {
+    ...base,
     action: 'hold',
-    reason: `Basket floating $${group.totalProfitLoss.toFixed(2)} · locked floor $${lockedProfitUsd.toFixed(2)} · peak $${state.peakProfitUsd.toFixed(2)}.`,
-    lockedProfitUsd,
-    peakProfitUsd: state.peakProfitUsd,
-    tierLabel,
+    reason: `Basket floating $${floatingProfitUsd.toFixed(2)} · locked floor $${lockedProfitUsd.toFixed(2)} · peak $${peakProfitUsd.toFixed(2)}.`,
   };
 }
 
@@ -160,6 +186,7 @@ export function basketMetadataPatch(input: {
   peakProfitUsd: number;
   lockedProfitUsd: number;
   tierLabel?: string | null;
+  lockActivatedAt?: string | null;
 }): Record<string, unknown> {
   return {
     basketId: input.basketId,
@@ -167,6 +194,7 @@ export function basketMetadataPatch(input: {
     basketPeakProfitUsd: input.peakProfitUsd,
     basketLockedProfitUsd: input.lockedProfitUsd,
     basketLockTier: input.tierLabel ?? null,
+    basketLockActivatedAt: input.lockActivatedAt ?? null,
     basketLastEvaluatedAt: new Date().toISOString(),
   };
 }

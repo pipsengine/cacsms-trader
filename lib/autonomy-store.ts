@@ -591,9 +591,12 @@ export async function generateAutonomousSignal(
     refillMode = await shouldRelaxContinuousTradingLimits();
   }
   if (!refillMode && isGoldSymbol(symbol)) {
-    const { getOpenPositionExposureForSymbol } = await import('@/lib/execution-open-positions');
-    const exposure = await getOpenPositionExposureForSymbol(symbol.toUpperCase()).catch(() => ({ count: 0, volumeLots: 0 }));
-    if (exposure.count === 0) refillMode = true;
+    const { syncOpenPositionRegistry } = await import('@/lib/execution-open-positions');
+    const metrics = await syncOpenPositionRegistry(
+      account ? { terminalId: account.terminalId, accountNumber: account.accountNumber } : undefined,
+    ).catch(() => ({ positions: [], trackedOpen: 0, terminalOpen: 0, openOrders: 0 }));
+    const exposure = metrics.positions.filter((p) => p.symbol?.toUpperCase() === symbol.toUpperCase());
+    if (exposure.length === 0) refillMode = true;
   }
   const macro = await loadMacroContext(symbol);
   const execution = await loadExecutionContext(symbol, timeframe);

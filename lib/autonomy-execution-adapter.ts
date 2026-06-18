@@ -28,6 +28,7 @@ import { evaluateGoldMandatoryTopDown } from '@/lib/gold-top-down-gate';
 import { isGoldSymbol, goldBatchEntryEnabled, goldEntryLegCount, resolveGoldEntryLegCount } from '@/lib/gold-trading-engine';
 import { evaluateStrategyGovernance, resolveStrategyIdFromDecision } from '@/lib/strategy-governance';
 import { logAutonomyDirectionAudit } from '@/lib/autonomy-direction-monitor';
+import { evaluateGoldInstitutionalEntryOptimization } from '@/lib/gold-institutional-entry-optimization';
 import { isRetracementEntryEnabled, planAutonomousRetracementEntry } from '@/lib/autonomous-entry-planner';
 
 export type AutonomyExecutionChecklist = {
@@ -240,6 +241,35 @@ export async function evaluateAutonomyExecutionChecklist(input: {
         terminalId,
       });
       blockers.push(...goldStack.blockers);
+
+      const livePrice = await resolveGoldLivePrice(input.decision.symbol);
+      const previewPlan = livePrice && input.decision.stopLoss
+        ? await planAutonomousRetracementEntry({
+          symbol: input.decision.symbol,
+          timeframe: input.decision.timeframe,
+          side: input.decision.decision as AutonomousTradeSide,
+          currentPrice: livePrice,
+          stopLoss: Number(input.decision.stopLoss),
+          rewardRiskRatio: 3,
+        }).catch(() => null)
+        : null;
+      const entryOptimization = livePrice
+        ? await evaluateGoldInstitutionalEntryOptimization({
+          decision: input.decision,
+          currentPrice: livePrice,
+          stopLoss: input.decision.stopLoss,
+          entryPlan: previewPlan,
+        })
+        : null;
+      if (entryOptimization) {
+        blockers.push(...entryOptimization.blockers);
+        if (!entryOptimization.readyForBasket && !entryOptimization.blockers.length) {
+          blockers.push(
+            `Entry optimization blocked basket — composite ${entryOptimization.scores.composite}% `
+            + `(mode: ${entryOptimization.selectedEntryMode}). Signal establishes bias only.`,
+          );
+        }
+      }
     }
   }
 
@@ -660,17 +690,68 @@ export async function dispatchAutonomyDecision(input: {
     stopLoss,
     rewardRiskRatio: stopTargets.extendedRewardRiskRatio ?? stopTargets.rewardRiskRatio,
   }).catch(() => null);
-  const useBatchEntry = isGoldSymbol(executableDecision.symbol) && goldBatchEntryEnabled() && !input.manual;
-  const useRetracementEntry = !useBatchEntry && Boolean(entryPlan && isRetracementEntryEnabled());
-  const split = splitHybridLots(volumeLots, entryPlan?.marketFraction ?? 0);
-  const setupGroupId = input.decisionLogId;
-  const basketId = input.decisionLogId;
+  const entryOptimization = await evaluateGoldInstitutionalEntryOptimization({
+    decision: executableDecision,
+    currentPrice: stopTargets.entryPrice,
+    stopLoss: stopTargets.stopLoss,
+    rewardRiskRatio: stopTargets.extendedRewardRiskRatio ?? stopTargets.rewardRiskRatio,
+    entryPlan,
+  });
+  if (!entryOptimization.readyForBasket && !input.manual) {
+    const blockers = [
+      ...entryOptimization.blockers,
+      `Entry optimization blocked basket deployment (composite ${entryOptimization.scores.composite}%, mode ${entryOptimization.selectedEntryMode}).`,
+    ];
+    await persistDispatchRecord({
+      decisionLogId: input.decisionLogId,
+      terminalId: checklist.terminalId,
+      symbol: executableDecision.symbol,
+      side,
+      status: 'blocked',
+      blockers,
+      payload: {
+        manual: false,
+        entryOptimization: entryOptimization.breakdown,
+        entryMode: entryOptimization.selectedEntryMode,
+        strategy: strategyMetadata,
+      },
+    });
+    return {
+      ok: false,
+      status: 'blocked',
+      decisionLogId: input.decisionLogId,
+      blockers,
+    };
+  }
+
   const institutionalScore = evaluateGoldInstitutionalQuality(executableDecision).score;
-  const batchLegCount = useBatchEntry
+  const batchLegCount = isGoldSymbol(executableDecision.symbol) && goldBatchEntryEnabled() && !input.manual
     ? resolveGoldEntryLegCount({ qualityScore: institutionalScore, confidenceScore: executableDecision.confidenceScore })
     : 1;
-  const batchLegLots = useBatchEntry ? buildBatchLegVolumes(volumeLots, batchLegCount) : [volumeLots];
-  const batchTotalLots = useBatchEntry ? totalBatchExposureLots(batchLegLots) : volumeLots;
+  const batchLegLots = isGoldSymbol(executableDecision.symbol) && goldBatchEntryEnabled() && !input.manual
+    ? buildBatchLegVolumes(goldLegLotsPerPosition(), batchLegCount)
+    : [volumeLots];
+  const batchTotalLots = batchLegLots.length > 1 ? totalBatchExposureLots(batchLegLots) : volumeLots;
+
+  const useBatchMarketEntry = isGoldSymbol(executableDecision.symbol)
+    && goldBatchEntryEnabled()
+    && !input.manual
+    && entryOptimization.selectedEntryMode === 'market'
+    && !entryOptimization.blockMarketChase;
+  const useBatchRetracementEntry = isGoldSymbol(executableDecision.symbol)
+    && goldBatchEntryEnabled()
+    && !input.manual
+    && (entryOptimization.selectedEntryMode === 'retracement_limit' || entryOptimization.deferToRetracement)
+    && Boolean(entryPlan);
+  const adjustedEntryPlan = entryOptimization.selectedEntryMode === 'hybrid' && entryPlan
+    ? { ...entryPlan, marketFraction: Math.min(entryPlan.marketFraction, 0.12) }
+    : entryPlan;
+  const useBatchEntry = useBatchMarketEntry;
+  const useRetracementEntry = useBatchRetracementEntry
+    || (!useBatchEntry && Boolean(adjustedEntryPlan && isRetracementEntryEnabled()));
+  const split = splitHybridLots(volumeLots, adjustedEntryPlan?.marketFraction ?? 0);
+  const setupGroupId = input.decisionLogId;
+  const basketId = input.decisionLogId;
   const commandId = `autonomy-${input.decisionLogId.slice(0, 8)}-${randomUUID()}`;
   const pendingCommandId = useRetracementEntry ? `autonomy-${input.decisionLogId.slice(0, 8)}-limit-${randomUUID()}` : commandId;
   const executionMode = account.sandboxMode ? 'SANDBOX' : 'LIVE';
@@ -683,7 +764,7 @@ export async function dispatchAutonomyDecision(input: {
 
   try {
     const dispatchedCommands: Array<{ commandId: string; orderType: string; volumeLots: number }> = [];
-    if (useRetracementEntry && entryPlan && split.marketLots > 0) {
+    if (useRetracementEntry && adjustedEntryPlan && split.marketLots > 0) {
       const marketResult = await dispatchExecutionCommand({
         commandId,
         terminalId: checklist.terminalId,
@@ -704,7 +785,7 @@ export async function dispatchAutonomyDecision(input: {
           strategyId,
           orderType: 'MARKET',
           comment: `Cacsms autonomy ${side} market scout ${executableDecision.symbol}`,
-          entryPlan,
+          entryPlan: adjustedEntryPlan,
           leg: 'market_scout',
           ...rewardRiskExtras,
         }),
@@ -766,12 +847,61 @@ export async function dispatchAutonomyDecision(input: {
       if (!result) {
         throw new Error('Batch entry dispatch produced no commands.');
       }
+    } else if (useBatchRetracementEntry && adjustedEntryPlan) {
+      const limitOrderType = side === 'BUY' ? 'BUY_LIMIT' : 'SELL_LIMIT';
+      for (let index = 0; index < batchLegLots.length; index += 1) {
+        const legLots = batchLegLots[index];
+        const legCommandId = `${commandId}-limit-leg-${index + 1}-${randomUUID().slice(0, 8)}`;
+        const legResult = await dispatchExecutionCommand({
+          commandId: legCommandId,
+          terminalId: checklist.terminalId,
+          type: 'place_order',
+          payload: buildExecutionPayload({
+            sourceDecision: input,
+            executableDecision,
+            account,
+            side,
+            executionMode,
+            volumeLots: legLots,
+            stopLoss: adjustedEntryPlan.stopLoss,
+            takeProfit: adjustedEntryPlan.takeProfit,
+            entryPrice: adjustedEntryPlan.pendingEntryPrice,
+            rewardRiskRatio: adjustedEntryPlan.rewardRiskRatio,
+            stopTargetMethod: 'institutional_retracement_batch',
+            sized,
+            strategyId,
+            orderType: limitOrderType,
+            comment: `Cacsms autonomy ${side} optimized batch limit ${index + 1}/${batchLegLots.length} ${executableDecision.symbol}`,
+            entryPlan: adjustedEntryPlan,
+            leg: `batch_limit_leg_${index + 1}`,
+            setupGroupId,
+            basketId,
+            legIndex: index + 1,
+            legCount: batchLegCount,
+            batchEntry: true,
+            ...rewardRiskExtras,
+          }),
+          environment: account.environment,
+          sandboxMode: account.sandboxMode,
+          dedupeKey: `AUTONOMY:${input.decisionLogId}:${input.decision.symbol}:${side}:BATCH_LIMIT:${index + 1}:${adjustedEntryPlan.pendingEntryPrice}`,
+          intentId: `${input.decisionLogId}:limit-leg:${index + 1}`,
+          source: 'AUTONOMY_EXECUTION_ADAPTER',
+        });
+        result = legResult;
+        dispatchedCommands.push({ commandId: legResult.command.commandId, orderType: limitOrderType, volumeLots: legLots });
+      }
+      finalStopLoss = adjustedEntryPlan.stopLoss;
+      finalTakeProfit = adjustedEntryPlan.takeProfit;
+      finalEntryPrice = adjustedEntryPlan.pendingEntryPrice;
+      if (!result) {
+        throw new Error('Batch retracement dispatch produced no commands.');
+      }
     } else {
       const finalOrderType = useRetracementEntry ? (side === 'BUY' ? 'BUY_LIMIT' : 'SELL_LIMIT') : 'MARKET';
       const finalVolumeLots = useRetracementEntry ? split.limitLots : volumeLots;
-      finalEntryPrice = useRetracementEntry && entryPlan ? entryPlan.pendingEntryPrice : stopTargets.entryPrice;
-      finalStopLoss = useRetracementEntry && entryPlan ? entryPlan.stopLoss : stopLoss;
-      finalTakeProfit = useRetracementEntry && entryPlan ? entryPlan.takeProfit : takeProfit;
+      finalEntryPrice = useRetracementEntry && adjustedEntryPlan ? adjustedEntryPlan.pendingEntryPrice : stopTargets.entryPrice;
+      finalStopLoss = useRetracementEntry && adjustedEntryPlan ? adjustedEntryPlan.stopLoss : stopLoss;
+      finalTakeProfit = useRetracementEntry && adjustedEntryPlan ? adjustedEntryPlan.takeProfit : takeProfit;
       result = await dispatchExecutionCommand({
         commandId: pendingCommandId,
         terminalId: checklist.terminalId,
@@ -794,7 +924,7 @@ export async function dispatchAutonomyDecision(input: {
           comment: useRetracementEntry
             ? `Cacsms autonomy ${side} retracement ${executableDecision.symbol}`
             : `Cacsms autonomy ${side} ${executableDecision.symbol}`,
-          entryPlan: entryPlan ?? undefined,
+          entryPlan: adjustedEntryPlan ?? undefined,
           leg: useRetracementEntry ? 'retracement_limit' : 'market_full',
           setupGroupId,
           legIndex: 1,
@@ -831,11 +961,19 @@ export async function dispatchAutonomyDecision(input: {
         stopLoss: finalStopLoss,
         takeProfit: finalTakeProfit,
         entryPrice: finalEntryPrice,
-        stopTargetMethod: useBatchEntry ? 'batch_entry' : useRetracementEntry ? 'retracement_entry' : stopTargets.method,
+        stopTargetMethod: useBatchEntry
+          ? 'batch_entry'
+          : useBatchRetracementEntry
+            ? 'institutional_retracement_batch'
+            : useRetracementEntry
+              ? 'retracement_entry'
+              : stopTargets.method,
         rewardRiskRatio: stopTargets.rewardRiskRatio,
         strategy: strategyMetadata,
-        entryPlan: useBatchEntry ? null : entryPlan ?? null,
-        batchEntry: useBatchEntry,
+        entryPlan: useBatchEntry ? null : adjustedEntryPlan ?? null,
+        entryOptimization: entryOptimization.breakdown,
+        entryMode: entryOptimization.selectedEntryMode,
+        batchEntry: useBatchEntry || useBatchRetracementEntry,
         legCount: batchLegLots.length,
         setupGroupId,
         commands: dispatchedCommands,
@@ -854,7 +992,9 @@ export async function dispatchAutonomyDecision(input: {
       reasons: [
         useBatchEntry
           ? `${side} batch entry dispatched ${batchLegLots.length} leg(s) to execution bridge.`
-          : `${side} ${useRetracementEntry ? 'retracement entry plan' : 'market order'} dispatched to execution bridge.`,
+          : useBatchRetracementEntry
+            ? `${side} institutional batch limit dispatched ${batchLegLots.length} leg(s) at ${finalEntryPrice}.`
+            : `${side} ${useRetracementEntry ? 'retracement entry plan' : 'market order'} dispatched to execution bridge.`,
       ],
       metrics: {
         commandId: result.command.commandId,
@@ -863,8 +1003,8 @@ export async function dispatchAutonomyDecision(input: {
         volumeLots,
         stopLoss: finalStopLoss,
         takeProfit: finalTakeProfit,
-        entryPlan: useBatchEntry ? null : entryPlan ?? null,
-        batchEntry: useBatchEntry,
+        entryPlan: useBatchEntry ? null : adjustedEntryPlan ?? null,
+        batchEntry: useBatchEntry || useBatchRetracementEntry,
         legCount: batchLegLots.length,
         setupGroupId,
         rewardRiskRatio: stopTargets.rewardRiskRatio,

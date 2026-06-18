@@ -3,7 +3,7 @@
 //| Demo heartbeat bridge first, execution later.                     |
 //+------------------------------------------------------------------+
 #property strict
-#property version "001.006"
+#property version "001.007"
 
 #include <Trade\Trade.mqh>
 
@@ -16,6 +16,16 @@ input bool EnableExecution = false;
 input long MagicNumber = 9902501;
 input int SlippagePoints = 20;
 input int WebRequestTimeoutMs = 5000;
+input bool EnableBasketProfitLock = true;
+input double BasketLockTier1TriggerUsd = 20.0;
+input double BasketLockTier1FloorUsd = 20.0;
+input double BasketLockTier2TriggerUsd = 50.0;
+input double BasketLockTier2FloorUsd = 40.0;
+input double BasketLockTier3TriggerUsd = 100.0;
+input double BasketLockTier3FloorUsd = 80.0;
+input int BasketLockLogSeconds = 5;
+
+#define MAX_BASKET_GROUPS 8
 
 CTrade trade;
 
@@ -45,6 +55,17 @@ double virtualEntryTakeProfits[32];
 double virtualEntryCancelPrices[32];
 string virtualEntryComments[32];
 int virtualEntryCount = 0;
+
+string g_basketGroupKeys[MAX_BASKET_GROUPS];
+double g_basketPeakUsd[MAX_BASKET_GROUPS];
+double g_basketLockedUsd[MAX_BASKET_GROUPS];
+double g_basketFloatUsd[MAX_BASKET_GROUPS];
+int g_basketLegCount[MAX_BASKET_GROUPS];
+string g_basketSymbols[MAX_BASKET_GROUPS];
+string g_basketSides[MAX_BASKET_GROUPS];
+int g_basketGroupCount = 0;
+string g_basketProtectionJson = "[]";
+datetime g_lastBasketLogAt = 0;
 
 string BoolToString(bool value)
 {
@@ -150,6 +171,234 @@ bool AddVirtualEntry(string commandId, string terminalId, string symbol, string 
    return true;
 }
 
+bool IsGoldBasketSymbol(string symbol)
+{
+   string upper = symbol;
+   StringToUpper(upper);
+   return (StringFind(upper, "XAU") == 0 || StringFind(upper, "XAG") == 0);
+}
+
+bool IsManagedBasketPosition(ulong ticket)
+{
+   if (ticket <= 0 || !PositionSelectByTicket(ticket)) return false;
+   if ((ulong)PositionGetInteger(POSITION_MAGIC) != (ulong)MagicNumber) return false;
+   return IsGoldBasketSymbol(PositionGetString(POSITION_SYMBOL));
+}
+
+int FindBasketGroupIndex(string basketKey)
+{
+   for (int i = 0; i < g_basketGroupCount; i++)
+   {
+      if (g_basketGroupKeys[i] == basketKey) return i;
+   }
+   return -1;
+}
+
+int EnsureBasketGroupIndex(string basketKey)
+{
+   int index = FindBasketGroupIndex(basketKey);
+   if (index >= 0) return index;
+   if (g_basketGroupCount >= MAX_BASKET_GROUPS) return -1;
+   index = g_basketGroupCount;
+   g_basketGroupKeys[index] = basketKey;
+   g_basketPeakUsd[index] = 0.0;
+   g_basketLockedUsd[index] = 0.0;
+   g_basketFloatUsd[index] = 0.0;
+   g_basketLegCount[index] = 0;
+   g_basketSymbols[index] = "";
+   g_basketSides[index] = "";
+   g_basketGroupCount++;
+   return index;
+}
+
+void ResetBasketGroupAt(int index)
+{
+   if (index < 0 || index >= g_basketGroupCount) return;
+   g_basketPeakUsd[index] = 0.0;
+   g_basketLockedUsd[index] = 0.0;
+   g_basketFloatUsd[index] = 0.0;
+   g_basketLegCount[index] = 0;
+}
+
+double ResolveBasketLockedUsd(double peakUsd, double currentLockedUsd)
+{
+   double locked = MathMax(0.0, currentLockedUsd);
+   if (peakUsd + 1e-6 >= BasketLockTier3TriggerUsd) locked = MathMax(locked, BasketLockTier3FloorUsd);
+   else if (peakUsd + 1e-6 >= BasketLockTier2TriggerUsd) locked = MathMax(locked, BasketLockTier2FloorUsd);
+   else if (peakUsd + 1e-6 >= BasketLockTier1TriggerUsd) locked = MathMax(locked, BasketLockTier1FloorUsd);
+   return locked;
+}
+
+bool CloseBasketGroup(string symbol, long positionType)
+{
+   trade.SetExpertMagicNumber((ulong)MagicNumber);
+   trade.SetDeviationInPoints(SlippagePoints);
+   bool closedAny = false;
+   for (int pass = 0; pass < 2; pass++)
+   {
+      for (int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if (!IsManagedBasketPosition(ticket)) continue;
+         if (PositionGetString(POSITION_SYMBOL) != symbol) continue;
+         if (PositionGetInteger(POSITION_TYPE) != positionType) continue;
+         if (!trade.PositionClose(ticket))
+         {
+            Print("[BASKET_LOCK] close_failed ticket=", ticket, " symbol=", symbol, " retcode=", trade.ResultRetcode(), " detail=", trade.ResultRetcodeDescription());
+            continue;
+         }
+         closedAny = true;
+         Print("[BASKET_LOCK] closed ticket=", ticket, " symbol=", symbol);
+      }
+   }
+   return closedAny;
+}
+
+string BuildBasketProtectionJson()
+{
+   string json = "[";
+   bool first = true;
+   for (int i = 0; i < g_basketGroupCount; i++)
+   {
+      if (g_basketLegCount[i] <= 0) continue;
+      double drawdown = MathMax(0.0, g_basketPeakUsd[i] - g_basketFloatUsd[i]);
+      bool closeArmed = g_basketLockedUsd[i] > 0.0 && g_basketFloatUsd[i] <= g_basketLockedUsd[i] + 0.05;
+      if (!first) json += ",";
+      first = false;
+      json += StringFormat(
+         "{\"symbol\":\"%s\",\"side\":\"%s\",\"legCount\":%d,\"floatingUsd\":%.2f,\"peakUsd\":%.2f,\"lockedUsd\":%.2f,\"drawdownFromPeakUsd\":%.2f,\"closeArmed\":%s,\"eaManaged\":true}",
+         EscapeJson(g_basketSymbols[i]),
+         EscapeJson(g_basketSides[i]),
+         g_basketLegCount[i],
+         g_basketFloatUsd[i],
+         g_basketPeakUsd[i],
+         g_basketLockedUsd[i],
+         drawdown,
+         closeArmed ? "true" : "false"
+      );
+   }
+   json += "]";
+   return json;
+}
+
+void ManageBasketProfitLocks()
+{
+   if (!EnableBasketProfitLock) return;
+
+   for (int resetIndex = 0; resetIndex < g_basketGroupCount; resetIndex++)
+   {
+      g_basketFloatUsd[resetIndex] = 0.0;
+      g_basketLegCount[resetIndex] = 0;
+   }
+
+   bool activeGroups[MAX_BASKET_GROUPS];
+   for (int i = 0; i < MAX_BASKET_GROUPS; i++) activeGroups[i] = false;
+
+   for (int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if (!IsManagedBasketPosition(ticket)) continue;
+
+      string symbol = PositionGetString(POSITION_SYMBOL);
+      long positionType = PositionGetInteger(POSITION_TYPE);
+      string side = positionType == POSITION_TYPE_BUY ? "buy" : "sell";
+      string basketKey = symbol + "|" + side;
+      int index = EnsureBasketGroupIndex(basketKey);
+      if (index < 0) continue;
+
+      activeGroups[index] = true;
+      g_basketSymbols[index] = symbol;
+      g_basketSides[index] = side;
+      g_basketLegCount[index]++;
+      g_basketFloatUsd[index] += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+   }
+
+   bool stateChanged = false;
+   datetime now = TimeLocal();
+
+   for (int i = 0; i < g_basketGroupCount; i++)
+   {
+      if (!activeGroups[i])
+      {
+         if (g_basketLegCount[i] > 0 || g_basketPeakUsd[i] > 0.0 || g_basketLockedUsd[i] > 0.0)
+         {
+            ResetBasketGroupAt(i);
+            stateChanged = true;
+         }
+         continue;
+      }
+
+      double previousPeak = g_basketPeakUsd[i];
+      double previousLocked = g_basketLockedUsd[i];
+      g_basketPeakUsd[i] = MathMax(g_basketPeakUsd[i], g_basketFloatUsd[i]);
+      g_basketLockedUsd[i] = ResolveBasketLockedUsd(g_basketPeakUsd[i], g_basketLockedUsd[i]);
+
+      if (g_basketLockedUsd[i] > previousLocked + 1e-6)
+      {
+         Print("[BASKET_LOCK] lock_raised symbol=", g_basketSymbols[i], " side=", g_basketSides[i],
+               " float=", DoubleToString(g_basketFloatUsd[i], 2),
+               " peak=", DoubleToString(g_basketPeakUsd[i], 2),
+               " lock=", DoubleToString(g_basketLockedUsd[i], 2),
+               " legs=", g_basketLegCount[i]);
+         stateChanged = true;
+      }
+      else if (g_basketPeakUsd[i] > previousPeak + 1e-6)
+      {
+         Print("[BASKET_LOCK] peak_updated symbol=", g_basketSymbols[i], " side=", g_basketSides[i],
+               " float=", DoubleToString(g_basketFloatUsd[i], 2),
+               " peak=", DoubleToString(g_basketPeakUsd[i], 2),
+               " lock=", DoubleToString(g_basketLockedUsd[i], 2));
+         stateChanged = true;
+      }
+
+      if (g_basketLockedUsd[i] > 0.0 && g_basketFloatUsd[i] <= g_basketLockedUsd[i] + 0.05)
+      {
+         double drawdown = MathMax(0.0, g_basketPeakUsd[i] - g_basketFloatUsd[i]);
+         Print("[BASKET_LOCK] reversal_close symbol=", g_basketSymbols[i], " side=", g_basketSides[i],
+               " float=", DoubleToString(g_basketFloatUsd[i], 2),
+               " peak=", DoubleToString(g_basketPeakUsd[i], 2),
+               " lock=", DoubleToString(g_basketLockedUsd[i], 2),
+               " drawdown=", DoubleToString(drawdown, 2),
+               " legs=", g_basketLegCount[i]);
+         long positionType = g_basketSides[i] == "buy" ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+         CloseBasketGroup(g_basketSymbols[i], positionType);
+         ResetBasketGroupAt(i);
+         stateChanged = true;
+         continue;
+      }
+   }
+
+   g_basketProtectionJson = BuildBasketProtectionJson();
+
+   if (stateChanged || g_lastBasketLogAt == 0 || (now - g_lastBasketLogAt) >= BasketLockLogSeconds)
+   {
+      for (int i = 0; i < g_basketGroupCount; i++)
+      {
+         if (g_basketLegCount[i] <= 0) continue;
+         double drawdown = MathMax(0.0, g_basketPeakUsd[i] - g_basketFloatUsd[i]);
+         Print("[BASKET_LOCK] tick symbol=", g_basketSymbols[i],
+               " float=", DoubleToString(g_basketFloatUsd[i], 2),
+               " peak=", DoubleToString(g_basketPeakUsd[i], 2),
+               " lock=", DoubleToString(g_basketLockedUsd[i], 2),
+               " drawdown=", DoubleToString(drawdown, 2),
+               " legs=", g_basketLegCount[i]);
+      }
+      g_lastBasketLogAt = now;
+   }
+
+   if (g_basketGroupCount > 0)
+   {
+      for (int i = 0; i < g_basketGroupCount; i++)
+      {
+         if (g_basketLegCount[i] <= 0) continue;
+         Comment(StringFormat("Basket %s %s | float $%.2f | peak $%.2f | lock $%.2f | legs %d",
+            g_basketSymbols[i], g_basketSides[i], g_basketFloatUsd[i], g_basketPeakUsd[i], g_basketLockedUsd[i], g_basketLegCount[i]));
+         return;
+      }
+   }
+   Comment("");
+}
+
 int OnInit()
 {
    eaStartedAt = TimeLocal();
@@ -167,6 +416,7 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    ProcessVirtualEntries();
+   ManageBasketProfitLocks();
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans, const MqlTradeRequest &request, const MqlTradeResult &result)
@@ -591,8 +841,9 @@ void SendHeartbeat()
    heartbeat += ",\"symbolTelemetry\":" + telemetryJson;
    heartbeat += ",\"telemetrySummary\":" + summaryJson;
    heartbeat += ",\"openPositionSnapshots\":" + BuildOpenPositionsJson();
+   heartbeat += ",\"basketProtection\":{\"enabled\":" + (EnableBasketProfitLock ? "true" : "false") + ",\"baskets\":" + g_basketProtectionJson + "}";
    heartbeat += StringFormat(
-      ",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openPositions\":%d,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.006\"}",
+      ",\"balance\":%.2f,\"equity\":%.2f,\"margin\":%.2f,\"freeMargin\":%.2f,\"openPositions\":%d,\"openOrders\":%d,\"connectionStatus\":\"%s\",\"lastTickTime\":\"%s\",\"mt5ServerTime\":\"%s\",\"terminalTime\":\"%s\",\"nigeriaTime\":\"%s\",\"sentAt\":\"%s\",\"heartbeatIntervalSeconds\":%d,\"sequence\":%I64d,\"latencyMs\":%d,\"eaStartedAt\":\"%s\",\"version\":\"001.007\"}",
       AccountInfoDouble(ACCOUNT_BALANCE),
       AccountInfoDouble(ACCOUNT_EQUITY),
       AccountInfoDouble(ACCOUNT_MARGIN),
