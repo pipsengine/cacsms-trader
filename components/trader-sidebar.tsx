@@ -12,13 +12,16 @@ import {
   Network,
   PanelLeftClose,
   PanelLeftOpen,
+  ShieldCheck,
   X,
   Zap,
   type LucideIcon,
 } from "lucide-react";
 
 import { useContinuousTradingSession } from "@/components/continuous-trading-session-provider";
+import { usePlatformAuth } from "@/components/platform-auth-provider";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { platformAdminHrefForPageId, platformAdminPageIdFromPath } from "@/lib/platform-admin-routes";
 import { strategyPageHref, strategyPageIdFromPath } from "@/lib/strategy-routes";
 import { cn } from "@/lib/utils";
 
@@ -62,6 +65,14 @@ const navigationModules: NavigationModule[] = [
       kind: "control",
     },
     page("Executive overview"),
+  ]),
+  navModule("Platform Administration", ShieldCheck, [
+    page("Administration dashboard", "control"),
+    page("User management", "control"),
+    page("My profile", "workspace"),
+    page("My MT5 connection", "integration"),
+    page("Roles & permissions", "control"),
+    page("Audit log", "report"),
   ]),
   navModule("MT5 Infrastructure & Broker Connectivity", Network, [
     page("Infrastructure overview"),
@@ -301,6 +312,39 @@ function ContinuousTradingSidebarStatus(props: {
   );
 }
 
+function PlatformUserSidebarStatus(props: { collapsed: boolean }) {
+  const auth = usePlatformAuth();
+  const label = !auth.loaded
+    ? "Platform user…"
+    : auth.authenticated
+      ? auth.user?.displayName ?? "Signed in"
+      : "Platform sign in";
+
+  return (
+    <Link
+      href={auth.authenticated ? "/platform-administration" : "/platform-administration/login"}
+      title={props.collapsed ? label : undefined}
+      className={cn(
+        "flex items-center gap-3 rounded-lg border px-3 py-3 transition-colors",
+        auth.authenticated
+          ? "border-indigo-200 bg-indigo-50 text-indigo-800 hover:bg-indigo-100"
+          : "border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100",
+        props.collapsed && "justify-center px-0",
+      )}
+    >
+      <ShieldCheck className="h-4 w-4 shrink-0" />
+      {!props.collapsed ? (
+        <div className="min-w-0">
+          <div className="truncate text-xs font-semibold">{label}</div>
+          <div className="truncate text-[11px] opacity-75">
+            {auth.authenticated ? auth.user?.role?.replaceAll('_', ' ') : 'Multi-user administration'}
+          </div>
+        </div>
+      ) : null}
+    </Link>
+  );
+}
+
 function SidebarShell(props: {
   activeModuleIds: Set<string>;
   activePage: string;
@@ -359,6 +403,7 @@ function SidebarShell(props: {
           active={tradingSession.active}
           loaded={tradingSession.loaded}
         />
+        <PlatformUserSidebarStatus collapsed={props.collapsed} />
       </div>
     </aside>
   );
@@ -1080,6 +1125,8 @@ function hrefForPageId(pageId: string): string | null {
   if (pageId === "ea-deployment") return "/mt5-infrastructure/terminal-operations/ea-deployment";
   if (pageId === "ea-deployment-link-manager") return "/mt5-infrastructure/terminal-operations/ea-deployment-link";
   if (pageId === "strategy-intelligence-overview") return "/institutional-strategy-intelligence";
+  const platformHref = platformAdminHrefForPageId(pageId);
+  if (platformHref) return platformHref;
   return strategyPageHref(pageId);
 }
 
@@ -1122,5 +1169,7 @@ function pageIdForPathname(pathname: string): string | null {
     return match[1];
   }
   if (pathname === "/institutional-strategy-intelligence") return "strategy-intelligence-overview";
+  const platformPageId = platformAdminPageIdFromPath(pathname);
+  if (platformPageId) return platformPageId;
   return strategyPageIdFromPath(pathname);
 }

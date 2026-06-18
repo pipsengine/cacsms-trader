@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { applyAutonomyAccountProfile } from './autonomy-account-profiles';
 import { buildAutonomousDecision } from './autonomous-decision-engine';

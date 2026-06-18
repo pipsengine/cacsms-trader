@@ -72,7 +72,7 @@ export function goldIntelligentScalingEnabled(): boolean {
 
 /** Max concurrent XAUUSD positions (scaling cap). */
 export function goldMaxConcurrentPositions(): number {
-  return Math.max(goldMinEntryLegCount(), Math.min(10, Math.round(envNumber('CACSMS_GOLD_MAX_CONCURRENT_POSITIONS', 10))));
+  return Math.max(goldMinEntryLegCount(), Math.min(50, Math.round(envNumber('CACSMS_GOLD_MAX_CONCURRENT_POSITIONS', 30))));
 }
 
 /** Minimum basket legs per Gold signal. */
@@ -165,7 +165,22 @@ export function goldScalpMinRewardRisk(): number {
 
 /** Max scale-in legs per setup type before requiring fresh confirmation. */
 export function goldMaxSetupExposure(): number {
-  return Math.max(1, Math.min(goldMaxConcurrentPositions(), Math.round(envNumber('CACSMS_GOLD_MAX_SETUP_EXPOSURE', 5))));
+  return Math.max(goldMinEntryLegCount(), Math.min(goldMaxConcurrentPositions(), Math.round(envNumber('CACSMS_GOLD_MAX_SETUP_EXPOSURE', 10))));
+}
+
+/** Max institutional baskets opened per WAT calendar day. */
+export function goldMaxBasketsPerDay(): number {
+  return Math.max(1, Math.min(20, Math.round(envNumber('CACSMS_GOLD_MAX_BASKETS_PER_DAY', 8))));
+}
+
+/** Max concurrently open Gold baskets (distinct setup groups). */
+export function goldMaxConcurrentBaskets(): number {
+  return Math.max(1, Math.min(10, Math.round(envNumber('CACSMS_GOLD_MAX_CONCURRENT_BASKETS', 3))));
+}
+
+/** Max Gold legs opened per calendar day (positions/commands). */
+export function goldMaxDailyLegs(): number {
+  return Math.max(goldMinEntryLegCount(), Math.min(100, Math.round(envNumber('CACSMS_GOLD_MAX_DAILY_LEGS', envNumber('CACSMS_GOLD_MAX_TRADES_PER_DAY', 50)))));
 }
 
 /** Parallel market legs opened together on each new Gold entry signal. */
@@ -185,7 +200,7 @@ export function goldBatchEntryEnabled(): boolean {
 
 /** Max trades per calendar day on Gold. */
 export function goldMaxTradesPerDay(): number {
-  return Math.max(1, Math.min(50, Math.round(envNumber('CACSMS_GOLD_MAX_TRADES_PER_DAY', 25))));
+  return goldMaxDailyLegs();
 }
 
 /** Cooldown minutes before re-entry on Gold after a close (unless retracement confirms). */
@@ -227,6 +242,9 @@ export interface GoldEngineStatus {
   scalpMinRewardRisk: number;
   maxSetupExposure: number;
   maxConcurrentPositions: number;
+  maxConcurrentBaskets: number;
+  maxBasketsPerDay: number;
+  maxDailyLegs: number;
   maxEntriesPerCycle: number;
   maxSpreadPoints: number;
   maxTradesPerDay: number;
@@ -257,6 +275,9 @@ export function getGoldEngineStatus(): GoldEngineStatus {
     scalpMinRewardRisk: goldScalpMinRewardRisk(),
     maxSetupExposure: goldMaxSetupExposure(),
     maxConcurrentPositions: goldMaxConcurrentPositions(),
+    maxConcurrentBaskets: goldMaxConcurrentBaskets(),
+    maxBasketsPerDay: goldMaxBasketsPerDay(),
+    maxDailyLegs: goldMaxDailyLegs(),
     maxEntriesPerCycle: goldMaxEntriesPerCycle(),
     maxSpreadPoints: goldMaxSpreadPoints(),
     maxTradesPerDay: goldMaxTradesPerDay(),

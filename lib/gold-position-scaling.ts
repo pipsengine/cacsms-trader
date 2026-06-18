@@ -11,6 +11,7 @@ import {
   isGoldSymbol,
 } from '@/lib/gold-trading-engine';
 import { validateGoldInstitutionalReentry } from '@/lib/gold-reentry-validator';
+import { evaluateInstitutionalBasketCapacity, logBasketCapacityBlock } from '@/lib/gold-basket-capacity';
 import { resolveGoldLivePrice } from '@/lib/gold-execution-quality';
 import { getOpenPositionMetrics, syncOpenPositionRegistry } from '@/lib/execution-open-positions';
 import { resolveExecutionAccountContext } from '@/lib/execution-account-context';
@@ -211,6 +212,29 @@ export async function evaluateGoldPositionScaling(input: {
       blockers.push('Gold re-entry blocked — live price unavailable for institutional level confirmation.');
     }
     blockers.push(...reentry.blockers);
+  }
+
+  if (blockers.length === 0) {
+    const capacity = await evaluateInstitutionalBasketCapacity({
+      terminalId: input.terminalId,
+      proposedLegCount: goldBatchEntryEnabled()
+        ? goldEntryLegCount({
+          qualityScore: input.decision.confidenceScore,
+          confidenceScore: input.decision.confidenceScore,
+        })
+        : 1,
+      isNewBasket: !isStack,
+      qualityScore: input.decision.confidenceScore,
+      confidenceScore: input.decision.confidenceScore,
+    });
+    if (!capacity.allowed) {
+      blockers.push(...capacity.blockers);
+      await logBasketCapacityBlock({
+        source: 'gold_position_scaling',
+        blockers: capacity.blockers,
+        snapshot: capacity.snapshot,
+      });
+    }
   }
 
   return {

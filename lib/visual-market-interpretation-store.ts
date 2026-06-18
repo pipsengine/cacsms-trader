@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { getLatestAiVisualInterpretation } from './ai-visual-interpretation-store';
 import { getLatestChartSegmentation } from './chart-segmentation-store';

@@ -70,14 +70,19 @@ async function sumRealizedClosedPnl(input: {
 
   const result = await queryPostgres(
     `
-      SELECT COALESCE(SUM(p.profit_loss), 0)::float AS total
-      FROM execution_open_positions p
-      JOIN mt5_terminals t ON t.terminal_id = p.terminal_id
-      WHERE t.account_number = $1
-        AND p.status = 'closed'
-        AND p.closed_at IS NOT NULL
-        AND p.closed_at >= (${input.periodStartSql})
-        ${beforeClause}
+      SELECT COALESCE(SUM(sub.profit_loss), 0)::float AS total
+      FROM (
+        SELECT DISTINCT ON (p.ticket)
+          p.profit_loss
+        FROM execution_open_positions p
+        JOIN mt5_terminals t ON t.terminal_id = p.terminal_id
+        WHERE t.account_number = $1
+          AND p.status = 'closed'
+          AND p.closed_at IS NOT NULL
+          AND p.closed_at >= (${input.periodStartSql})
+          ${beforeClause}
+        ORDER BY p.ticket, p.closed_at DESC, p.id DESC
+      ) sub
     `,
     [input.accountNumber],
   );
@@ -99,6 +104,8 @@ export async function getTradingPeriodPnl(input: {
     : account.equity;
   const todayUsd = Number((currentEquity - account.startingEquityToday).toFixed(2));
 
+  // Week/month: deduped realized closes before today (registry can contain duplicate close rows)
+  // plus today's equity delta so open floating is included.
   const weekStartSql = `(date_trunc('week', (now() AT TIME ZONE '${TRADING_PNL_TIMEZONE}')::date))::timestamp AT TIME ZONE '${TRADING_PNL_TIMEZONE}'`;
   const monthStartSql = `(date_trunc('month', (now() AT TIME ZONE '${TRADING_PNL_TIMEZONE}')::date))::timestamp AT TIME ZONE '${TRADING_PNL_TIMEZONE}'`;
 

@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { analyzeVisualAnomalies, type AnomalyAction, type AnomalySeverity, type VisualAnomalyAnalysisResult } from './visual-anomaly-detection-engine';
 import { queryPostgres } from './postgres';

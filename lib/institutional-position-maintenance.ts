@@ -11,6 +11,7 @@ import { getLatestPairSelection, runAutonomousPairSelection, shouldRefreshPairSe
 import { queryPostgres } from '@/lib/postgres';
 import { is24HourTradingEnabled } from '@/lib/trading-session-policy';
 import { evaluateAutonomySafetyLock } from '@/lib/autonomy-safety-lock';
+import { basketCapacityBlocksNewEntries, getBasketCapacitySnapshot, logBasketCapacityBlock } from '@/lib/gold-basket-capacity';
 
 import { runMultiStyleTradingCycle } from '@/lib/trading-styles/multi-style-orchestrator';
 
@@ -109,6 +110,22 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
       symbolsProcessed: [],
       dispatchesAttempted: 0,
       detail: 'Daily drawdown budget exhausted.',
+    };
+  }
+
+  const capacity = await getBasketCapacitySnapshot();
+  if (basketCapacityBlocksNewEntries(capacity)) {
+    await logBasketCapacityBlock({
+      source: 'institutional_refill',
+      blockers: capacity.blockers,
+      snapshot: capacity,
+    });
+    return {
+      status: 'capacity_full',
+      slotsTargeted: 0,
+      symbolsProcessed: [],
+      dispatchesAttempted: 0,
+      detail: capacity.blockers.join(' ') || capacity.stateLabel,
     };
   }
 

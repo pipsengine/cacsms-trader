@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { segmentChart, type ChartSegmentResult, type ChartSegmentType } from './chart-segmentation-engine';
 import { queryPostgres } from './postgres';

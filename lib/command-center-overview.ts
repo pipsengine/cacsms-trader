@@ -4,6 +4,7 @@ import { getAutonomyStatus } from './autonomy-store';
 import { getExecutionKillSwitchStatus } from './execution-kill-switch';
 import { getTradeProtectionOverview, type TradeProtectionOverview } from './basket-protection-status';
 import { getTradingPeriodPnl, type TradingPeriodPnl } from './trading-period-pnl';
+import { getBasketCapacitySnapshot, type BasketCapacitySnapshot } from './gold-basket-capacity';
 import { getCommandCenterTick } from './command-center-tick';
 import { getContinuousTradingSessionStatus } from './continuous-trading-session';
 import { getLastInstitutionalMaintenanceSnapshot } from './institutional-position-maintenance';
@@ -69,6 +70,7 @@ export interface CommandCenterOverview {
       openCount: number | null;
     } | null;
     periodPnl: TradingPeriodPnl;
+    basketCapacity: BasketCapacitySnapshot;
   };
   risk: {
     continuousTradingEnabled: boolean;
@@ -384,6 +386,10 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
     accountNumber: primaryAccount,
     liveEquity: tick.trading.totalEquity,
   });
+  const basketCapacity = await getBasketCapacitySnapshot({
+    accountNumber: primaryAccount,
+    terminalId: tick.trading.terminals.find((terminal) => terminal.status === 'connected')?.terminalId ?? null,
+  });
 
   const terminalExecutionEnabled = tick.trading.terminals.some(
     (terminal) => terminal.status === 'connected' && terminal.enableExecution,
@@ -471,6 +477,7 @@ export async function getCommandCenterOverview(): Promise<CommandCenterOverview>
         : 'Stopped — press Start on the command center to resume autonomous trading.',
       lastMaintenance,
       periodPnl,
+      basketCapacity,
     },
     risk: {
       continuousTradingEnabled: riskSettings.continuousTradingEnabled,

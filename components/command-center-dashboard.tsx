@@ -210,6 +210,22 @@ type OverviewPayload = {
       monthUsd: number;
       timezone: string;
     };
+    basketCapacity: {
+      state: 'open' | 'basket_suspended' | 'hard_stop';
+      stateLabel: string;
+      basketsOpenedToday: number;
+      maxBasketsPerDay: number;
+      concurrentBaskets: number;
+      maxConcurrentBaskets: number;
+      openLegs: number;
+      pendingLegs: number;
+      dailyLegsOpened: number;
+      maxDailyLegs: number;
+      maxConcurrentLegs: number;
+      dynamicMaxLegsPerBasket: number;
+      remainingDailyLossUsd: number;
+      blockers: string[];
+    };
   };
   tradeProtection: {
     monitorEnabled: boolean;
@@ -331,6 +347,12 @@ function lockTierTone(lockedUsd: number): DashboardTone {
   return 'amber';
 }
 
+function capacityTone(state: OverviewPayload['continuousTrading']['basketCapacity']['state']): DashboardTone {
+  if (state === 'hard_stop') return 'rose';
+  if (state === 'basket_suspended') return 'amber';
+  return 'emerald';
+}
+
 const HEALTH_TONE: Record<OverviewPayload['systemHealth']['level'], DashboardTone> = {
   healthy: 'emerald',
   degraded: 'amber',
@@ -447,6 +469,22 @@ function createBootstrapOverviewFromTick(tick: DashboardTick): OverviewPayload {
         weekUsd: tick.continuousTrading?.periodPnl?.weekUsd ?? 0,
         monthUsd: tick.continuousTrading?.periodPnl?.monthUsd ?? 0,
         timezone: 'Africa/Lagos',
+      },
+      basketCapacity: {
+        state: 'open',
+        stateLabel: 'Loading capacity…',
+        basketsOpenedToday: 0,
+        maxBasketsPerDay: 8,
+        concurrentBaskets: 0,
+        maxConcurrentBaskets: 3,
+        openLegs: 0,
+        pendingLegs: 0,
+        dailyLegsOpened: 0,
+        maxDailyLegs: 50,
+        maxConcurrentLegs: 30,
+        dynamicMaxLegsPerBasket: 5,
+        remainingDailyLossUsd: 0,
+        blockers: [],
       },
     },
     tradeProtection: {
@@ -944,6 +982,33 @@ export function CommandCenterDashboard() {
                       </CardContent>
                     </Card>
                   </div>
+
+                  <Card className={cn('border shadow-none', toneCard(capacityTone(overview.continuousTrading.basketCapacity.state)))}>
+                    <CardHeader className={cn('pb-2 pt-3', toneCardHeader(capacityTone(overview.continuousTrading.basketCapacity.state)))}>
+                      <CardTitle className={cn('flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide', toneTitle(capacityTone(overview.continuousTrading.basketCapacity.state)))}>
+                        <Target className="h-3.5 w-3.5" />
+                        Basket capacity
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent className="grid gap-3 pb-3 text-sm md:grid-cols-2 xl:grid-cols-4">
+                      <p><span className={toneMuted(capacityTone(overview.continuousTrading.basketCapacity.state))}>State</span> <span className="font-semibold">{overview.continuousTrading.basketCapacity.stateLabel}</span></p>
+                      <p><span className={toneMuted(capacityTone(overview.continuousTrading.basketCapacity.state))}>Baskets today</span> <span className="font-semibold">{overview.continuousTrading.basketCapacity.basketsOpenedToday}/{overview.continuousTrading.basketCapacity.maxBasketsPerDay}</span></p>
+                      <p><span className={toneMuted(capacityTone(overview.continuousTrading.basketCapacity.state))}>Concurrent baskets</span> <span className="font-semibold">{overview.continuousTrading.basketCapacity.concurrentBaskets}/{overview.continuousTrading.basketCapacity.maxConcurrentBaskets}</span></p>
+                      <p><span className={toneMuted(capacityTone(overview.continuousTrading.basketCapacity.state))}>Open legs</span> <span className="font-semibold">{overview.continuousTrading.basketCapacity.openLegs + overview.continuousTrading.basketCapacity.pendingLegs}/{overview.continuousTrading.basketCapacity.maxConcurrentLegs}</span></p>
+                      <p><span className={toneMuted(capacityTone(overview.continuousTrading.basketCapacity.state))}>Daily legs</span> <span className="font-semibold">{overview.continuousTrading.basketCapacity.dailyLegsOpened}/{overview.continuousTrading.basketCapacity.maxDailyLegs}</span></p>
+                      <p><span className={toneMuted(capacityTone(overview.continuousTrading.basketCapacity.state))}>Legs / basket</span> <span className="font-semibold">{overview.continuousTrading.basketCapacity.dynamicMaxLegsPerBasket} (5–10)</span></p>
+                      <p><span className={toneMuted(capacityTone(overview.continuousTrading.basketCapacity.state))}>Daily budget left</span> <span className="font-semibold">{formatUsd(overview.continuousTrading.basketCapacity.remainingDailyLossUsd)}</span></p>
+                      {overview.continuousTrading.basketCapacity.blockers.length > 0 ? (
+                        <p className={cn('md:col-span-2 xl:col-span-4 text-xs', toneBody(capacityTone(overview.continuousTrading.basketCapacity.state)))}>
+                          {overview.continuousTrading.basketCapacity.blockers.join(' · ')}
+                        </p>
+                      ) : (
+                        <p className={cn('md:col-span-2 xl:col-span-4 text-xs', toneMuted(capacityTone(overview.continuousTrading.basketCapacity.state)))}>
+                          Quality gates, hedge block, and capacity limits must pass before a new XAUUSD basket deploys.
+                        </p>
+                      )}
+                    </CardContent>
+                  </Card>
 
                   {overview.tradeProtection.baskets.length > 0 ? (
                     <div className="grid gap-3 lg:grid-cols-2">

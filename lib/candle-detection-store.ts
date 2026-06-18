@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { analyzeCandles, normalizeInputCandles, type CandleAnalysisResult, type CandleClassification, type CandleSequenceAnalysis } from './candle-detection-engine';
 import { queryPostgres } from './postgres';

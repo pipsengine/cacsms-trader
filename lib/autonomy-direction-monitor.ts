@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 import { queryPostgres } from '@/lib/postgres';
 
 type DirectionAuditInput = {

@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { resolveCaptureDisplayUrl } from './capture-display';
 import { buildVisualInterpretation, defaultComponents, type AiVisualInterpretationResult, type InterpretationBias, type InterpretationComponentInput } from './ai-visual-interpretation-engine';

@@ -21,10 +21,17 @@ const nextConfig: NextConfig = {
     remotePatterns: [],
   },
   output: 'standalone',
+  serverExternalPackages: ['pg', 'playwright'],
   transpilePackages: ['motion'],
-  webpack: (config, {dev}) => {
+  webpack: (config, {dev, isServer}) => {
     if (dev) {
       config.cache = {type: 'memory'};
+    }
+    if (isServer) {
+      config.resolve.alias = {
+        ...config.resolve.alias,
+        crypto: 'node:crypto',
+      };
     }
     // HMR is disabled in AI Studio via DISABLE_HMR env var.
     // Do not modifyâfile watching is disabled to prevent flickering during agent edits.

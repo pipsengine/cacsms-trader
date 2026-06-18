@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { MarketIntelligenceEngine } from '@/services/market-intelligence-engine';
 import type { TickSnapshot, TradingSession } from '@/packages/shared-types';

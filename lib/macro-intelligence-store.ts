@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { queryPostgres } from './postgres';
 import { completePipelineStage, getLatestPipelineSession } from './top-down-orchestrator';

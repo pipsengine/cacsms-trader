@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { ensureAutonomyRuntime, getAutonomyStatus, listDecisionLogs } from './autonomy-store';
 import { AUTONOMY_TIMEFRAMES, type AutonomyTimeframe } from './autonomy-types';

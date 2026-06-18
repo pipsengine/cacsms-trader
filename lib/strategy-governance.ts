@@ -2,7 +2,7 @@ import { isAutonomyDemoMode } from '@/lib/autonomy-demo-config';
 import { getTradingStyleProfile, TRADING_STYLE_PROFILES } from '@/lib/trading-styles/registry';
 import type { TradingStyleId } from '@/lib/trading-styles/types';
 import { queryPostgres } from '@/lib/postgres';
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 export type StrategyGovernanceStatus = {
   strategyId: string;

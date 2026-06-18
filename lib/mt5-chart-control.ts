@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { extractSymbolTelemetry } from './mt5-symbol-telemetry';
 import { resolveMt5BridgeSharedSecret } from './mt5-bridge-secret';

@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 
 import { AUTONOMY_TIMEFRAME_SEQUENCE } from './autonomous-pipeline';
 import { resolveCaptureTimeframeSequence } from './gold-top-down-timeframes';

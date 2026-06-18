@@ -29,6 +29,7 @@ import { isGoldSymbol, goldBatchEntryEnabled, goldEntryLegCount, resolveGoldEntr
 import { evaluateStrategyGovernance, resolveStrategyIdFromDecision } from '@/lib/strategy-governance';
 import { logAutonomyDirectionAudit } from '@/lib/autonomy-direction-monitor';
 import { evaluateGoldInstitutionalEntryOptimization } from '@/lib/gold-institutional-entry-optimization';
+import { evaluateInstitutionalBasketCapacity, logBasketCapacityBlock } from '@/lib/gold-basket-capacity';
 import { isRetracementEntryEnabled, planAutonomousRetracementEntry } from '@/lib/autonomous-entry-planner';
 
 export type AutonomyExecutionChecklist = {
@@ -725,9 +726,49 @@ export async function dispatchAutonomyDecision(input: {
   }
 
   const institutionalScore = evaluateGoldInstitutionalQuality(executableDecision).score;
-  const batchLegCount = isGoldSymbol(executableDecision.symbol) && goldBatchEntryEnabled() && !input.manual
+  let batchLegCount = isGoldSymbol(executableDecision.symbol) && goldBatchEntryEnabled() && !input.manual
     ? resolveGoldEntryLegCount({ qualityScore: institutionalScore, confidenceScore: executableDecision.confidenceScore })
     : 1;
+
+  if (isGoldSymbol(executableDecision.symbol) && !input.manual) {
+    const capacity = await evaluateInstitutionalBasketCapacity({
+      terminalId: checklist.terminalId,
+      accountNumber: account.accountNumber,
+      proposedLegCount: batchLegCount,
+      isNewBasket: true,
+      qualityScore: institutionalScore,
+      confidenceScore: executableDecision.confidenceScore,
+    });
+    if (!capacity.allowed) {
+      const blockers = capacity.blockers;
+      await logBasketCapacityBlock({
+        source: 'autonomy_execution_adapter',
+        blockers,
+        snapshot: capacity.snapshot,
+      });
+      await persistDispatchRecord({
+        decisionLogId: input.decisionLogId,
+        terminalId: checklist.terminalId,
+        symbol: executableDecision.symbol,
+        side,
+        status: 'blocked',
+        blockers,
+        payload: {
+          manual: false,
+          basketCapacity: capacity.snapshot,
+          strategy: strategyMetadata,
+        },
+      });
+      return {
+        ok: false,
+        status: 'blocked',
+        decisionLogId: input.decisionLogId,
+        blockers,
+      };
+    }
+    batchLegCount = Math.min(batchLegCount, capacity.snapshot.dynamicMaxLegsPerBasket);
+  }
+
   const batchLegLots = isGoldSymbol(executableDecision.symbol) && goldBatchEntryEnabled() && !input.manual
     ? buildBatchLegVolumes(goldLegLotsPerPosition(), batchLegCount)
     : [volumeLots];
