@@ -26,7 +26,7 @@ import { Progress } from '@/components/ui/progress';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
 
-const TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const TOP_DOWN_TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 
 type CaptureRecord = {
   id: string;
@@ -184,7 +184,7 @@ export function VisualIntelligenceOverviewDashboard() {
         passed: topDownComplete,
         href: '/autonomous-pipeline#top-down-capture',
         hint: topDownComplete
-          ? `${activeSymbol} has W → D → H4 → H1 → M15 coverage.`
+          ? `${activeSymbol} has MN → W → D → H4 → H1 → M15 coverage.`
           : `Missing frames for ${activeSymbol}. Start top-down session.`,
       },
       {

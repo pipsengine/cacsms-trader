@@ -168,6 +168,12 @@ export function goldMaxSetupExposure(): number {
   return Math.max(goldMinEntryLegCount(), Math.min(goldMaxConcurrentPositions(), Math.round(envNumber('CACSMS_GOLD_MAX_SETUP_EXPOSURE', 10))));
 }
 
+/** When false, Gold daily trade and basket caps are not enforced (continuous soak testing). */
+export function goldDailyLimitsEnabled(): boolean {
+  const raw = String(process.env.CACSMS_GOLD_DAILY_LIMITS_ENABLED ?? 'false').toLowerCase();
+  return raw === 'true' || raw === '1' || raw === 'on';
+}
+
 /** Max institutional baskets opened per WAT calendar day. */
 export function goldMaxBasketsPerDay(): number {
   return Math.max(1, Math.min(20, Math.round(envNumber('CACSMS_GOLD_MAX_BASKETS_PER_DAY', 8))));
@@ -245,6 +251,7 @@ export interface GoldEngineStatus {
   maxConcurrentBaskets: number;
   maxBasketsPerDay: number;
   maxDailyLegs: number;
+  dailyLimitsEnabled: boolean;
   maxEntriesPerCycle: number;
   maxSpreadPoints: number;
   maxTradesPerDay: number;
@@ -278,6 +285,7 @@ export function getGoldEngineStatus(): GoldEngineStatus {
     maxConcurrentBaskets: goldMaxConcurrentBaskets(),
     maxBasketsPerDay: goldMaxBasketsPerDay(),
     maxDailyLegs: goldMaxDailyLegs(),
+    dailyLimitsEnabled: goldDailyLimitsEnabled(),
     maxEntriesPerCycle: goldMaxEntriesPerCycle(),
     maxSpreadPoints: goldMaxSpreadPoints(),
     maxTradesPerDay: goldMaxTradesPerDay(),

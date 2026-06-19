@@ -26,6 +26,7 @@ import {
   type PipelineStageStatus,
 } from '@/lib/autonomous-pipeline';
 import { SYSTEM_FOCUS_SYMBOL_LABELS, SYSTEM_FOCUS_SYMBOLS } from '@/lib/focus-symbols';
+import { formatDisplayTimestamp } from '@/lib/format-client-time';
 import { cn } from '@/lib/utils';
 
 interface PipelineStatusPayload {
@@ -510,7 +511,7 @@ export default function AutonomousPipelinePage() {
                       <div key={`${event.createdAt}-${index}`} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
                         <div className="flex items-center justify-between gap-3">
                           <p className="text-xs font-mono uppercase text-slate-500">{event.stageId}</p>
-                          <p className="text-[11px] text-slate-400">{new Date(event.createdAt).toLocaleString()}</p>
+                          <p className="text-[11px] text-slate-400">{formatDisplayTimestamp(event.createdAt)}</p>
                         </div>
                         <p className="mt-1 text-sm text-slate-700">{event.message}</p>
                       </div>

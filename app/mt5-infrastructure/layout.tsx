@@ -1,11 +1,34 @@
 'use client';
 
 import { usePathname } from 'next/navigation';
+import Link from 'next/link';
+
+import { usePlatformAuth } from '@/components/platform-auth-provider';
 import { Mt5OpsShell } from '@/components/mt5-ops-shell';
+import { PLATFORM_ADMIN_PAGES } from '@/lib/platform-admin-routes';
+import { buttonVariants } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 
 export default function Mt5InfrastructureLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
+  const auth = usePlatformAuth();
   const meta = resolveMt5Meta(pathname);
+
+  if (auth.loaded && auth.authEnabled && !auth.hasPermission('view_mt5_infrastructure')) {
+    return (
+      <Mt5OpsShell title="MT5 Infrastructure" subtitle="Access restricted">
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-8 text-center">
+          <h2 className="text-lg font-semibold text-amber-950">Insufficient permissions</h2>
+          <p className="mt-2 text-sm text-amber-900">
+            Your role does not include MT5 infrastructure visibility. Contact an administrator.
+          </p>
+          <Link href={PLATFORM_ADMIN_PAGES.overview} className={cn(buttonVariants({ variant: 'default' }), 'mt-4 inline-flex')}>
+            Platform administration
+          </Link>
+        </div>
+      </Mt5OpsShell>
+    );
+  }
 
   return (
     <Mt5OpsShell title={meta.title} subtitle={meta.subtitle}>

@@ -1,5 +1,10 @@
 import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
 import {
+  isGoldMacroTrendFollowerEnabled,
+  isGoldScalpCounterTrendAllowed,
+  resolveMacroBiasFromStates,
+} from '@/lib/gold-macro-trend';
+import {
   goldScalpMinInstitutionalQuality,
   goldScalpMinRewardRisk,
   isGoldSymbol,
@@ -124,7 +129,7 @@ export function detectGoldLtfScalpContext(input: {
   if (phaseRanging) reasons.push(`Market phase "${input.marketPhase}" supports range/scalp execution.`);
   if (planRanging || regimeRanging) reasons.push('Range-oriented regime — HTF trend alignment not required.');
 
-  const active = Boolean(
+  let active = Boolean(
     input.mtfScalpOnly
     || htfRanging
     || (phaseRanging && hasLtfExecutionConfirmation(states))
@@ -132,6 +137,18 @@ export function detectGoldLtfScalpContext(input: {
     || (planRanging && hasLtfExecutionConfirmation(states))
     || (mtfBiasRanging && hasLtfExecutionConfirmation(states)),
   );
+
+  const macroBias = resolveMacroBiasFromStates(states);
+  if (
+    isGoldMacroTrendFollowerEnabled()
+    && input.symbol
+    && isGoldSymbol(input.symbol)
+    && macroBias !== 'neutral'
+    && !isGoldScalpCounterTrendAllowed()
+  ) {
+    active = false;
+    reasons.push(`Macro ${macroBias} on MN/W — range/scalp override disabled (trend is your friend).`);
+  }
 
   const m5Ready = states.some((item) => normalizeTf(item.timeframe ?? '') === 'M5' && isDirectionalBias(String(item.bias ?? '')));
   const ltfEntryTimeframe: 'M15' | 'M5' = m5Ready || input.tradingStyle === 'scalp' ? 'M5' : 'M15';

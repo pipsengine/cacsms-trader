@@ -1,5 +1,6 @@
 import type { AutonomousDecisionOutput } from '@/lib/autonomy-types';
 import {
+  goldDailyLimitsEnabled,
   goldMaxConcurrentPositions,
   goldMaxSetupExposure,
   goldMaxTradesPerDay,
@@ -11,11 +12,10 @@ import {
   isGoldSymbol,
 } from '@/lib/gold-trading-engine';
 import { validateGoldInstitutionalReentry } from '@/lib/gold-reentry-validator';
-import { evaluateInstitutionalBasketCapacity, logBasketCapacityBlock } from '@/lib/gold-basket-capacity';
+import { evaluateInstitutionalBasketCapacity, countGoldDailyTradesOpened, logBasketCapacityBlock } from '@/lib/gold-basket-capacity';
 import { resolveGoldLivePrice } from '@/lib/gold-execution-quality';
 import { getOpenPositionMetrics, syncOpenPositionRegistry } from '@/lib/execution-open-positions';
 import { resolveExecutionAccountContext } from '@/lib/execution-account-context';
-import { countTradesOpenedTodayForSymbol } from '@/lib/execution-risk-limits';
 import { queryPostgres } from '@/lib/postgres';
 
 export type GoldStackEvaluation = {
@@ -114,7 +114,7 @@ export async function evaluateGoldPositionScaling(input: {
   ).length;
   const pendingCount = await countPendingOpeningCommands(serialMode ? undefined : symbol);
   const pendingOppositeCount = await countPendingOpeningCommands(symbol, oppositeSide);
-  const tradesToday = await countTradesOpenedTodayForSymbol(symbol).catch(() => 0);
+  const tradesToday = await countGoldDailyTradesOpened(account?.accountNumber ?? null).catch(() => 0);
   const maxConcurrent = goldMaxConcurrentPositions();
   const maxDaily = goldMaxTradesPerDay();
 
@@ -155,7 +155,7 @@ export async function evaluateGoldPositionScaling(input: {
     }
   }
 
-  if (tradesToday >= maxDaily) {
+  if (goldDailyLimitsEnabled() && tradesToday >= maxDaily) {
     blockers.push(`Gold daily trade limit reached (${tradesToday}/${maxDaily}).`);
   }
 

@@ -4,7 +4,9 @@ import { getLatestAiVisualInterpretation } from './ai-visual-interpretation-stor
 import { getLatestChartSegmentation } from './chart-segmentation-store';
 import { getImageComparisonHistory } from './image-comparison-store';
 import { getLatestVisualAnomaly } from './visual-anomaly-detection-store';
+import { normalizeInstitutionalTimeframe } from './institutional-timeframe-normalize';
 import { fuseVisualMarketInterpretation, marketInterpretationWeights, type FinalMarketDecision, type FusionSignal, type MarketBias, type VisualMarketInterpretationResult } from './visual-market-interpretation-engine';
+import type { TimeframeAnalysisSnapshot } from './multi-timeframe-analysis-engine';
 import { getSymbolMultiTimeframe } from './multi-timeframe-analysis-store';
 import { getCandleAnalysis } from './candle-detection-store';
 import { getLiquidityAnalysis } from './liquidity-zone-store';
@@ -19,7 +21,7 @@ import { listCaptures, publishVisualIntelligenceEvent } from './visual-intellige
 
 type Row = Record<string, unknown>;
 
-const fixedTimeframes = ['W', 'D', 'H4', 'H1', 'M15', 'M5', 'M1'] as const;
+const fixedTimeframes = ['MN', 'W', 'D', 'H4', 'H1', 'M15', 'M30', 'M5', 'M1'] as const;
 
 export const MARKET_INTERPRETATION_TIMEFRAMES = fixedTimeframes;
 export type MarketInterpretationTimeframe = (typeof fixedTimeframes)[number];
@@ -342,7 +344,7 @@ async function buildTimeframeStates(
     if (snapshot) {
       states.push({
         timeframe: item,
-        bias: biasFromText(snapshot.bias),
+        bias: resolveSnapshotTimeframeBias(snapshot),
         controlScore: score01(snapshot.aiConfidenceScore) * 100,
         confirmsEntry: ['BUY', 'SELL'].includes(snapshot.decisionState ?? ''),
         narrative: `${snapshot.marketStructure}; ${snapshot.liquidityStatus}; ${snapshot.orderBlockStatus}`,
@@ -500,14 +502,42 @@ function mtfLowerConfirms(lowerTimeframeConfirmation?: string | null): boolean {
     || text.includes('bullish');
 }
 
+function resolveSnapshotTimeframeBias(snapshot: TimeframeAnalysisSnapshot): MarketBias {
+  const structureBias = biasFromText(
+    [
+      snapshot.bias,
+      snapshot.trendDirection,
+      snapshot.marketStructure,
+      snapshot.lastBosDirection,
+      snapshot.lastChochDirection,
+    ]
+      .filter(Boolean)
+      .join(' '),
+  );
+  const momentumBias = biasFromText(snapshot.candleMomentum);
+  const isMacro = snapshot.timeframe === 'MN' || snapshot.timeframe === 'W';
+  if (isMacro && momentumBias !== 'neutral' && momentumBias !== 'mixed') {
+    if (
+      structureBias === 'neutral'
+      || structureBias === 'mixed'
+      || /range|developing|compress|balance/i.test(snapshot.marketStructure)
+      || structureBias !== momentumBias
+    ) {
+      return momentumBias;
+    }
+  }
+  if (structureBias !== 'neutral' && structureBias !== 'mixed') return structureBias;
+  return biasFromText(snapshot.bias);
+}
+
 function biasFromText(value?: string | null): MarketBias {
   const text = String(value ?? '').toLowerCase();
   if (/\bbuy[_\s-]?side[_\s-]?(sweep|liquidity|stop|pool)/.test(text)) return 'bearish';
   if (/\bsell[_\s-]?side[_\s-]?(sweep|liquidity|stop|pool)/.test(text)) return 'bullish';
   if (text.includes('broken_support_now_resistance') || text.includes('support break') || text.includes('broken support') || text.includes('resistance rejection')) return 'bearish';
   if (text.includes('broken_resistance_now_support') || text.includes('resistance break') || text.includes('broken resistance') || text.includes('support rejection')) return 'bullish';
-  if (/\b(buy|bull|long|demand|accumulation)\b/.test(text)) return 'bullish';
-  if (/\b(sell|bear|short|supply|distribution)\b/.test(text)) return 'bearish';
+  if (text.includes('bullish') || /\b(buy|bull|long|demand|accumulation)\b/.test(text)) return 'bullish';
+  if (text.includes('bearish') || /\b(sell|bear|short|supply|distribution)\b/.test(text)) return 'bearish';
   if (text.includes('mixed') || text.includes('wait') || text.includes('conflict')) return 'mixed';
   return 'neutral';
 }
@@ -556,9 +586,9 @@ function inferRetailTrapWarning(signals: unknown): string {
 }
 
 function normalizeTimeframe(value?: string): string {
-  const timeframe = (value ?? 'H1').toUpperCase();
+  const timeframe = normalizeInstitutionalTimeframe(value ?? 'H1');
   if (!fixedTimeframes.includes(timeframe as typeof fixedTimeframes[number])) {
-    throw new Error(`Unsupported timeframe "${timeframe}". Supported timeframes are W, D, H4, H1, M15, M5, M1.`);
+    throw new Error(`Unsupported timeframe "${timeframe}". Supported timeframes are MN, W, D, H4, H1, M30, M15, M5, M1.`);
   }
   return timeframe;
 }

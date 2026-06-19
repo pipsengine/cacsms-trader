@@ -91,7 +91,7 @@ export const TRADING_STYLE_PROFILES: Record<TradingStyleId, TradingStyleProfile>
     description: 'Macro-driven position trades on daily/weekly bias with COT and rates alignment.',
     entryTimeframe: 'D',
     dominantTimeframe: 'D',
-    biasTimeframes: ['W', 'D', 'H4'],
+    biasTimeframes: ['MN', 'W', 'D', 'H4'],
     maxHoldHours: 24 * 21,
     minRewardRisk: 2.5,
     riskPerTradePercent: envNumber('CACSMS_POSITION_RISK_PERCENT', 0.35),

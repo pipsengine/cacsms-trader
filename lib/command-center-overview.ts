@@ -12,8 +12,9 @@ import { getExecutionRiskSettings } from './execution-risk-settings';
 import type { PropFirmComplianceView } from './prop-firm-profiles';
 import { checkPostgresConnection } from './postgres';
 import { queryPostgres } from './postgres';
+import { normalizeInstitutionalTimeframe } from './institutional-timeframe-normalize';
 
-const TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const TOP_DOWN_TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 
 export type SystemHealthLevel = 'healthy' | 'degraded' | 'critical';
 
@@ -171,7 +172,7 @@ async function getCaptureSummary(symbol: string) {
   const timeframes: Record<string, boolean> = {};
   for (const timeframe of TOP_DOWN_TIMEFRAMES) timeframes[timeframe] = false;
   for (const row of captures.rows) {
-    const tf = String(row.timeframe);
+    const tf = normalizeInstitutionalTimeframe(String(row.timeframe));
     if (Number(row.count) > 0) timeframes[tf] = true;
   }
   const total = await queryPostgres('SELECT COUNT(*)::int AS count FROM chart_captures WHERE upper(symbol) = $1', [symbol]);

@@ -40,7 +40,7 @@ import {
 } from '@/lib/dashboard-card-tones';
 import { cn } from '@/lib/utils';
 
-const MTF_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const MTF_TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 type Timeframe = (typeof MTF_TIMEFRAMES)[number];
 
 type Snapshot = {

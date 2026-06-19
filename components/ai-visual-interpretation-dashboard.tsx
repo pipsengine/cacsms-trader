@@ -45,7 +45,7 @@ import { SYSTEM_FOCUS_SYMBOL_LABELS, SYSTEM_FOCUS_SYMBOLS } from '@/lib/focus-sy
 import type { ReconstructedCandle } from '@/lib/visual-intelligence-types';
 import { cn } from '@/lib/utils';
 
-const TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 type Timeframe = (typeof TIMEFRAMES)[number];
 type Decision = 'BUY' | 'SELL' | 'WAIT' | 'AVOID';
 type Bias = 'bullish' | 'bearish' | 'neutral' | 'mixed';
@@ -297,7 +297,7 @@ export function AiVisualInterpretationDashboard() {
               })}
             </div>
             <p className={cn('mt-3 text-xs', toneMuted('purple'))}>
-              {readyCount}/5 frames have captures · {interpretedCount}/5 have persisted AI interpretations
+              {readyCount}/6 frames have captures · {interpretedCount}/6 have persisted AI interpretations
             </p>
           </Panel>
 

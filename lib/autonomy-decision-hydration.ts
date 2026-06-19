@@ -109,7 +109,7 @@ export function hydrateAutonomousDecisionFromRow(row: DecisionRow): AutonomousDe
 
 export function isRetryableExecutionBlocker(blockers: string[]): boolean {
   return blockers.some((item) =>
-    /stop loss|take profit|HTF bias|Gold minimum|Reward:risk|Expected R|institutional quality|Entry optimization|expansion candle|retracement confirmation/i.test(item),
+    /stop loss|take profit|HTF bias|Gold minimum|Reward:risk|Expected R|institutional quality|Entry optimization|expansion candle|retracement confirmation|M15 execution|intermediate structure|top-down|macro trend|daily trade limit/i.test(item),
   );
 }
 

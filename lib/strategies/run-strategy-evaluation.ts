@@ -108,7 +108,7 @@ export async function runStrategyEvaluation(input: {
     const loadedCount = countLoadedMtfTimeframes(candleMap, definition.minCandles);
     if (loadedCount < minAligned) {
       const error = new Error(
-        `Not enough multi-timeframe data for ${symbol}. Run chart capture for W/D/H4/H1/M15 (${loadedCount} timeframes ready, ${minAligned} required).`,
+        `Not enough multi-timeframe data for ${symbol}. Run chart capture for MN/W/D/H4/H1/M15 (${loadedCount} timeframes ready, ${minAligned} required).`,
       ) as Error & { captureId?: string | null; capturedAt?: string | null; status?: number };
       error.captureId = primaryCaptureId;
       error.capturedAt = capturedAt;

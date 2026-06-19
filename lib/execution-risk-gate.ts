@@ -15,6 +15,11 @@ import { countUnprotectedOpenPositions, getOpenPositionExposureForSymbol } from 
 import { queryPostgres } from '@/lib/postgres';
 import { hasValidStopTargets, isStopLossRequired } from '@/lib/autonomous-stop-targets';
 import { findCorrelatedOpenSymbol } from '@/lib/symbol-correlation';
+import {
+  goldDailyLimitsEnabled,
+  goldMaxConcurrentPositions,
+  isGoldOnlyTradingEngine,
+} from '@/lib/gold-trading-engine';
 
 const VIRTUAL_CONDITIONAL_ENTRY = 'conditional_entry_waiting_for_retracement_confirmation';
 
@@ -64,7 +69,11 @@ function envBool(name: string, fallback = false): boolean {
 }
 
 function maxOpenPositionsPerSymbol(): number {
-  return Math.max(1, Math.min(10, Math.round(envNumber('RISK_MAX_OPEN_POSITIONS_PER_SYMBOL', 2))));
+  const base = Math.max(1, Math.round(envNumber('RISK_MAX_OPEN_POSITIONS_PER_SYMBOL', 2)));
+  if (!goldDailyLimitsEnabled() && isGoldOnlyTradingEngine()) {
+    return goldMaxConcurrentPositions();
+  }
+  return Math.max(1, Math.min(10, base));
 }
 
 function maxLotsPerSymbol(rules: PropFirmRiskRules): number {

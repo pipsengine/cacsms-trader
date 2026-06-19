@@ -46,7 +46,7 @@ import {
 } from '@/lib/dashboard-card-tones';
 import { cn } from '@/lib/utils';
 
-const TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 type Timeframe = (typeof TIMEFRAMES)[number];
 type ViewMode = 'side-by-side' | 'slider' | 'heatmap';
 
@@ -581,7 +581,7 @@ export function ImageComparisonEngineDashboard() {
             </Card>
           ) : null}
 
-          <Panel icon={Network} title="Top-down chart ladder (W → D → H4 → H1 → M15)" tone="violet">
+          <Panel icon={Network} title="Top-down chart ladder (MN → W → D → H4 → H1 → M15)" tone="violet">
             <div className="grid gap-2 md:grid-cols-5">
               {timeframeCoverage.map((item) => {
                 const active = timeframe === item.timeframe;
@@ -628,7 +628,7 @@ export function ImageComparisonEngineDashboard() {
             <MetricCard tone="blue" icon={GitCompareArrows} label={`${timeframe} similarity`} value={displayResult ? `${displayResult.similarityPercentage.toFixed(1)}%` : '—'} detail="SSIM-style luminance similarity" />
             <MetricCard tone="orange" icon={ScanSearch} label="Change score" value={displayResult ? displayResult.comparisonScore.toFixed(1) : '—'} detail={`${timeframe} visual delta`} />
             <MetricCard tone="emerald" icon={Target} label="Confidence" value={topDownDecision ? `${Math.round(topDownDecision.confidence * 100)}%` : displayResult ? `${displayResult.visualChangeConfidence.toFixed(1)}%` : '—'} detail={displayResult?.changedBias ?? 'Awaiting analysis'} />
-            <MetricCard tone="purple" icon={Layers3} label="Delta blocks" value={displayResult ? String(displayResult.differenceBlocks.length) : '—'} detail={`${topDownReadyCount}/5 frames ready`} />
+            <MetricCard tone="purple" icon={Layers3} label="Delta blocks" value={displayResult ? String(displayResult.differenceBlocks.length) : '—'} detail={`${topDownReadyCount}/6 frames ready`} />
             <MetricCard tone={interpretationTone(displayResult?.finalInterpretation)} icon={BrainCircuit} label={`${timeframe} read`} value={displayResult?.finalInterpretation ?? '—'} detail={topDownDecision?.recommendation ?? displayResult?.recommendation ?? 'No analysis yet'} />
           </section>
 

@@ -40,7 +40,7 @@ import {
 import { SYSTEM_FOCUS_SYMBOL_LABELS } from '@/lib/focus-symbols';
 import { cn } from '@/lib/utils';
 
-const TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 type Timeframe = (typeof TIMEFRAMES)[number];
 type Decision = 'BUY' | 'SELL' | 'WAIT' | 'AVOID' | 'MONITOR';
 type Bias = 'bullish' | 'bearish' | 'neutral' | 'mixed';
@@ -286,7 +286,7 @@ export function VisualMarketInterpretationDashboard() {
             <MetricCard tone={decisionTone} icon={Target} label="Decision" value={interpretation?.finalDecision ?? '—'} detail={interpretation?.entryReadiness ?? 'Awaiting pipeline fusion'} />
             <MetricCard tone={biasTone} icon={interpretation?.finalMarketBias === 'bearish' ? TrendingDown : TrendingUp} label="Bias" value={interpretation?.finalMarketBias ?? '—'} detail={interpretation?.dominantTimeframe ? `${interpretation.dominantTimeframe} controls` : 'Pending'} />
             <MetricCard tone="emerald" icon={Activity} label="Readiness" value={interpretation ? `${Math.round(interpretation.setupReadinessScore)}%` : '—'} detail="Setup readiness score" />
-            <MetricCard tone="blue" icon={Radar} label="Confidence" value={interpretation ? `${Math.round(interpretation.confidenceScore)}%` : '—'} detail={`${fusionReadyCount}/5 frames fusion-ready`} />
+            <MetricCard tone="blue" icon={Radar} label="Confidence" value={interpretation ? `${Math.round(interpretation.confidenceScore)}%` : '—'} detail={`${fusionReadyCount}/6 frames fusion-ready`} />
           </section>
 
           <Panel icon={GitBranch} title="Autonomous fusion ladder (W → M15)" tone="violet">

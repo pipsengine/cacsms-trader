@@ -12,6 +12,7 @@ import {
   type TimeframeAnalysisSnapshot,
   type TimeframeConflictLog,
 } from './multi-timeframe-analysis-engine';
+import { institutionalTimeframeDbAliases, normalizeInstitutionalTimeframe } from './institutional-timeframe-normalize';
 import { queryPostgres } from './postgres';
 import { publishVisualIntelligenceEvent } from './visual-intelligence-store';
 import type { ReconstructedCandle } from './visual-intelligence-types';
@@ -241,12 +242,14 @@ async function loadMtfCandles(symbol: string, input: { candles?: MtfCandleInput;
 }
 
 async function findLatestCaptureId(symbol: string, timeframe: MtfTimeframe): Promise<string | null> {
+  const canonical = normalizeInstitutionalTimeframe(timeframe);
+  const aliases = institutionalTimeframeDbAliases(canonical);
   const result = await queryPostgres(`
     SELECT id FROM chart_captures
-    WHERE upper(symbol) = $1 AND upper(timeframe) = $2
+    WHERE upper(symbol) = $1 AND upper(timeframe) = ANY($2::text[])
     ORDER BY captured_at DESC
     LIMIT 1
-  `, [symbol.toUpperCase(), timeframe.toUpperCase()]);
+  `, [symbol.toUpperCase(), aliases]);
   return result.rows[0]?.id ? String(result.rows[0].id) : null;
 }
 

@@ -5,7 +5,7 @@ import { queryPostgres } from './postgres';
 import { getCaptureAnalysis, listCaptures, publishVisualIntelligenceEvent } from './visual-intelligence-store';
 import type { ChartCaptureRecord, ReconstructedCandle } from './visual-intelligence-types';
 
-export const ANOMALY_TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+export const ANOMALY_TOP_DOWN_TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 export type AnomalyTopDownTimeframe = (typeof ANOMALY_TOP_DOWN_TIMEFRAMES)[number];
 
 export interface AnomalyTimeframeReadiness {

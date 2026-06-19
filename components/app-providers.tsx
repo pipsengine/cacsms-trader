@@ -2,6 +2,7 @@
 
 import type { ReactNode } from 'react';
 
+import { AppRouteGuard } from '@/components/app-route-guard';
 import { ContinuousTradingSessionProvider } from '@/components/continuous-trading-session-provider';
 import { PlatformAuthProvider } from '@/components/platform-auth-provider';
 import { PersistentDashboardChrome } from '@/components/persistent-dashboard-chrome';
@@ -9,9 +10,11 @@ import { PersistentDashboardChrome } from '@/components/persistent-dashboard-chr
 export function AppProviders({ children }: { children: ReactNode }) {
   return (
     <PlatformAuthProvider>
-      <ContinuousTradingSessionProvider>
-        <PersistentDashboardChrome>{children}</PersistentDashboardChrome>
-      </ContinuousTradingSessionProvider>
+      <AppRouteGuard>
+        <ContinuousTradingSessionProvider>
+          <PersistentDashboardChrome>{children}</PersistentDashboardChrome>
+        </ContinuousTradingSessionProvider>
+      </AppRouteGuard>
     </PlatformAuthProvider>
   );
 }

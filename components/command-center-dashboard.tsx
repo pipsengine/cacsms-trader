@@ -1,5 +1,6 @@
 'use client';
 
+import { useClientDate } from '@/hooks/use-client-now';
 import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
@@ -368,7 +369,7 @@ const QUICK_LINKS = [
   { label: 'Visual intel', href: '/visual-intelligence-overview', icon: Eye },
 ] as const;
 
-const TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const TOP_DOWN_TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 
 type MarketSessionStatus = {
   open: boolean;
@@ -510,13 +511,16 @@ export function CommandCenterDashboard() {
   const [lastTickAt, setLastTickAt] = useState<string | null>(null);
   const [tickSequence, setTickSequence] = useState(0);
   const [streamConnected, setStreamConnected] = useState(false);
-  const [clockNow, setClockNow] = useState(() => new Date());
+  const clockNow = useClientDate(1000);
   const sessionActive = tradingSession.loaded
     ? tradingSession.active
     : (overview?.continuousTrading.active ?? false);
   const sessionBusy = tradingSession.busy;
   const sessionMessage = tradingSession.message;
-  const marketStatus = useMemo(() => getMarketSessionStatus(clockNow), [clockNow]);
+  const marketStatus = useMemo(
+    () => (clockNow ? getMarketSessionStatus(clockNow) : { open: false, label: 'Market status', detail: '—', tone: 'slate' as const }),
+    [clockNow],
+  );
 
   const applyTick = useCallback((tick: DashboardTick) => {
     setTickSequence(tick.sequence);
@@ -592,11 +596,6 @@ export function CommandCenterDashboard() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setClockNow(new Date()), 1000);
-    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -730,11 +729,11 @@ export function CommandCenterDashboard() {
                 <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-blue-700">Executive command center</p>
                 <h1 className="truncate text-xl font-semibold text-slate-950">System overview</h1>
                 <p className="truncate text-xs font-mono text-slate-500">
-                  WAT {formatWatClock(clockNow)}
+                  WAT {clockNow ? formatWatClock(clockNow) : '—'}
                   {' · '}
                   {streamConnected ? 'Live tick' : 'Polling tick'} #{tickSequence || overview?.live.tickSequence || 0}
                   {' · '}
-                  {formatRelativeTime(lastTickAt ?? overview?.live.tickAt ?? lastSyncAt, clockNow)}
+                  {clockNow ? formatRelativeTime(lastTickAt ?? overview?.live.tickAt ?? lastSyncAt, clockNow) : 'sync pending'}
                   {refreshing ? ' · snapshot updating…' : ''}
                 </p>
               </div>
@@ -919,7 +918,7 @@ export function CommandCenterDashboard() {
                               ? ` · ${overview.continuousTrading.lastMaintenance.targets.join(', ')}`
                               : ''}
                             {' · '}
-                            {formatRelativeTime(overview.continuousTrading.lastMaintenance.at, clockNow)}
+                            {clockNow ? formatRelativeTime(overview.continuousTrading.lastMaintenance.at, clockNow) : '—'}
                           </p>
                         ) : (
                           <p className="text-xs text-slate-600">No refill cycle recorded yet.</p>
@@ -1284,7 +1283,7 @@ export function CommandCenterDashboard() {
                   icon={Camera}
                   label="Top-down capture"
                   value={overview.intelligence.topDownComplete ? 'Complete' : 'Partial'}
-                  detail={`${overview.intelligence.captureTotal} captures · ${TOP_DOWN_TIMEFRAMES.filter((tf) => overview.intelligence.topDownCoverage[tf]).length}/5 frames`}
+                  detail={`${overview.intelligence.captureTotal} captures · ${TOP_DOWN_TIMEFRAMES.filter((tf) => overview.intelligence.topDownCoverage[tf]).length}/6 frames`}
                 />
               </section>
 
@@ -1299,7 +1298,7 @@ export function CommandCenterDashboard() {
                       </p>
                       <p className={cn('text-xs', toneMuted('blue'))}>
                         {overview.autonomy.runningJobs} job(s) running · {overview.autonomy.queuedJobs} queued
-                        {overview.autonomy.nextRunAt ? ` · next run ${formatRelativeTime(overview.autonomy.nextRunAt, clockNow, true)}` : ''}
+                        {overview.autonomy.nextRunAt && clockNow ? ` · next run ${formatRelativeTime(overview.autonomy.nextRunAt, clockNow, true)}` : ''}
                       </p>
                     </div>
                     <div className="min-w-[200px]">
@@ -1574,7 +1573,7 @@ export function CommandCenterDashboard() {
                                     {item.source}
                                   </span>
                                   <span className={cn('font-mono text-[10px]', toneMuted(sourceTone))}>
-                                    {formatRelativeTime(item.time, clockNow)}
+                                    {clockNow ? formatRelativeTime(item.time, clockNow) : '—'}
                                   </span>
                                 </div>
                                 <p className={cn('mt-2 text-sm leading-relaxed', toneBody(sourceTone))}>{item.message}</p>
@@ -1608,7 +1607,7 @@ export function CommandCenterDashboard() {
                                 </span>
                               </div>
                               <p className={cn('text-xs', toneMuted(jobTone))}>
-                                {job.symbol ?? '—'} · {formatRelativeTime(job.createdAt, clockNow)}
+                                {job.symbol ?? '—'} · {clockNow ? formatRelativeTime(job.createdAt, clockNow) : '—'}
                               </p>
                             </div>
                           );

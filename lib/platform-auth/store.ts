@@ -536,6 +536,7 @@ export async function getAdminOverview(): Promise<PlatformAdminOverview> {
     activeBaskets: 0,
     dailyPnl: 0,
     riskExposure: userSummaries.filter((u) => u.tradingEnabled).length,
+    activeSessions: await import('@/lib/platform-auth/enterprise-store').then((m) => m.countActiveSessions()).catch(() => 0),
     users: userSummaries,
   };
 }

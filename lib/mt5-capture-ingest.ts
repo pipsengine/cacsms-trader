@@ -1,4 +1,9 @@
 import { AUTONOMY_TIMEFRAME_SEQUENCE } from './autonomous-pipeline';
+import {
+  institutionalTimeframeDbAliases,
+  isPlausibleMacroTimeframeCapture,
+  normalizeInstitutionalTimeframe,
+} from './institutional-timeframe-normalize';
 import { captureChartOnTerminal } from './mt5-chart-control';
 import { resolveMt5BridgeSharedSecret } from './mt5-bridge-secret';
 import {
@@ -50,24 +55,7 @@ function bridgeUrl(): string {
 }
 
 export function mt5PeriodToTimeframe(period: string): string {
-  const normalized = period.trim().toUpperCase();
-  const mapping: Record<string, string> = {
-    PERIOD_W1: 'W',
-    W: 'W',
-    PERIOD_D1: 'D',
-    D: 'D',
-    PERIOD_H4: 'H4',
-    H4: 'H4',
-    PERIOD_H1: 'H1',
-    H1: 'H1',
-    PERIOD_M15: 'M15',
-    M15: 'M15',
-    PERIOD_M5: 'M5',
-    M5: 'M5',
-    PERIOD_M1: 'M1',
-    M1: 'M1',
-  };
-  return mapping[normalized] ?? normalized.replace(/^PERIOD_/, '');
+  return normalizeInstitutionalTimeframe(period);
 }
 
 function parseCaptureAck(brokerMessage: string): ParsedCaptureAck | null {
@@ -141,14 +129,37 @@ function objectValue(value: unknown): Record<string, unknown> {
 }
 
 async function hasStoredCapture(symbol: string, timeframe: string): Promise<string | null> {
+  const canonical = normalizeInstitutionalTimeframe(timeframe);
+  const aliases = institutionalTimeframeDbAliases(canonical);
   const result = await queryPostgres(
-    `SELECT id FROM chart_captures
-     WHERE upper(symbol) = $1 AND upper(timeframe) = $2
+    `SELECT id, upper(timeframe) AS timeframe
+     FROM chart_captures
+     WHERE upper(symbol) = $1 AND upper(timeframe) = ANY($2::text[])
      ORDER BY captured_at DESC
-     LIMIT 1`,
-    [symbol.toUpperCase(), timeframe.toUpperCase()],
+     LIMIT 8`,
+    [symbol.toUpperCase(), aliases],
   );
-  return result.rows[0]?.id ? String(result.rows[0].id) : null;
+  for (const row of result.rows) {
+    const captureId = String(row.id ?? '');
+    if (!captureId) continue;
+    if (canonical === 'MN' || canonical === 'W') {
+      const meta = objectValue(
+        (await queryPostgres('SELECT metadata_json FROM chart_captures WHERE id = $1 LIMIT 1', [captureId])).rows[0]?.metadata_json,
+      );
+      const firstBarTime = String(meta.firstBarTime ?? '');
+      const lastBarTime = String(meta.lastBarTime ?? '');
+      if (firstBarTime && lastBarTime) {
+        if (!isPlausibleMacroTimeframeCapture(canonical, [{ timestamp: firstBarTime }, { timestamp: lastBarTime }])) {
+          continue;
+        }
+      } else if (normalizeInstitutionalTimeframe(String(row.timeframe)) === canonical) {
+        // Legacy MN1 rows captured before EA monthly support — force fresh macro capture.
+        continue;
+      }
+    }
+    return captureId;
+  }
+  return null;
 }
 
 function hasPendingBridgeCapture(
@@ -179,12 +190,14 @@ export async function recoverPendingPipelineCaptures(symbol: string): Promise<nu
   let requeued = 0;
 
   for (const timeframe of AUTONOMY_TIMEFRAME_SEQUENCE) {
-    if (captureMap[timeframe] === 'stored') continue;
-
     const existingCaptureId = await hasStoredCapture(activeSymbol, timeframe);
     if (existingCaptureId) {
       await updateTimeframeCaptureState(sessionId, timeframe, 'stored', existingCaptureId);
       continue;
+    }
+
+    if (captureMap[timeframe] === 'stored') {
+      await updateTimeframeCaptureState(sessionId, timeframe, 'awaiting_recapture');
     }
 
     if (hasPendingBridgeCapture(bridgeCommands, sessionId, timeframe)) continue;
@@ -209,10 +222,13 @@ async function ingestCaptureCommand(command: BridgeCaptureCommand): Promise<stri
   if (!parsed) {
     throw new Error(`Unable to parse capture ack for command ${command.commandId}.`);
   }
+  if (!isPlausibleMacroTimeframeCapture(parsed.timeframe, parsed.bars)) {
+    throw new Error(`Rejected ${parsed.timeframe} capture for ${parsed.symbol}: bar spacing is not macro timeframe (re-queue after EA monthly support).`);
+  }
 
   const result = await createCaptureAndRunAnalysis({
     symbol: String(command.payload.canonicalSymbol ?? parsed.symbol).toUpperCase(),
-    timeframe: parsed.timeframe,
+    timeframe: normalizeInstitutionalTimeframe(parsed.timeframe),
     sourcePlatform: 'mt5',
     captureType: 'broker_snapshot',
     jobType: 'mt5_top_down_capture',
@@ -223,6 +239,8 @@ async function ingestCaptureCommand(command: BridgeCaptureCommand): Promise<stri
       brokerSymbol: command.payload.brokerSymbol ?? parsed.symbol,
       bridgeTimeframe: command.payload.timeframe ?? null,
       barCount: parsed.bars.length,
+      firstBarTime: parsed.bars[0]?.timestamp ?? null,
+      lastBarTime: parsed.bars[parsed.bars.length - 1]?.timestamp ?? null,
       ingestionSource: 'mt5_capture_ack',
     },
     candles: parsed.bars,

@@ -78,7 +78,7 @@ export const PIPELINE_STAGE_STATUS_META: Record<
   },
 };
 
-export const AUTONOMY_TIMEFRAME_SEQUENCE = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+export const AUTONOMY_TIMEFRAME_SEQUENCE = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 
 export const PIPELINE_STAGES: PipelineStageDefinition[] = [
   {
@@ -126,12 +126,12 @@ export const PIPELINE_STAGES: PipelineStageDefinition[] = [
     order: 4,
     label: 'Top-Down Chart Capture',
     shortLabel: 'Capture',
-    description: 'Sequential capture session across W → D → H4 → H1 → M15 on the active symbol.',
+    description: 'Sequential capture session across MN → W → D → H4 → H1 → M15 on the active symbol.',
     icon: Camera,
     primaryHref: '/visual-intelligence-overview/chart-screenshot-capture',
-    primaryLabel: 'Chart screenshot capture',
+    primaryLabel: 'Capture monitor',
     relatedTools: [
-      { label: 'Start capture session', href: '/autonomous-pipeline#top-down-capture' },
+      { label: 'Pipeline capture status', href: '/autonomous-pipeline#top-down-capture' },
     ],
   },
   {

@@ -6,8 +6,15 @@ import { analyzeSupportResistance } from './support-resistance-engine';
 import type { ReconstructedCandle, VisionCandleInput, VisionDecision } from './visual-intelligence-types';
 import { normalizeInputCandles } from './candle-detection-engine';
 
-export const MTF_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
-export type MtfTimeframe = typeof MTF_TIMEFRAMES[number];
+import {
+  INSTITUTIONAL_MTF_ALIGNMENT_PAIRS,
+  INSTITUTIONAL_MTF_TIMEFRAMES,
+  INSTITUTIONAL_MTF_WEIGHTS,
+  type InstitutionalMtfTimeframe,
+} from './institutional-top-down-timeframes';
+
+export const MTF_TIMEFRAMES = INSTITUTIONAL_MTF_TIMEFRAMES;
+export type MtfTimeframe = InstitutionalMtfTimeframe;
 export type MtfBias = 'Bullish' | 'Bearish' | 'Neutral' | 'Ranging';
 export type MtfDecision = 'BUY' | 'SELL' | 'WAIT' | 'AVOID';
 export type AlignmentColorState = 'aligned_bullish' | 'aligned_bearish' | 'conflict' | 'neutral_ranging' | 'institutional_setup_forming';
@@ -88,7 +95,7 @@ export interface MultiTimeframeAnalysisResult {
 
 export type MtfCandleInput = Partial<Record<MtfTimeframe, VisionCandleInput[]>>;
 
-const weights: Record<MtfTimeframe, number> = { W: 0.3, D: 0.25, H4: 0.2, H1: 0.15, M15: 0.1 };
+const weights: Record<MtfTimeframe, number> = INSTITUTIONAL_MTF_WEIGHTS;
 
 export function normalizeMtfCandles(input: VisionCandleInput[]): ReconstructedCandle[] {
   return normalizeInputCandles(input);
@@ -153,7 +160,7 @@ function analyzeOneTimeframe(symbol: string, timeframe: MtfTimeframe, candles: R
 }
 
 function buildAlignments(symbol: string, snapshots: TimeframeAnalysisSnapshot[]): TimeframeAlignmentScore[] {
-  const pairs: Array<[MtfTimeframe, MtfTimeframe]> = [['W', 'D'], ['D', 'H4'], ['H4', 'H1'], ['H1', 'M15']];
+  const pairs = INSTITUTIONAL_MTF_ALIGNMENT_PAIRS;
   return pairs.map(([left, right]) => {
     const a = snapshotFor(snapshots, left);
     const b = snapshotFor(snapshots, right);
@@ -189,8 +196,9 @@ function buildAlignments(symbol: string, snapshots: TimeframeAnalysisSnapshot[])
 
 function buildConflicts(symbol: string, snapshots: TimeframeAnalysisSnapshot[], alignments: TimeframeAlignmentScore[]): TimeframeConflictLog[] {
   const conflicts: TimeframeConflictLog[] = [];
-  const higher = snapshots.filter((item) => ['W', 'D', 'H4'].includes(item.timeframe));
+  const higher = snapshots.filter((item) => ['MN', 'W', 'D', 'H4'].includes(item.timeframe));
   const lower = snapshots.filter((item) => ['H1', 'M15'].includes(item.timeframe));
+  const mnBias = directional(snapshotFor(snapshots, 'MN').bias);
   const wBias = directional(snapshotFor(snapshots, 'W').bias);
   const dBias = directional(snapshotFor(snapshots, 'D').bias);
 
@@ -200,6 +208,18 @@ function buildConflicts(symbol: string, snapshots: TimeframeAnalysisSnapshot[], 
       const lowDir = directional(low.bias);
       if (highDir === 'neutral' || lowDir === 'neutral' || highDir === lowDir) continue;
       if (['AVOID', 'WAIT'].includes(high.decisionState) || ['AVOID', 'WAIT'].includes(low.decisionState)) continue;
+      if (
+        mnBias === 'bearish' && wBias === 'bearish' && highDir === 'bullish' && lowDir === 'bearish'
+        && ['H4', 'H1'].includes(high.timeframe)
+      ) {
+        continue;
+      }
+      if (
+        mnBias === 'bullish' && wBias === 'bullish' && highDir === 'bearish' && lowDir === 'bullish'
+        && ['H4', 'H1'].includes(high.timeframe)
+      ) {
+        continue;
+      }
       if (
         wBias === 'bullish' && dBias === 'bullish' && highDir === 'bearish' && lowDir === 'bullish'
         && ['H4', 'H1'].includes(high.timeframe)
@@ -243,7 +263,7 @@ function buildConflicts(symbol: string, snapshots: TimeframeAnalysisSnapshot[], 
 function buildDecision(symbol: string, snapshots: TimeframeAnalysisSnapshot[], alignments: TimeframeAlignmentScore[], conflicts: TimeframeConflictLog[]): MultiTimeframeDecision {
   const weightedBull = weightedBias(snapshots, 'bullish');
   const weightedBear = weightedBias(snapshots, 'bearish');
-  const higher = ['W', 'D', 'H4'].map((tf) => snapshotFor(snapshots, tf as MtfTimeframe));
+  const higher = ['MN', 'W', 'D', 'H4'].map((tf) => snapshotFor(snapshots, tf as MtfTimeframe));
   const lower = ['H1', 'M15'].map((tf) => snapshotFor(snapshots, tf as MtfTimeframe));
   const higherBullish = higher.every((item) => directional(item.bias) === 'bullish');
   const higherBearish = higher.every((item) => directional(item.bias) === 'bearish');
@@ -251,11 +271,13 @@ function buildDecision(symbol: string, snapshots: TimeframeAnalysisSnapshot[], a
   const lowerBearish = lower.every((item) => directional(item.bias) === 'bearish' || item.decisionState === 'SELL');
   const h4H1M15Bull = ['H4', 'H1', 'M15'].every((tf) => directional(snapshotFor(snapshots, tf as MtfTimeframe).bias) === 'bullish');
   const h4H1M15Bear = ['H4', 'H1', 'M15'].every((tf) => directional(snapshotFor(snapshots, tf as MtfTimeframe).bias) === 'bearish');
+  const mnSnapshot = snapshotFor(snapshots, 'MN');
   const wSnapshot = snapshotFor(snapshots, 'W');
   const dSnapshot = snapshotFor(snapshots, 'D');
   const h4Snapshot = snapshotFor(snapshots, 'H4');
   const h1Snapshot = snapshotFor(snapshots, 'H1');
   const m15Snapshot = snapshotFor(snapshots, 'M15');
+  const mnDir = directional(mnSnapshot.bias);
   const wDir = directional(wSnapshot.bias);
   const dDir = directional(dSnapshot.bias);
   const h4Dir = directional(h4Snapshot.bias);
@@ -274,10 +296,10 @@ function buildDecision(symbol: string, snapshots: TimeframeAnalysisSnapshot[], a
 
   if (higherBullish && lowerBullish) {
     finalDecision = 'BUY opportunity';
-    lowerConfirmation = 'H1 and M15 confirm bullish entry context inside W/D/H4 bullish control.';
+    lowerConfirmation = 'H1 and M15 confirm bullish entry context inside MN/W/D/H4 bullish control.';
   } else if (higherBearish && lowerBearish) {
     finalDecision = 'SELL opportunity';
-    lowerConfirmation = 'H1 and M15 confirm bearish entry context inside W/D/H4 bearish control.';
+    lowerConfirmation = 'H1 and M15 confirm bearish entry context inside MN/W/D/H4 bearish control.';
   } else if (higherBullish && lower.some((item) => directional(item.bias) === 'bearish')) {
     finalDecision = 'WAIT';
     lowerConfirmation = 'Lower timeframe bearish correction is active inside higher timeframe bullish bias.';
@@ -309,6 +331,16 @@ function buildDecision(symbol: string, snapshots: TimeframeAnalysisSnapshot[], a
   } else if (conflictSeverity > 0.58) {
     finalDecision = conflictSeverity > 0.75 ? 'AVOID' : 'WAIT';
     lowerConfirmation = 'Timeframe conflict prevents institutional confirmation.';
+  }
+
+  if (mnDir === 'bearish' && (finalDecision === 'BUY' || finalDecision === 'BUY opportunity') && !higherBearish) {
+    finalDecision = 'WAIT';
+    scalpOnly = false;
+    lowerConfirmation = 'Monthly macro is bearish — buy blocked until MN/W/D/H4 align bullish (trend is your friend).';
+  } else if (mnDir === 'bullish' && (finalDecision === 'SELL' || finalDecision === 'SELL opportunity') && !higherBullish) {
+    finalDecision = 'WAIT';
+    scalpOnly = false;
+    lowerConfirmation = 'Monthly macro is bullish — sell blocked until MN/W/D/H4 align bearish (trend is your friend).';
   }
 
   const confidence = clamp((Math.max(weightedBull, weightedBear) * 0.44 + averageAlignment * 0.36 + (1 - conflictSeverity) * 0.2), 0, 0.98);

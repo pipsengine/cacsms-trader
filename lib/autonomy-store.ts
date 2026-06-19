@@ -7,6 +7,7 @@ import { SYSTEM_FOCUS_SYMBOLS } from './focus-symbols';
 import { enforceGoldPipelineSymbol, isGoldOnlyTradingEngine, isGoldSymbol } from './gold-trading-engine';
 import { DEFAULT_PAIR_SELECTION_CONFIG, runAutonomousPairSelection } from './pair-selector';
 import { AUTONOMY_TIMEFRAMES, AUTONOMY_WORKERS, type AutonomousDecisionInput, type AutonomyConfig, type AutonomyJobStatus, type AutonomyWorkerName } from './autonomy-types';
+import { normalizeInstitutionalTimeframe } from './institutional-timeframe-normalize';
 import { getTradingStyleProfile } from './trading-styles/registry';
 import { normalizeStrategyId } from './strategy-governance';
 import { analyzeAiVisualInterpretation } from './ai-visual-interpretation-store';
@@ -1270,7 +1271,7 @@ function cadenceForTimeframe(timeframe: string) {
 }
 
 function normalizeTimeframe(value: string) {
-  const timeframe = value.toUpperCase();
+  const timeframe = normalizeInstitutionalTimeframe(value);
   if (!AUTONOMY_TIMEFRAMES.includes(timeframe as typeof AUTONOMY_TIMEFRAMES[number])) throw new Error(`Unsupported autonomous timeframe ${timeframe}.`);
   return timeframe;
 }

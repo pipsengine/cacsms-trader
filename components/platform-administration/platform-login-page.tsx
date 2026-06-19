@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { FormEvent, useState } from 'react';
 
@@ -125,6 +126,9 @@ export function PlatformLoginPage() {
             <Button type="button" variant="outline" className="w-full" disabled={loading || !email} onClick={handleResetRequest}>
               Request password reset
             </Button>
+            <Link className="block text-center text-sm text-slate-600 underline" href="/forgot-password">
+              Forgot password page
+            </Link>
           </CardContent>
         </Card>
 

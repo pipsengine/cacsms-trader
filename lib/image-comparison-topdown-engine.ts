@@ -4,7 +4,7 @@ import {
   type ImageComparisonTimeframe,
 } from './image-comparison-engine';
 
-export const TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+export const TOP_DOWN_TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 export type TopDownTimeframe = (typeof TOP_DOWN_TIMEFRAMES)[number];
 
 export type TopDownComparisonSnapshot = Pick<
@@ -81,6 +81,7 @@ export type TopDownComparisonDecision = {
 };
 
 const timeframeWeights: Record<TopDownTimeframe, number> = {
+  MN: 1.5,
   W: 1.35,
   D: 1.2,
   H4: 1.0,
@@ -107,13 +108,14 @@ export function synthesizeTopDownDecision(symbol: string, timeframeResults: TopD
   const averageAlignment = average(alignments.map((item) => item.alignmentScore));
   const conflictSeverity = conflicts[0]?.severityScore ?? 0;
 
-  const higher = (['W', 'D', 'H4'] as TopDownTimeframe[]).map((tf) => resultFor(timeframeResults, tf));
+  const higher = (['MN', 'W', 'D', 'H4'] as TopDownTimeframe[]).map((tf) => resultFor(timeframeResults, tf));
   const lower = (['H1', 'M15'] as TopDownTimeframe[]).map((tf) => resultFor(timeframeResults, tf));
   const higherBullish = higher.every((item) => item?.bias === 'bullish');
   const higherBearish = higher.every((item) => item?.bias === 'bearish');
   const lowerBullish = lower.every((item) => item?.bias === 'bullish');
   const lowerBearish = lower.every((item) => item?.bias === 'bearish');
 
+  const mn = resultFor(timeframeResults, 'MN');
   const w = resultFor(timeframeResults, 'W');
   const d = resultFor(timeframeResults, 'D');
   const h4 = resultFor(timeframeResults, 'H4');
@@ -131,10 +133,10 @@ export function synthesizeTopDownDecision(symbol: string, timeframeResults: TopD
 
   if (higherBullish && lowerBullish) {
     finalDecision = 'BUY opportunity';
-    lowerConfirmation = 'H1 and M15 bullish visual shifts confirm displacement inside W/D/H4 bullish institutional control.';
+    lowerConfirmation = 'H1 and M15 bullish visual shifts confirm displacement inside MN/W/D/H4 bullish institutional control.';
   } else if (higherBearish && lowerBearish) {
     finalDecision = 'SELL opportunity';
-    lowerConfirmation = 'H1 and M15 bearish visual shifts confirm displacement inside W/D/H4 bearish institutional control.';
+    lowerConfirmation = 'H1 and M15 bearish visual shifts confirm displacement inside MN/W/D/H4 bearish institutional control.';
   } else if (higherBullish && lower.some((item) => item?.bias === 'bearish')) {
     finalDecision = 'WAIT';
     lowerConfirmation = 'Institutional desks treat this as a bullish higher-timeframe correction window; do not sell into W/D demand until H1/M15 invalidate the pullback.';
@@ -158,6 +160,14 @@ export function synthesizeTopDownDecision(symbol: string, timeframeResults: TopD
     finalDecision = 'SELL';
     scalpOnly = true;
     lowerConfirmation = 'H4/H1/M15 align bearish but W/D do not confirm; suitable for tactical scalp only, not full institutional swing.';
+  }
+
+  if (mn?.bias === 'bearish' && (finalDecision === 'BUY opportunity' || finalDecision === 'BUY')) {
+    finalDecision = 'WAIT';
+    lowerConfirmation = 'Monthly (MN) bearish anchor blocks bullish institutional entry — trend is your friend; wait for MN alignment or deeper W/D reclaim.';
+  } else if (mn?.bias === 'bullish' && (finalDecision === 'SELL opportunity' || finalDecision === 'SELL')) {
+    finalDecision = 'WAIT';
+    lowerConfirmation = 'Monthly (MN) bullish anchor blocks bearish institutional entry — wait for MN alignment or deeper W/D breakdown.';
   }
 
   const confidence = clamp(
@@ -186,7 +196,7 @@ export function synthesizeTopDownDecision(symbol: string, timeframeResults: TopD
     `${controlling} visually controls ${symbol} with ${finalBias}.`,
     lowerConfirmation,
     `Top-down alignment average is ${Math.round(averageAlignment * 100)}%; strongest conflict severity is ${Math.round(conflictSeverity * 100)}%.`,
-    `Institutional decision after comparing W→D→H4→H1→M15 chart deltas: ${finalDecision}${scalpOnly ? ' (scalp-only context)' : ''}.`,
+    `Institutional decision after comparing MN→W→D→H4→H1→M15 chart deltas: ${finalDecision}${scalpOnly ? ' (scalp-only context)' : ''}.`,
   ].join(' ');
 
   return {
@@ -215,7 +225,7 @@ export function synthesizeTopDownDecision(symbol: string, timeframeResults: TopD
 }
 
 function buildAlignments(results: TopDownTimeframeResult[]): TopDownAlignment[] {
-  const pairs: Array<[TopDownTimeframe, TopDownTimeframe]> = [['W', 'D'], ['D', 'H4'], ['H4', 'H1'], ['H1', 'M15']];
+  const pairs: Array<[TopDownTimeframe, TopDownTimeframe]> = [['MN', 'W'], ['W', 'D'], ['D', 'H4'], ['H4', 'H1'], ['H1', 'M15']];
   return pairs.map(([left, right]) => {
     const leftResult = resultFor(results, left);
     const rightResult = resultFor(results, right);
@@ -373,7 +383,7 @@ function weightedBias(results: TopDownTimeframeResult[], target: 'bullish' | 'be
 }
 
 function controllingTimeframe(results: TopDownTimeframeResult[]): TopDownTimeframe | 'none' {
-  for (const tf of ['W', 'D', 'H4', 'H1', 'M15'] as TopDownTimeframe[]) {
+  for (const tf of TOP_DOWN_TIMEFRAMES) {
     const item = resultFor(results, tf);
     if (item?.ready && item.bias !== 'neutral' && item.changeScore > 12) return tf;
   }

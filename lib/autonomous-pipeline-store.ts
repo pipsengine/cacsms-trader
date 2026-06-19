@@ -16,6 +16,7 @@ import { isContinuousTradingEnabled } from './execution-risk-limits';
 import { resolvePipelineSymbolUniverse } from './pipeline-symbol-universe';
 import { getLatestPairSelection, maybeRefreshPairSelection, runAutonomousPairSelection } from './pair-selector';
 import { getLatestPipelineSession, listPipelineEvents } from './top-down-orchestrator';
+import { normalizeInstitutionalTimeframe } from './institutional-timeframe-normalize';
 import { queryPostgres } from './postgres';
 
 export interface PipelineStageStatusView {
@@ -336,24 +337,34 @@ export async function getAutonomousPipelineStatus(
       return { status: 'not_started', detail: 'Requires connected terminal before chart navigation.', progress: 0, metrics: {} };
     },
     'top-down-capture': () => {
-      const captured = AUTONOMY_TIMEFRAME_SEQUENCE.filter((tf) => captureCounts.timeframes[tf] > 0).length;
-      const sessionStored = AUTONOMY_TIMEFRAME_SEQUENCE.filter((tf) => timeframeCapture[tf] === 'stored').length;
-      const commanded = AUTONOMY_TIMEFRAME_SEQUENCE.filter(
-        (tf) => timeframeCapture[tf] && timeframeCapture[tf] !== 'stored',
-      ).length;
-      if (captured === AUTONOMY_TIMEFRAME_SEQUENCE.length) {
+      const total = AUTONOMY_TIMEFRAME_SEQUENCE.length;
+      const stored = AUTONOMY_TIMEFRAME_SEQUENCE.filter((tf) => captureCounts.timeframes[tf] > 0).length;
+      const awaitingIngest = AUTONOMY_TIMEFRAME_SEQUENCE.filter((tf) => {
+        const sessionState = timeframeCapture[tf];
+        return Boolean(sessionState && sessionState !== 'stored' && captureCounts.timeframes[tf] <= 0);
+      }).length;
+      if (stored === total) {
         return { status: 'completed', detail: 'All top-down timeframes captured.', progress: 100, metrics: captureCounts };
       }
-      if (commanded > 0 || sessionStored > 0 || session?.current_stage === 'top-down-capture') {
+      if (awaitingIngest > 0 || stored > 0 || session?.current_stage === 'top-down-capture') {
+        const progress = Math.min(
+          100,
+          Math.round(((stored + awaitingIngest * 0.35) / total) * 100),
+        );
         return {
           status: 'in_progress',
-          detail: `Capture in progress (${captured}/${AUTONOMY_TIMEFRAME_SEQUENCE.length} stored, ${commanded} awaiting ingest).`,
-          progress: Math.round(((captured + sessionStored * 0.25 + commanded * 0.15) / AUTONOMY_TIMEFRAME_SEQUENCE.length) * 100),
-          metrics: { ...captureCounts, timeframeCapture, sessionStored, commanded },
+          detail: `Capture in progress (${stored}/${total} stored${awaitingIngest > 0 ? `, ${awaitingIngest} awaiting ingest` : ''}).`,
+          progress,
+          metrics: { ...captureCounts, timeframeCapture, stored, awaitingIngest },
         };
       }
-      if (captured > 0) {
-        return { status: 'in_progress', detail: `${captured}/${AUTONOMY_TIMEFRAME_SEQUENCE.length} timeframe captures available.`, progress: Math.round((captured / AUTONOMY_TIMEFRAME_SEQUENCE.length) * 100), metrics: captureCounts };
+      if (stored > 0) {
+        return {
+          status: 'in_progress',
+          detail: `${stored}/${total} timeframe captures available.`,
+          progress: Math.min(100, Math.round((stored / total) * 100)),
+          metrics: captureCounts,
+        };
       }
       return { status: 'not_started', detail: 'No top-down captures for active symbol yet.', progress: 0, metrics: captureCounts };
     },
@@ -375,13 +386,16 @@ export async function getAutonomousPipelineStatus(
       const openOrders = Number(execution.metrics.openOrders ?? 0);
       const trackedOpen = Number(execution.metrics.trackedOpen ?? 0);
       const terminalOpen = Number(execution.metrics.terminalOpen ?? 0);
-      const liveCount = Math.max(openOrders, terminalOpen, trackedOpen);
+      const pendingOpens = Number(execution.metrics.pendingOpens ?? 0);
+      const liveCount = Math.max(openOrders, terminalOpen, trackedOpen, pendingOpens);
       const hasOpen = liveCount > 0;
       const executedToday = Number(execution.metrics.executedToday ?? 0);
       const detail = hasOpen
-        ? trackedOpen === liveCount
-          ? `${liveCount} open position(s) under live monitor.`
-          : `${liveCount} open on terminal · ${trackedOpen} tracked in monitor registry.`
+        ? pendingOpens > 0 && trackedOpen === 0 && terminalOpen === 0
+          ? `${pendingOpens} pending opening command(s) under monitor.`
+          : trackedOpen === liveCount
+            ? `${liveCount} open position(s) under live monitor.`
+            : `${liveCount} active exposure (${terminalOpen} terminal · ${trackedOpen} tracked · ${pendingOpens} pending).`
         : executedToday > 0 || execution.status === 'completed'
           ? 'No open positions right now — last execution completed; awaiting next signal.'
           : 'No open positions to monitor.';
@@ -527,7 +541,10 @@ async function getCaptureCoverage(symbol: string) {
     [symbol],
   );
   const timeframes: Record<string, number> = {};
-  for (const row of captures.rows) timeframes[String(row.timeframe)] = Number(row.count);
+  for (const row of captures.rows) {
+    const tf = normalizeInstitutionalTimeframe(String(row.timeframe));
+    timeframes[tf] = (timeframes[tf] ?? 0) + Number(row.count);
+  }
 
   const reconstructed = await queryPostgres(
     `SELECT COUNT(DISTINCT rc.chart_capture_id)::int AS count

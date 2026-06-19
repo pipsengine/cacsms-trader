@@ -259,15 +259,27 @@ export async function advancePipelineExecution(
         },
       };
     } else if (dispatchStatus === 'blocked') {
-      return {
-        status: 'blocked',
-        detail: `Execution blocked: ${blockers.join(' ') || dispatchStatus}`,
-        metrics: {
-          decisionLogId: decision.decisionLogId,
-          commandId: row?.command_id ? String(row.command_id) : null,
-          blockers,
-        },
-      };
+      const liveChecklist = await evaluateAutonomyExecutionChecklist({
+        decision,
+        config: await getAutonomyConfig(),
+        manual: false,
+      }).catch(() => null);
+      if (liveChecklist?.ready) {
+        await queryPostgres(
+          'DELETE FROM autonomy_execution_dispatches WHERE decision_log_id = $1 AND status = $2',
+          [decision.decisionLogId, 'blocked'],
+        ).catch(() => null);
+      } else {
+        return {
+          status: 'blocked',
+          detail: `Execution blocked: ${(liveChecklist?.blockers ?? blockers).join(' ') || dispatchStatus}`,
+          metrics: {
+            decisionLogId: decision.decisionLogId,
+            commandId: row?.command_id ? String(row.command_id) : null,
+            blockers: liveChecklist?.blockers ?? blockers,
+          },
+        };
+      }
     }
   }
 
@@ -541,6 +553,28 @@ export async function getBridgeExecutionMetrics() {
   const persisted = await getPersistedExecutionMetrics();
   let bridgeQueued = 0;
   let bridgeAcked = 0;
+  let pendingOpens = 0;
+
+  if (account) {
+    try {
+      const pendingResult = await queryPostgres(
+        `
+          SELECT COUNT(*)::int AS count
+          FROM execution_commands c
+          JOIN mt5_terminals t ON t.terminal_id = c.terminal_id
+          WHERE c.terminal_id = $1
+            AND t.account_number = $2
+            AND upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
+            AND c.lifecycle_state IN ('QUEUED', 'ROUTING', 'SENT', 'ACKNOWLEDGED')
+            AND COALESCE(c.broker_message, '') <> 'conditional_entry_waiting_for_retracement_confirmation'
+        `,
+        [account.terminalId, account.accountNumber],
+      );
+      pendingOpens = Number(pendingResult.rows[0]?.count ?? 0);
+    } catch {
+      pendingOpens = 0;
+    }
+  }
 
   try {
     const response = await fetch(`${process.env.NEXT_PUBLIC_MT5_BRIDGE_URL ?? 'http://localhost:8787'}/commands`, { cache: 'no-store' });
@@ -561,6 +595,7 @@ export async function getBridgeExecutionMetrics() {
     openOrders: openPositionMetrics.openOrders,
     trackedOpen: openPositionMetrics.trackedOpen,
     terminalOpen: openPositionMetrics.terminalOpen,
+    pendingOpens,
     openPositions: openPositionMetrics.positions.map((position) => ({
       ticket: position.ticket,
       symbol: position.symbol,

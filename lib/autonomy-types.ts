@@ -1,4 +1,4 @@
-export const AUTONOMY_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+export const AUTONOMY_TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 
 export type AutonomyTimeframe = typeof AUTONOMY_TIMEFRAMES[number];
 export type AutonomyMode = 'observe' | 'signal' | 'assisted_trade' | 'full_auto';
@@ -142,7 +142,9 @@ export interface AutonomousDecisionOutput {
   institutionalPlan?: {
     sequence: Array<{
       stage:
+        | 'MN macro'
         | 'W/D bias'
+        | 'W bias'
         | 'D bias'
         | 'H4 structure'
         | 'H1 setup'

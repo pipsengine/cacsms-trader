@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { resolvePermissions } from '@/lib/platform-auth/rbac';
+import { resolvePermissionsAsync } from '@/lib/platform-auth/rbac-server';
 import { getPlatformSessionUserFromRequest } from '@/lib/platform-auth/session';
 import type { PlatformPermissionKey, PlatformUserPublic } from '@/lib/platform-auth/types';
 import { isPlatformAuthEnabled } from '@/lib/platform-auth/constants';
@@ -26,7 +27,7 @@ export async function requirePlatformAuth(
     return NextResponse.json({ ok: false, error: 'Authentication required.' }, { status: 401 });
   }
 
-  const permissions = resolvePermissions(user);
+  const permissions = await resolvePermissionsAsync(user);
   if (permission && !permissions[permission]) {
     return NextResponse.json({ ok: false, error: 'Insufficient permissions.' }, { status: 403 });
   }

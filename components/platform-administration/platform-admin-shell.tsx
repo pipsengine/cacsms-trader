@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils';
 const NAV = [
   { href: PLATFORM_ADMIN_PAGES.overview, label: 'Admin dashboard' },
   { href: PLATFORM_ADMIN_PAGES.users, label: 'User management', permission: 'view_all_users' as const },
+  { href: PLATFORM_ADMIN_PAGES.activeSessions, label: 'Active sessions', permission: 'manage_active_sessions' as const },
   { href: PLATFORM_ADMIN_PAGES.myProfile, label: 'My profile' },
   { href: PLATFORM_ADMIN_PAGES.myMt5, label: 'My MT5 connection', permission: 'manage_own_mt5' as const },
   { href: PLATFORM_ADMIN_PAGES.roles, label: 'Roles & permissions', permission: 'manage_roles_permissions' as const },

@@ -32,7 +32,7 @@ import {
 } from '@/lib/dashboard-card-tones';
 import { cn } from '@/lib/utils';
 
-const TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const TOP_DOWN_TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 
 type CaptureRecord = {
   id: string;

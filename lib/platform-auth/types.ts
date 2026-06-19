@@ -18,6 +18,9 @@ export const PLATFORM_PERMISSION_KEYS = [
   'view_audit_log',
   'manage_roles_permissions',
   'view_admin_dashboard',
+  'view_mt5_infrastructure',
+  'manage_trading_accounts',
+  'manage_active_sessions',
 ] as const;
 
 export type PlatformPermissionKey = (typeof PLATFORM_PERMISSION_KEYS)[number];
@@ -85,6 +88,7 @@ export type PlatformAdminOverview = {
   activeBaskets: number;
   dailyPnl: number;
   riskExposure: number;
+  activeSessions: number;
   users: Array<{
     id: string;
     username: string | null;
@@ -99,4 +103,53 @@ export type PlatformAdminOverview = {
     accountNumber: string | null;
     brokerName: string | null;
   }>;
+};
+
+export type PlatformSessionView = {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userDisplayName: string;
+  ipAddress: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  expiresAt: string;
+  lastSeenAt: string | null;
+  isCurrent: boolean;
+};
+
+export type PlatformTradingAccountLink = {
+  id: string;
+  userId: string;
+  label: string;
+  accountNumber: string;
+  brokerName: string;
+  serverName: string;
+  terminalId: string | null;
+  symbol: string;
+  isPrimary: boolean;
+  tradingEnabled: boolean;
+  goldEngineEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PlatformEaInstance = {
+  id: string;
+  userId: string;
+  tradingAccountId: string | null;
+  terminalId: string;
+  symbol: string;
+  eaName: string;
+  status: string;
+  lastHeartbeatAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type PlatformMfaStatus = {
+  enabled: boolean;
+  method: string;
+  verifiedAt: string | null;
+  enrollable: boolean;
 };

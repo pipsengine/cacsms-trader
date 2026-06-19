@@ -1,9 +1,9 @@
 import { evaluateAutonomySafetyLock } from '@/lib/autonomy-safety-lock';
 import { syncOpenPositionRegistry } from '@/lib/execution-open-positions';
 import { getExecutionRiskSettings } from '@/lib/execution-risk-settings';
-import { countTradesOpenedTodayForSymbol } from '@/lib/execution-risk-limits';
 import {
   GOLD_SYMBOL,
+  goldDailyLimitsEnabled,
   goldMaxBasketsPerDay,
   goldMaxConcurrentBaskets,
   goldMaxConcurrentPositions,
@@ -48,6 +48,106 @@ function dayStartSql(): string {
   return `(date_trunc('day', (now() AT TIME ZONE '${TRADING_PNL_TIMEZONE}')::date))::timestamp AT TIME ZONE '${TRADING_PNL_TIMEZONE}'`;
 }
 
+const BASKET_ACCOUNTING_RESET_KEY = 'gold_basket_accounting_reset';
+
+type BasketAccountingResetRecord = {
+  resetAt: string;
+  accountNumber: string | null;
+  reason: string;
+  timezone: string;
+};
+
+async function loadBasketAccountingReset(
+  accountNumber: string | null,
+): Promise<BasketAccountingResetRecord | null> {
+  const result = await queryPostgres(
+    `SELECT value FROM mt5_bridge_settings WHERE key = $1 LIMIT 1`,
+    [BASKET_ACCOUNTING_RESET_KEY],
+  ).catch(() => ({ rows: [] }));
+  const raw = String(result.rows[0]?.value ?? '').trim();
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as BasketAccountingResetRecord;
+    if (!parsed.resetAt) return null;
+    if (parsed.accountNumber && accountNumber && parsed.accountNumber !== accountNumber) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveBasketAccountingCutoff(accountNumber: string | null): Promise<string> {
+  const reset = await loadBasketAccountingReset(accountNumber);
+  if (!reset?.resetAt) return dayStartSql();
+  return `GREATEST(${dayStartSql()}, '${reset.resetAt}'::timestamptz)`;
+}
+
+export async function resetBasketDayAccounting(input: {
+  accountNumber?: string | null;
+  terminalId?: string | null;
+  reason?: string;
+} = {}): Promise<{
+  resetAt: string;
+  accountNumber: string | null;
+  timezone: string;
+  tradingAccountsReset: number;
+}> {
+  const accountNumber = await resolveAccountNumber(input);
+  const resetAt = new Date().toISOString();
+  const record: BasketAccountingResetRecord = {
+    resetAt,
+    accountNumber,
+    reason: input.reason ?? 'manual_basket_day_reset',
+    timezone: TRADING_PNL_TIMEZONE,
+  };
+
+  await queryPostgres(
+    `
+      INSERT INTO mt5_bridge_settings (key, value, updated_at)
+      VALUES ($1, $2, now())
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+    `,
+    [BASKET_ACCOUNTING_RESET_KEY, JSON.stringify(record)],
+  );
+
+  const accounts = accountNumber
+    ? await queryPostgres(
+      `
+        UPDATE trading_accounts
+        SET starting_equity_today = GREATEST(equity, balance),
+            updated_at = now()
+        WHERE account_number = $1
+        RETURNING account_number
+      `,
+      [accountNumber],
+    )
+    : await queryPostgres(`
+        UPDATE trading_accounts
+        SET starting_equity_today = GREATEST(equity, balance),
+            updated_at = now()
+        RETURNING account_number
+      `);
+
+  await queryPostgres(
+    `
+      DELETE FROM autonomy_execution_dispatches
+      WHERE status = 'blocked'
+        AND EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements_text(coalesce(blockers_json, '[]'::jsonb)) blocker
+          WHERE blocker ~* 'basket|daily leg|drawdown budget|daily trade limit'
+        )
+    `,
+  ).catch(() => null);
+
+  return {
+    resetAt,
+    accountNumber,
+    timezone: TRADING_PNL_TIMEZONE,
+    tradingAccountsReset: accounts.rows.length,
+  };
+}
+
 async function resolveAccountNumber(input?: { accountNumber?: string | null; terminalId?: string | null }): Promise<string | null> {
   const explicit = String(input?.accountNumber ?? '').trim();
   if (explicit) return explicit;
@@ -83,6 +183,7 @@ async function countPendingBatchLegs(symbol = GOLD_SYMBOL): Promise<number> {
 }
 
 async function countDistinctBasketsOpenedToday(accountNumber: string): Promise<number> {
+  const accountingCutoff = await resolveBasketAccountingCutoff(accountNumber);
   const result = await queryPostgres(
     `
       SELECT COUNT(DISTINCT basket_key)::int AS count
@@ -100,7 +201,7 @@ async function countDistinctBasketsOpenedToday(accountNumber: string): Promise<n
           AND c.lifecycle_state IN ('EXECUTED', 'ACKNOWLEDGED')
           AND coalesce(c.payload->>'batchEntry', 'false') IN ('true', '1', 'yes')
           AND COALESCE(NULLIF(c.payload->>'legIndex', '')::int, 1) = 1
-          AND c.created_at >= ${dayStartSql()}
+          AND c.created_at >= ${accountingCutoff}
         UNION
         SELECT COALESCE(
           NULLIF(p.metadata->>'basketId', ''),
@@ -111,7 +212,7 @@ async function countDistinctBasketsOpenedToday(accountNumber: string): Promise<n
         JOIN mt5_terminals t ON t.terminal_id = p.terminal_id
         WHERE t.account_number = $1
           AND upper(coalesce(p.symbol, '')) LIKE 'XAU%'
-          AND p.opened_at >= ${dayStartSql()}
+          AND p.opened_at >= ${accountingCutoff}
           AND coalesce(p.metadata->>'batchEntry', 'false') IN ('true', '1', 'yes')
           AND COALESCE(NULLIF(p.metadata->>'legIndex', '')::int, 1) = 1
       ) keys
@@ -120,6 +221,33 @@ async function countDistinctBasketsOpenedToday(accountNumber: string): Promise<n
     [accountNumber],
   ).catch(() => ({ rows: [{ count: 0 }] }));
   return Number(result.rows[0]?.count ?? 0);
+}
+
+async function countDailyLegsOpenedToday(accountNumber?: string): Promise<number> {
+  const accountingCutoff = await resolveBasketAccountingCutoff(accountNumber ?? null);
+  const params: string[] = [GOLD_SYMBOL.toUpperCase()];
+  const accountFilter = accountNumber
+    ? (params.push(accountNumber), `AND t.account_number = $2`)
+    : '';
+  const result = await queryPostgres(
+    `
+      SELECT COUNT(*)::int AS count
+      FROM execution_commands c
+      ${accountNumber ? 'JOIN mt5_terminals t ON t.terminal_id = c.terminal_id' : ''}
+      WHERE upper(coalesce(c.symbol, c.payload->>'symbol', '')) = $1
+        AND c.lifecycle_state = 'EXECUTED'
+        AND upper(replace(c.type, '-', '_')) IN ('PLACE_ORDER', 'PLACEORDER')
+        AND c.created_at >= ${accountingCutoff}
+        ${accountFilter}
+    `,
+    params,
+  ).catch(() => ({ rows: [{ count: 0 }] }));
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+/** Gold daily trade count — respects basket day accounting reset (Africa/Lagos). */
+export async function countGoldDailyTradesOpened(accountNumber?: string | null): Promise<number> {
+  return countDailyLegsOpenedToday(accountNumber ?? undefined);
 }
 
 async function countPendingBasketGroups(symbol = GOLD_SYMBOL): Promise<number> {
@@ -192,7 +320,7 @@ export async function getBasketCapacitySnapshot(input: {
   const basketsOpenedToday = accountNumber
     ? await countDistinctBasketsOpenedToday(accountNumber)
     : 0;
-  const dailyLegsOpened = await countTradesOpenedTodayForSymbol(GOLD_SYMBOL, accountNumber ?? undefined).catch(() => 0);
+  const dailyLegsOpened = await countDailyLegsOpenedToday(accountNumber ?? undefined).catch(() => 0);
 
   const maxBasketsPerDay = goldMaxBasketsPerDay();
   const maxConcurrentBaskets = goldMaxConcurrentBaskets();
@@ -200,7 +328,7 @@ export async function getBasketCapacitySnapshot(input: {
   const maxConcurrentLegs = goldMaxConcurrentPositions();
   const dynamicMaxLegsPerBasket = resolveDynamicBasketLegCap(input);
 
-  if (state === 'open' && basketsOpenedToday >= maxBasketsPerDay) {
+  if (goldDailyLimitsEnabled() && state === 'open' && basketsOpenedToday >= maxBasketsPerDay) {
     state = 'basket_suspended';
     blockers.push(`Daily basket limit reached (${basketsOpenedToday}/${maxBasketsPerDay}).`);
   }
@@ -210,7 +338,7 @@ export async function getBasketCapacitySnapshot(input: {
   if (state === 'open' && openLegs + pendingLegs >= maxConcurrentLegs) {
     blockers.push(`Concurrent leg limit reached (${openLegs + pendingLegs}/${maxConcurrentLegs}).`);
   }
-  if (state === 'open' && dailyLegsOpened >= maxDailyLegs) {
+  if (goldDailyLimitsEnabled() && state === 'open' && dailyLegsOpened >= maxDailyLegs) {
     state = 'basket_suspended';
     blockers.push(`Daily leg limit reached (${dailyLegsOpened}/${maxDailyLegs}).`);
   }
@@ -266,7 +394,7 @@ export async function evaluateInstitutionalBasketCapacity(input: {
   }
 
   if (input.isNewBasket !== false) {
-    if (snapshot.basketsOpenedToday >= snapshot.maxBasketsPerDay) {
+    if (goldDailyLimitsEnabled() && snapshot.basketsOpenedToday >= snapshot.maxBasketsPerDay) {
       blockers.push(`Maximum baskets per day reached (${snapshot.basketsOpenedToday}/${snapshot.maxBasketsPerDay}).`);
     }
     if (snapshot.concurrentBaskets >= snapshot.maxConcurrentBaskets) {
@@ -280,7 +408,7 @@ export async function evaluateInstitutionalBasketCapacity(input: {
   }
 
   const projectedDailyLegs = snapshot.dailyLegsOpened + (input.isNewBasket === false ? 1 : proposedLegs);
-  if (projectedDailyLegs > snapshot.maxDailyLegs) {
+  if (goldDailyLimitsEnabled() && projectedDailyLegs > snapshot.maxDailyLegs) {
     blockers.push(`Projected daily legs ${projectedDailyLegs} would exceed cap ${snapshot.maxDailyLegs}.`);
   }
 

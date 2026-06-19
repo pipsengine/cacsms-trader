@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { ReconstructedCandle } from './visual-intelligence-types';
 
-export type ImageComparisonTimeframe = 'W' | 'D' | 'H4' | 'H1' | 'M15';
+export type ImageComparisonTimeframe = 'MN' | 'W' | 'D' | 'H4' | 'H1' | 'M15';
 export type FinalImageInterpretation =
   | 'Structure unchanged'
   | 'Bullish shift'
@@ -77,12 +77,12 @@ export interface ImageComparisonResult {
 }
 
 const vectorSize = 32;
-const supportedTimeframes = new Set(['W', 'D', 'H4', 'H1', 'M15']);
+const supportedTimeframes = new Set(['MN', 'W', 'D', 'H4', 'H1', 'M15']);
 
 export function normalizeImageComparisonTimeframe(value: unknown): ImageComparisonTimeframe {
   const normalized = String(value ?? '').toUpperCase();
   if (supportedTimeframes.has(normalized)) return normalized as ImageComparisonTimeframe;
-  throw new Error('Timeframe must be one of W, D, H4, H1, M15.');
+  throw new Error('Timeframe must be one of MN, W, D, H4, H1, M15.');
 }
 
 export function analyzeImageComparison(input: ImageComparisonInput): ImageComparisonResult {

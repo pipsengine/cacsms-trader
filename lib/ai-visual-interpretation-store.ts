@@ -17,7 +17,7 @@ import { getTrendlineAnalysis } from './trendline-detection-store';
 import { getCaptureAnalysis, listCaptures, publishVisualIntelligenceEvent } from './visual-intelligence-store';
 import type { ChartCaptureRecord, ReconstructedCandle, VisionDecision } from './visual-intelligence-types';
 
-const TOP_DOWN_TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const TOP_DOWN_TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 
 type Row = Record<string, unknown>;
 

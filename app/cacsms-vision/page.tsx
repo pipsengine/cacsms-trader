@@ -238,7 +238,7 @@ export default function CacsmsVisionPage() {
           <div className="mt-3 grid gap-2 md:grid-cols-[180px_1fr_auto_auto_auto]">
             <input value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-semibold shadow-sm outline-none focus:border-blue-400" aria-label="Symbol" />
             <div className="flex gap-1 rounded-lg border border-violet-300/50 bg-violet-100/60 p-1 shadow-inner">
-              {(room?.systemStatus?.activeTimeframes ?? ['W', 'D', 'H4', 'H1', 'M15']).map((item) => {
+              {(room?.systemStatus?.activeTimeframes ?? ['MN', 'W', 'D', 'H4', 'H1', 'M15']).map((item) => {
                 const chipTone = TIMEFRAME_TONES[item] ?? 'slate';
                 return (
                   <div

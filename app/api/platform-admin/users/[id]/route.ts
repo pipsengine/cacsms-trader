@@ -1,4 +1,4 @@
-import { canManageUser } from '@/lib/platform-auth/rbac';
+import { canManageUser, hasPermission } from '@/lib/platform-auth/rbac';
 import { isGlobalSuperAdminUser, GLOBAL_SUPER_ADMIN_PROTECTED_ERROR } from '@/lib/platform-auth/global-super-admin';
 import { hashPassword } from '@/lib/platform-auth/password';
 import { clientIp, jsonError, jsonOk, requirePlatformAuth } from '@/lib/platform-auth/request-auth';
@@ -73,7 +73,12 @@ export async function PATCH(request: Request, context: RouteContext): Promise<Re
       }
       if (body.status !== undefined) patch.status = String(body.status) as PlatformUserStatus;
       if (body.managedByUserId !== undefined) patch.managedByUserId = body.managedByUserId;
-      if (body.permissions !== undefined) patch.permissions = body.permissions;
+      if (body.permissions !== undefined) {
+        if (!hasPermission(auth.user, 'manage_roles_permissions')) {
+          return jsonError('Insufficient permissions to modify role permissions.', 403);
+        }
+        patch.permissions = body.permissions;
+      }
       if (body.password) patch.passwordHash = hashPassword(String(body.password));
     }
 

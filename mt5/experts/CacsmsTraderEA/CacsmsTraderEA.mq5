@@ -1254,6 +1254,8 @@ ENUM_TIMEFRAMES ParseTimeframePeriod(string timeframe)
    if (normalized == "M15" || normalized == "PERIOD_M15") return PERIOD_M15;
    if (normalized == "M5" || normalized == "PERIOD_M5") return PERIOD_M5;
    if (normalized == "M1" || normalized == "PERIOD_M1") return PERIOD_M1;
+   if (normalized == "M30" || normalized == "PERIOD_M30") return PERIOD_M30;
+   if (normalized == "MN" || normalized == "MN1" || normalized == "PERIOD_MN1") return PERIOD_MN1;
    return PERIOD_H1;
 }
 

@@ -15,6 +15,9 @@ const ROLE_DEFAULTS: Record<PlatformRole, PlatformPermissions> = {
     view_audit_log: true,
     manage_roles_permissions: true,
     view_admin_dashboard: true,
+    view_mt5_infrastructure: true,
+    manage_trading_accounts: true,
+    manage_active_sessions: true,
   },
   administrator: {
     view_command_center: true,
@@ -29,6 +32,9 @@ const ROLE_DEFAULTS: Record<PlatformRole, PlatformPermissions> = {
     view_all_users: true,
     view_audit_log: true,
     view_admin_dashboard: true,
+    view_mt5_infrastructure: true,
+    manage_trading_accounts: true,
+    manage_active_sessions: true,
   },
   trader: {
     view_command_center: true,
@@ -42,8 +48,11 @@ const ROLE_DEFAULTS: Record<PlatformRole, PlatformPermissions> = {
     manage_own_profile: true,
     view_audit_log: true,
     view_admin_dashboard: true,
+    view_mt5_infrastructure: true,
   },
 };
+
+export { ROLE_DEFAULTS };
 
 export function resolvePermissions(user: Pick<PlatformUserPublic, 'role' | 'permissions'>): PlatformPermissions {
   return { ...ROLE_DEFAULTS[user.role], ...user.permissions };

@@ -38,7 +38,7 @@ import { SYSTEM_FOCUS_SYMBOL_LABELS } from '@/lib/focus-symbols';
 import type { ReconstructedCandle } from '@/lib/visual-intelligence-types';
 import { cn } from '@/lib/utils';
 
-const TIMEFRAMES = ['W', 'D', 'H4', 'H1', 'M15'] as const;
+const TIMEFRAMES = ['MN', 'W', 'D', 'H4', 'H1', 'M15'] as const;
 type Timeframe = (typeof TIMEFRAMES)[number];
 
 type Segment = {

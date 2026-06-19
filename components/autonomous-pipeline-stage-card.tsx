@@ -73,7 +73,7 @@ export function AutonomousPipelineStageCard({
             <span>Stage progress</span>
             <span className="font-mono">{progress}%</span>
           </div>
-          <Progress value={progress} className="h-2" />
+          <Progress value={Math.min(100, Math.max(0, progress))} className="h-2" />
         </div>
         <div className="flex flex-wrap gap-2 pt-1">
           <a

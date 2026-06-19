@@ -1,4 +1,5 @@
 import { AUTONOMY_TIMEFRAME_SEQUENCE } from './autonomous-pipeline';
+import { institutionalTimeframeDbAliases, normalizeInstitutionalTimeframe } from './institutional-timeframe-normalize';
 import { analyzeAiVisualInterpretation } from './ai-visual-interpretation-store';
 import { analyzeCaptureCandles } from './candle-detection-store';
 import { ensureChartSegmentationForCapture } from './chart-segmentation-store';
@@ -17,13 +18,15 @@ export interface CaptureAnalysisBootstrapSummary {
 }
 
 export async function resolveLatestCaptureId(symbol: string, timeframe: string): Promise<string | null> {
+  const canonical = normalizeInstitutionalTimeframe(timeframe);
+  const aliases = institutionalTimeframeDbAliases(canonical);
   const result = await queryPostgres(
     `SELECT id
      FROM chart_captures
-     WHERE upper(symbol) = $1 AND upper(timeframe) = $2
+     WHERE upper(symbol) = $1 AND upper(timeframe) = ANY($2::text[])
      ORDER BY captured_at DESC
      LIMIT 1`,
-    [symbol.toUpperCase(), timeframe.toUpperCase()],
+    [symbol.toUpperCase(), aliases],
   );
   return result.rows[0]?.id ? String(result.rows[0].id) : null;
 }

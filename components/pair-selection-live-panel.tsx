@@ -17,6 +17,7 @@ import {
   toneMuted,
   toneTitle,
 } from '@/lib/dashboard-card-tones';
+import { useClientNow } from '@/hooks/use-client-now';
 import { cn } from '@/lib/utils';
 
 type FeedEvent = {
@@ -77,7 +78,7 @@ function formatRelativeTime(iso: string, nowMs: number): string {
 export function PairSelectionLivePanel({ compact = false }: { compact?: boolean }) {
   const [feed, setFeed] = useState<FeedPayload | null>(null);
   const [loading, setLoading] = useState(false);
-  const [clockNow, setClockNow] = useState(Date.now());
+  const clockNow = useClientNow(15_000);
 
   const loadFeed = useCallback(async () => {
     setLoading(true);
@@ -93,10 +94,8 @@ export function PairSelectionLivePanel({ compact = false }: { compact?: boolean 
   useEffect(() => {
     void loadFeed();
     const feedTimer = window.setInterval(() => void loadFeed(), 8_000);
-    const clockTimer = window.setInterval(() => setClockNow(Date.now()), 15_000);
     return () => {
       window.clearInterval(feedTimer);
-      window.clearInterval(clockTimer);
     };
   }, [loadFeed]);
 
@@ -139,7 +138,7 @@ export function PairSelectionLivePanel({ compact = false }: { compact?: boolean 
               <p className={cn('text-[10px] font-semibold uppercase tracking-wide', toneMuted('violet'))}>Primary pick</p>
               <p className={cn('text-lg font-semibold', toneBody('violet'))}>{latest.selectedSymbol}</p>
               <p className={cn('text-[11px]', toneMuted('violet'))}>
-                {latest.session} · {formatRelativeTime(latest.selectedAt, clockNow)}
+                {latest.session} · {clockNow == null ? '…' : formatRelativeTime(latest.selectedAt, clockNow)}
               </p>
             </div>
             <div className={cn('rounded-lg p-2.5', toneInsetSurface('emerald'))}>
@@ -210,7 +209,7 @@ export function PairSelectionLivePanel({ compact = false }: { compact?: boolean 
                         {event.symbol ? `${event.symbol} — ` : ''}{event.message}
                       </p>
                       <span className={cn('shrink-0 text-[10px]', toneMuted(tone))}>
-                        {formatRelativeTime(event.createdAt, clockNow)}
+                        {clockNow == null ? '…' : formatRelativeTime(event.createdAt, clockNow)}
                       </span>
                     </div>
                     {event.reasons.length > 0 ? (

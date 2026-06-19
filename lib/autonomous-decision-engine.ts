@@ -1,5 +1,10 @@
 import { getContinuousRefillDecisionThresholds, getDecisionThresholds } from './autonomy-account-profiles';
 import { detectGoldLtfScalpContext } from './gold-ltf-scalp-mode';
+import {
+  macroTrendBlocksDecision,
+  resolveMacroBiasFromStates,
+  resolveStructureBiasFromStates,
+} from './gold-macro-trend';
 import { isRangeOrientedContext } from './gold-trade-context';
 import { getTradingStyleProfile } from './trading-styles/registry';
 import { shouldBypassNewsBlackout } from './trading-session-policy';
@@ -58,6 +63,7 @@ export function buildAutonomousDecision(input: AutonomousDecisionInput): Autonom
     regime: regimeClassification.primary,
     selectedStrategyId: strategyFusion.selectedStrategyId,
     setupType,
+    symbol: input.symbol,
   });
   const conflictAdjustedDecision = applyInstitutionalConflictPolicy(decision, institutionalPlan);
   const signalScore = scoreSignalModel({
@@ -82,14 +88,35 @@ export function buildAutonomousDecision(input: AutonomousDecisionInput): Autonom
     : capitalAllocation.riskTier === 'blocked'
       ? capitalAllocation.rationale
       : '';
-  const finalDecision = capitalAllocation.riskTier === 'blocked' && (conflictAdjustedDecision === 'BUY' || conflictAdjustedDecision === 'SELL')
+  let finalDecision = capitalAllocation.riskTier === 'blocked' && (conflictAdjustedDecision === 'BUY' || conflictAdjustedDecision === 'SELL')
     ? 'MONITOR'
     : conflictAdjustedDecision;
+
+  const scalpContext = detectGoldLtfScalpContext({
+    institutionalPlan,
+    regimeClassification,
+    selectedStrategyId: strategyFusion.selectedStrategyId,
+    setupType,
+  });
+  const macroBlock = macroTrendBlocksDecision({
+    symbol: input.symbol,
+    decision: finalDecision,
+    institutionalPlan,
+    reversalConfirmed: /choch|reversal|sweep.*reclaim/i.test(`${visual.riskWarning ?? ''} ${setupType}`),
+    rangingContext: Boolean(institutionalPlan.rangingContextActive),
+    scalpActive: scalpContext.active,
+  });
+  const macroBlocker = macroBlock ?? '';
+  if (macroBlock && (finalDecision === 'BUY' || finalDecision === 'SELL')) {
+    finalDecision = 'MONITOR';
+  }
+
   const reasonAgainstDecision = [
     blockers.length || strategyFusion.blockers.length
       ? [...blockers, ...strategyFusion.blockers].join(' ')
       : 'No hard autonomous blocker is active from the available evidence.',
     institutionalBlocker,
+    macroBlocker,
   ].filter(Boolean).join(' ');
 
   return {
@@ -166,6 +193,7 @@ function buildInstitutionalPlan(input: {
   regime: RegimeTag;
   selectedStrategyId: string | null;
   setupType: string;
+  symbol: string;
 }): NonNullable<AutonomousDecisionOutput['institutionalPlan']> {
   const states = Array.isArray((input.visual as Record<string, unknown>).timeframeStates)
     ? (input.visual as Record<string, unknown>).timeframeStates as Array<Record<string, unknown>>
@@ -191,12 +219,33 @@ function buildInstitutionalPlan(input: {
       narrative: String(state?.narrative ?? defaultNarrative),
     };
   };
-  const wdBias = normalizeBias(stateFor('W')?.bias ?? stateFor('D')?.bias ?? fallbackBias);
+  const mnBias = normalizeBias(stateFor('MN')?.bias ?? fallbackBias);
+  const wBias = normalizeBias(stateFor('W')?.bias ?? fallbackBias);
+  const dBias = normalizeBias(stateFor('D')?.bias ?? fallbackBias);
   const h4Bias = normalizeBias(stateFor('H4')?.bias ?? fallbackBias);
   const h1Bias = normalizeBias(stateFor('H1')?.bias ?? fallbackBias);
   const m15Bias = normalizeDecisionSide(input.decision) ?? normalizeBias(stateFor('M15')?.bias ?? fallbackBias);
-  const htfBias = wdBias === 'neutral' || wdBias === 'mixed' ? h4Bias : wdBias;
+
+  const macroBiasRaw = resolveMacroBiasFromStates(
+    states.map((state) => ({ timeframe: String(state.timeframe ?? ''), bias: String(state.bias ?? '') })),
+    fallbackBias,
+  );
+  const macroBias = macroBiasRaw === 'bullish' ? 'bullish' : macroBiasRaw === 'bearish' ? 'bearish' : normalizeBias(mnBias !== 'neutral' && mnBias !== 'mixed' ? mnBias : wBias);
+  const wdBias = normalizeBias(wBias !== 'neutral' && wBias !== 'mixed' ? wBias : dBias);
+  const structureBias = resolveStructureBiasFromStates(
+    states.map((state) => ({ timeframe: String(state.timeframe ?? ''), bias: String(state.bias ?? '') })),
+    h4Bias,
+  );
+  const structureBiasNormalized = structureBias === 'bullish' ? 'bullish' : structureBias === 'bearish' ? 'bearish' : normalizeBias(h4Bias !== 'neutral' && h4Bias !== 'mixed' ? h4Bias : dBias);
+  const htfBias = macroBias !== 'neutral' && macroBias !== 'mixed'
+    ? macroBias
+    : structureBiasNormalized !== 'neutral' && structureBiasNormalized !== 'mixed'
+      ? structureBiasNormalized
+      : wdBias === 'neutral' || wdBias === 'mixed'
+        ? h4Bias
+        : wdBias;
   const ltfBias = m15Bias === 'neutral' || m15Bias === 'mixed' ? h1Bias : m15Bias;
+  const executionTriggerBias = normalizeDecisionSide(input.decision) ?? ltfBias;
   const conflict = isDirectional(htfBias) && isDirectional(ltfBias) && htfBias !== ltfBias;
   const leader = input.strategyBook?.bestStrategy;
   const scalpContext = detectGoldLtfScalpContext({
@@ -224,13 +273,15 @@ function buildInstitutionalPlan(input: {
   );
   return {
     sequence: [
+      stage('MN macro', 'MN', macroBias !== 'neutral' && macroBias !== 'mixed' ? macroBias : htfBias, 'Monthly macro candle sets primary trend permission for Gold.'),
+      stage('W bias', 'W', macroBias !== 'neutral' && macroBias !== 'mixed' ? macroBias : wBias, 'Weekly structure confirms or challenges monthly macro control.'),
       stage('D bias', 'D', htfBias, 'Daily trend, structure, and liquidity zones set directional bias.'),
-      stage('H4 structure', 'H4', htfBias, 'H4 market structure and liquidity must align with HTF bias.'),
+      stage('H4 structure', 'H4', htfBias, 'H4 market structure and liquidity must align with macro/HTF bias.'),
       stage('H1 setup', 'H1', ltfBias, 'H1 setup formation and institutional confirmation.'),
       stage('M30 confirmation', 'M30', ltfBias, 'M30 intermediate confirmation before execution.'),
-      stage('M15 trigger', 'M15', ltfBias, 'M15 execution trigger — primary entry timeframe.'),
-      stage('M5 precision', 'M5', ltfBias, 'M5 precision entry and micro-structure alignment.'),
-      stage('M1 scalp', 'M1', ltfBias, 'M1 scalping trigger for rapid Gold extraction.'),
+      stage('M15 trigger', 'M15', executionTriggerBias, 'M15 execution trigger — primary entry timeframe.'),
+      stage('M5 precision', 'M5', executionTriggerBias, 'M5 precision entry and micro-structure alignment.'),
+      stage('M1 scalp', 'M1', executionTriggerBias, 'M1 scalping trigger for rapid Gold extraction.'),
       {
         stage: 'execution confirmation',
         timeframe: 'execution',
