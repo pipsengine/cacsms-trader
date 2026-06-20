@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { FormEvent, useState } from 'react';
 
+import { PlatformAuthLayout } from '@/components/platform-administration/platform-auth-layout';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { toneCard, toneCardHeader, toneTitle } from '@/lib/dashboard-card-tones';
@@ -39,8 +40,8 @@ export default function ForgotPasswordPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-12">
-      <Card className={`w-full max-w-md ${toneCard('violet')}`}>
+    <PlatformAuthLayout title="Forgot password" subtitle="Request a password reset link">
+      <Card className={`mx-auto w-full max-w-md ${toneCard('violet')}`}>
         <CardHeader className={toneCardHeader('violet')}>
           <CardTitle className={toneTitle('violet')}>Forgot password</CardTitle>
         </CardHeader>
@@ -76,6 +77,6 @@ export default function ForgotPasswordPage() {
           </Link>
         </CardContent>
       </Card>
-    </div>
+    </PlatformAuthLayout>
   );
 }

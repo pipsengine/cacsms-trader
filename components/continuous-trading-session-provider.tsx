@@ -9,6 +9,9 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { usePathname } from 'next/navigation';
+
+import { isPlatformAuthOnlyPage } from '@/lib/platform-auth/route-policy';
 
 export type ContinuousTradingSessionState = {
   active: boolean;
@@ -42,6 +45,8 @@ async function fetchSessionStatus(): Promise<ContinuousTradingSessionState> {
 }
 
 export function ContinuousTradingSessionProvider({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  const pollEnabled = !isPlatformAuthOnlyPage(pathname);
   const [session, setSession] = useState<ContinuousTradingSessionState>({
     active: false,
     startedAt: null,
@@ -92,10 +97,12 @@ export function ContinuousTradingSessionProvider({ children }: { children: React
   }, [refresh]);
 
   useEffect(() => {
+    if (!pollEnabled) return;
+
     void refresh();
     const interval = window.setInterval(() => void refresh(), 15_000);
     return () => window.clearInterval(interval);
-  }, [refresh]);
+  }, [refresh, pollEnabled]);
 
   const value = useMemo<ContinuousTradingSessionContextValue>(() => ({
     ...session,

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { FormEvent, Suspense, useState } from 'react';
 
+import { PlatformAuthLayout } from '@/components/platform-administration/platform-auth-layout';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { toneCard, toneCardHeader, toneTitle } from '@/lib/dashboard-card-tones';
@@ -41,8 +42,8 @@ function ResetPasswordForm() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-12">
-      <Card className={`w-full max-w-md ${toneCard('amber')}`}>
+    <PlatformAuthLayout title="Reset password" subtitle="Choose a new password for your account">
+      <Card className={`mx-auto w-full max-w-md ${toneCard('amber')}`}>
         <CardHeader className={toneCardHeader('amber')}>
           <CardTitle className={toneTitle('amber')}>Reset password</CardTitle>
         </CardHeader>
@@ -79,7 +80,7 @@ function ResetPasswordForm() {
           </Link>
         </CardContent>
       </Card>
-    </div>
+    </PlatformAuthLayout>
   );
 }
 

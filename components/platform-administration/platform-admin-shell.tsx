@@ -6,6 +6,7 @@ import { Menu, ShieldCheck } from 'lucide-react';
 import type { ReactNode } from 'react';
 
 import { useDashboardChrome } from '@/components/dashboard-chrome-context';
+import { PlatformAuthLayout } from '@/components/platform-administration/platform-auth-layout';
 import {
   DashboardPageFrame,
   DashboardPageScroll,
@@ -50,38 +51,25 @@ export function PlatformAdminShell(props: { title: string; subtitle: string; chi
                 <p className="truncate text-sm text-slate-500">{props.subtitle}</p>
               </div>
             </div>
-            {auth.user ? (
-              <div className="hidden text-right text-sm sm:block">
-                <div className="font-medium text-slate-900">{auth.user.displayName}</div>
-                <div className="text-slate-500">{auth.user.email}</div>
-              </div>
-            ) : null}
-            {auth.authenticated ? (
-              <Button type="button" variant="outline" onClick={() => void auth.signOut()}>
-                Sign out
-              </Button>
-            ) : (
-              <Link href={PLATFORM_ADMIN_PAGES.login} className={buttonVariants({ variant: 'default' })}>
-                Sign in
-              </Link>
-            )}
           </div>
-          <div className="flex gap-2 overflow-x-auto px-4 pb-3 lg:px-6">
-            {NAV.filter((item) => !item.permission || auth.hasPermission(item.permission)).map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={cn(
-                  'shrink-0 rounded-full border px-3 py-1.5 text-sm font-medium transition-colors',
-                  pathname === item.href
-                    ? 'border-indigo-300 bg-indigo-50 text-indigo-800'
-                    : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
-                )}
-              >
-                {item.label}
-              </Link>
-            ))}
-          </div>
+          {auth.authenticated ? (
+            <div className="flex gap-2 overflow-x-auto px-4 pb-3 lg:px-6">
+              {NAV.filter((item) => !item.permission || auth.hasPermission(item.permission)).map((item) => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={cn(
+                    'shrink-0 rounded-full border px-3 py-1.5 text-sm font-medium transition-colors',
+                    pathname === item.href
+                      ? 'border-indigo-300 bg-indigo-50 text-indigo-800'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50',
+                  )}
+                >
+                  {item.label}
+                </Link>
+              ))}
+            </div>
+          ) : null}
         </header>
         <DashboardPageScroll className="bg-white">
           <div className="mx-auto w-full max-w-7xl p-4 lg:p-6">{props.children}</div>
@@ -97,18 +85,18 @@ export function PlatformAuthGate(props: { children: ReactNode; loginRedirect?: s
 
   if (!auth.loaded) {
     return (
-      <PlatformAdminShell title="Platform Administration" subtitle="Loading session…">
-        <div className="rounded-xl border border-slate-200 bg-slate-50 p-8 text-center text-slate-600">
+      <PlatformAuthLayout title="Platform Administration" subtitle="Loading session…">
+        <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-slate-600">
           Verifying platform session…
         </div>
-      </PlatformAdminShell>
+      </PlatformAuthLayout>
     );
   }
 
   if (!auth.authenticated) {
     const redirect = encodeURIComponent(props.loginRedirect ?? pathname);
     return (
-      <PlatformAdminShell title="Platform Administration" subtitle="Sign in required">
+      <PlatformAuthLayout title="Platform Administration" subtitle="Sign in required">
         <div className="mx-auto max-w-lg rounded-xl border border-amber-200 bg-amber-50 p-8 text-center">
           <h2 className="text-lg font-semibold text-amber-950">Authentication required</h2>
           <p className="mt-2 text-sm text-amber-900">
@@ -121,7 +109,7 @@ export function PlatformAuthGate(props: { children: ReactNode; loginRedirect?: s
             Go to sign in
           </Link>
         </div>
-      </PlatformAdminShell>
+      </PlatformAuthLayout>
     );
   }
 

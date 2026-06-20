@@ -2,6 +2,8 @@
 
 import { createContext, useContext } from 'react';
 
+import { isPlatformAuthOnlyPage } from '@/lib/platform-auth/route-policy';
+
 export type DashboardChromeContextValue = {
   hasPersistedSidebar: boolean;
   bridgeOnline: boolean;
@@ -27,5 +29,11 @@ export function useDashboardChrome(): DashboardChromeContextValue | null {
 }
 
 export function usesDashboardChrome(pathname: string): boolean {
-  return !pathname.startsWith('/api') && !pathname.startsWith('/commands') && !pathname.startsWith('/heartbeat');
+  if (pathname.startsWith('/api') || pathname.startsWith('/commands') || pathname.startsWith('/heartbeat')) {
+    return false;
+  }
+  if (isPlatformAuthOnlyPage(pathname)) {
+    return false;
+  }
+  return true;
 }

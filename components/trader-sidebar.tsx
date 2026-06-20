@@ -21,7 +21,7 @@ import {
 import { useContinuousTradingSession } from "@/components/continuous-trading-session-provider";
 import { usePlatformAuth } from "@/components/platform-auth-provider";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { platformAdminHrefForPageId, platformAdminPageIdFromPath } from "@/lib/platform-admin-routes";
+import { PLATFORM_ADMIN_PAGES, platformAdminHrefForPageId, platformAdminPageIdFromPath } from "@/lib/platform-admin-routes";
 import { strategyPageHref, strategyPageIdFromPath } from "@/lib/strategy-routes";
 import { cn } from "@/lib/utils";
 
@@ -322,7 +322,7 @@ function PlatformUserSidebarStatus(props: { collapsed: boolean }) {
 
   return (
     <Link
-      href={auth.authenticated ? "/platform-administration" : "/platform-administration/login"}
+      href={auth.authenticated ? PLATFORM_ADMIN_PAGES.myProfile : PLATFORM_ADMIN_PAGES.login}
       title={props.collapsed ? label : undefined}
       className={cn(
         "flex items-center gap-3 rounded-lg border px-3 py-3 transition-colors",
@@ -337,7 +337,7 @@ function PlatformUserSidebarStatus(props: { collapsed: boolean }) {
         <div className="min-w-0">
           <div className="truncate text-xs font-semibold">{label}</div>
           <div className="truncate text-[11px] opacity-75">
-            {auth.authenticated ? auth.user?.role?.replaceAll('_', ' ') : 'Multi-user administration'}
+            {auth.authenticated ? 'My profile' : 'Multi-user administration'}
           </div>
         </div>
       ) : null}

@@ -8,6 +8,11 @@ export const PLATFORM_PUBLIC_PAGE_PREFIXES = [
   '/reset-password',
 ] as const;
 
+/** Auth-only pages that must not render trading dashboard chrome. */
+export function isPlatformAuthOnlyPage(pathname: string): boolean {
+  return isPlatformPublicPage(pathname);
+}
+
 export const PLATFORM_PUBLIC_API_PREFIXES = [
   '/api/platform-auth/login',
   '/api/platform-auth/request-password-reset',
