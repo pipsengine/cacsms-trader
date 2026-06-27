@@ -1,5 +1,6 @@
 import { resumeAutonomy, emergencyStopAutonomy } from '@/lib/autonomy-store';
 import { deactivateExecutionKillSwitch, activateExecutionKillSwitch } from '@/lib/execution-kill-switch';
+import { setContinuousTradingUserId } from '@/lib/platform-auth/runtime-guard';
 import { queryPostgres } from '@/lib/postgres';
 
 export const CONTINUOUS_TRADING_SESSION_KEY = 'continuous_trading_session_active';
@@ -78,9 +79,19 @@ export async function syncContinuousTradingRuntime(): Promise<void> {
 
 export async function startContinuousTradingSession(input?: {
   operator?: string;
+  userId?: string;
 }): Promise<ContinuousTradingSessionStatus> {
   const operator = String(input?.operator ?? 'command_center').trim();
   const startedAt = new Date().toISOString();
+
+  if (input?.userId) {
+    const { isPlatformTradingEnabledForUser } = await import('@/lib/platform-auth/trading-context');
+    const enabled = await isPlatformTradingEnabledForUser(input.userId);
+    if (!enabled) {
+      throw new Error('Trading is disabled for this platform user.');
+    }
+    await setContinuousTradingUserId(input.userId);
+  }
 
   await writeSetting(CONTINUOUS_TRADING_SESSION_KEY, 'true');
   await writeSetting(CONTINUOUS_TRADING_SESSION_STARTED_AT_KEY, startedAt);
@@ -107,10 +118,15 @@ export async function startContinuousTradingSession(input?: {
 export async function stopContinuousTradingSession(input?: {
   operator?: string;
   reason?: string;
+  userId?: string;
 }): Promise<ContinuousTradingSessionStatus> {
   const operator = String(input?.operator ?? 'command_center').trim();
   const reason = String(input?.reason ?? 'Continuous trading stopped from command center.').trim();
   const stoppedAt = new Date().toISOString();
+
+  if (input?.userId) {
+    await setContinuousTradingUserId(input.userId);
+  }
 
   await writeSetting(CONTINUOUS_TRADING_SESSION_KEY, 'false');
   await writeSetting(CONTINUOUS_TRADING_SESSION_STOPPED_AT_KEY, stoppedAt);

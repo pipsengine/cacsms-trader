@@ -2,7 +2,8 @@ import { bootstrapPlatformSuperAdmin } from '@/lib/platform-auth/bootstrap';
 import { hashPassword, verifyPassword } from '@/lib/platform-auth/password';
 import { clientIp, jsonError, jsonOk } from '@/lib/platform-auth/request-auth';
 import { getPlatformSessionUserFromRequest } from '@/lib/platform-auth/session';
-import { getUserByEmail, insertAuditLog, updatePlatformUser } from '@/lib/platform-auth/store';
+import { getUserByEmail, insertAuditLog, updatePlatformUser, deleteUserSessions } from '@/lib/platform-auth/store';
+import { clearPlatformSession, createPlatformSession } from '@/lib/platform-auth/session';
 
 export async function POST(request: Request): Promise<Response> {
   try {
@@ -24,6 +25,12 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     await updatePlatformUser(user.id, { passwordHash: hashPassword(newPassword) });
+    await deleteUserSessions(user.id);
+    await clearPlatformSession();
+    await createPlatformSession(user.id, {
+      ipAddress: clientIp(request),
+      userAgent: request.headers.get('user-agent'),
+    });
     await insertAuditLog({
       actorUserId: user.id,
       targetUserId: user.id,

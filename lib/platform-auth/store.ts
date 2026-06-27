@@ -474,16 +474,47 @@ export async function insertAuditLog(input: {
   );
 }
 
-export async function listAuditLog(limit = 100): Promise<PlatformAuditEntry[]> {
+export async function listAuditLog(input?: {
+  limit?: number;
+  category?: string;
+  actorUserId?: string;
+  since?: string;
+  until?: string;
+}): Promise<PlatformAuditEntry[]> {
   await ensurePlatformAuthTables();
+  const limit = Math.min(500, Math.max(1, input?.limit ?? 100));
+  const params: Array<string | number> = [];
+  const clauses: string[] = [];
+
+  if (input?.category) {
+    params.push(input.category);
+    clauses.push(`a.category = $${params.length}`);
+  }
+  if (input?.actorUserId) {
+    params.push(input.actorUserId);
+    clauses.push(`a.actor_user_id = $${params.length}`);
+  }
+  if (input?.since) {
+    params.push(input.since);
+    clauses.push(`a.created_at >= $${params.length}::timestamptz`);
+  }
+  if (input?.until) {
+    params.push(input.until);
+    clauses.push(`a.created_at <= $${params.length}::timestamptz`);
+  }
+
+  params.push(limit);
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+
   const result = await queryPostgres(
     `SELECT a.*, actor.email AS actor_email, target.email AS target_email
      FROM platform_audit_log a
      LEFT JOIN platform_users actor ON actor.id = a.actor_user_id
      LEFT JOIN platform_users target ON target.id = a.target_user_id
+     ${where}
      ORDER BY a.created_at DESC
-     LIMIT $1`,
-    [limit],
+     LIMIT $${params.length}`,
+    params,
   );
 
   return result.rows.map((row) => ({
@@ -528,13 +559,30 @@ export async function getAdminOverview(): Promise<PlatformAdminOverview> {
     };
   });
 
+  let activeBaskets = 0;
+  let dailyPnl = 0;
+  try {
+    const { getBasketCapacitySnapshot } = await import('@/lib/gold-basket-capacity');
+    const capacity = await getBasketCapacitySnapshot();
+    activeBaskets = capacity.concurrentBaskets ?? 0;
+  } catch {
+    activeBaskets = 0;
+  }
+  try {
+    const { evaluateAutonomySafetyLock } = await import('@/lib/autonomy-safety-lock');
+    const safety = await evaluateAutonomySafetyLock({ autoActivateKillSwitch: false });
+    dailyPnl = Number(safety.metrics?.dailyPnl ?? 0);
+  } catch {
+    dailyPnl = 0;
+  }
+
   return {
     totalUsers: users.length,
     activeUsers: users.filter((u) => u.status === 'active').length,
     connectedMt5: userSummaries.filter((u) => u.mt5Connected).length,
-    tradingEnginesActive: userSummaries.filter((u) => u.goldEngineEnabled).length,
-    activeBaskets: 0,
-    dailyPnl: 0,
+    tradingEnginesActive: userSummaries.filter((u) => u.goldEngineEnabled && u.tradingEnabled).length,
+    activeBaskets,
+    dailyPnl,
     riskExposure: userSummaries.filter((u) => u.tradingEnabled).length,
     activeSessions: await import('@/lib/platform-auth/enterprise-store').then((m) => m.countActiveSessions()).catch(() => 0),
     users: userSummaries,
@@ -597,4 +645,74 @@ export async function deleteSession(tokenHash: string): Promise<void> {
 export async function deleteUserSessions(userId: string): Promise<void> {
   await ensurePlatformAuthTables();
   await queryPostgres('DELETE FROM platform_user_sessions WHERE user_id = $1', [userId]);
+}
+
+export async function createMfaPendingLogin(userId: string, tokenHash: string, expiresAt: Date): Promise<void> {
+  await ensurePlatformAuthTables();
+  await queryPostgres('DELETE FROM platform_login_mfa_pending WHERE user_id = $1', [userId]).catch(() => undefined);
+  await queryPostgres(
+    'INSERT INTO platform_login_mfa_pending (token_hash, user_id, expires_at) VALUES ($1, $2, $3)',
+    [tokenHash, userId, expiresAt],
+  );
+}
+
+export async function consumeMfaPendingLogin(tokenHash: string): Promise<string | null> {
+  await ensurePlatformAuthTables();
+  const result = await queryPostgres(
+    `DELETE FROM platform_login_mfa_pending
+     WHERE token_hash = $1 AND expires_at > now()
+     RETURNING user_id`,
+    [tokenHash],
+  );
+  const userId = result.rows[0]?.user_id;
+  return userId ? String(userId) : null;
+}
+
+export async function createUserInvite(input: {
+  email: string;
+  displayName?: string;
+  role: string;
+  invitedByUserId: string;
+  tokenHash: string;
+  expiresAt: Date;
+}): Promise<string> {
+  await ensurePlatformAuthTables();
+  const result = await queryPostgres(
+    `INSERT INTO platform_user_invites (email, display_name, role, invited_by_user_id, token_hash, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id`,
+    [
+      input.email.trim().toLowerCase(),
+      input.displayName?.trim() ?? input.email.trim(),
+      input.role,
+      input.invitedByUserId,
+      input.tokenHash,
+      input.expiresAt,
+    ],
+  );
+  return String(result.rows[0]?.id);
+}
+
+export async function consumeUserInvite(tokenHash: string): Promise<{
+  id: string;
+  email: string;
+  displayName: string;
+  role: string;
+} | null> {
+  await ensurePlatformAuthTables();
+  const result = await queryPostgres(
+    `UPDATE platform_user_invites
+     SET accepted_at = now()
+     WHERE token_hash = $1 AND accepted_at IS NULL AND expires_at > now()
+     RETURNING id, email, display_name, role`,
+    [tokenHash],
+  );
+  const row = result.rows[0];
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    email: String(row.email),
+    displayName: String(row.display_name ?? row.email),
+    role: String(row.role),
+  };
 }

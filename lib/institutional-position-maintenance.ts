@@ -91,6 +91,18 @@ export async function maintainInstitutionalPositions(trigger = 'scheduler'): Pro
     };
   }
 
+  const { assertRuntimeTradingAllowed } = await import('@/lib/platform-auth/runtime-guard');
+  const runtimeGuard = await assertRuntimeTradingAllowed();
+  if (!runtimeGuard.allowed) {
+    return {
+      status: 'paused',
+      slotsTargeted: 0,
+      symbolsProcessed: [],
+      dispatchesAttempted: 0,
+      detail: runtimeGuard.reason ?? 'Platform trading disabled for session operator.',
+    };
+  }
+
   const risk = await getExecutionRiskSettings();
   const safety = await evaluateAutonomySafetyLock({ autoActivateKillSwitch: true });
   if (safety.locked) {

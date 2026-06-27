@@ -1,4 +1,6 @@
+import { decryptSecret, encryptSecret } from '@/lib/platform-auth/crypto';
 import { queryPostgres } from '@/lib/postgres';
+import { generateBackupCodes, verifyTotpCode } from '@/lib/platform-auth/totp';
 import { ROLE_DEFAULTS } from '@/lib/platform-auth/rbac';
 import type {
   PlatformEaInstance,
@@ -134,6 +136,7 @@ function mapTradingAccount(row: Record<string, unknown>): PlatformTradingAccount
     isPrimary: Boolean(row.is_primary),
     tradingEnabled: Boolean(row.trading_enabled),
     goldEngineEnabled: Boolean(row.gold_engine_enabled),
+    connectionStatus: String(row.connection_status ?? 'unknown'),
     createdAt: toIso(row.created_at as Date | string) ?? new Date().toISOString(),
     updatedAt: toIso(row.updated_at as Date | string) ?? new Date().toISOString(),
   };
@@ -296,10 +299,53 @@ export async function getMfaStatus(userId: string): Promise<PlatformMfaStatus> {
   }
 }
 
+export async function readMfaSecretPlain(userId: string): Promise<string | null> {
+  await ensurePlatformAuthTables();
+  const result = await queryPostgres(
+    'SELECT secret_encrypted FROM platform_user_mfa WHERE user_id = $1 LIMIT 1',
+    [userId],
+  );
+  const encrypted = result.rows[0]?.secret_encrypted;
+  if (!encrypted) return null;
+  try {
+    return decryptSecret(userId, String(encrypted));
+  } catch {
+    return null;
+  }
+}
+
+export async function verifyUserMfaCode(userId: string, code: string): Promise<boolean> {
+  const secret = await readMfaSecretPlain(userId);
+  if (!secret) return false;
+  if (verifyTotpCode(secret, code)) return true;
+
+  const backupResult = await queryPostgres(
+    'SELECT backup_codes_encrypted FROM platform_user_mfa WHERE user_id = $1 AND enabled = true LIMIT 1',
+    [userId],
+  );
+  const encryptedBackups = backupResult.rows[0]?.backup_codes_encrypted;
+  if (!encryptedBackups) return false;
+
+  try {
+    const raw = decryptSecret(userId, String(encryptedBackups));
+    const codes = JSON.parse(raw) as string[];
+    const normalized = String(code).replace(/\s/g, '').toUpperCase();
+    const index = codes.findIndex((item) => item === normalized);
+    if (index < 0) return false;
+    codes.splice(index, 1);
+    await queryPostgres(
+      'UPDATE platform_user_mfa SET backup_codes_encrypted = $2, updated_at = now() WHERE user_id = $1',
+      [userId, encryptSecret(userId, JSON.stringify(codes))],
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function prepareMfaEnrollment(userId: string): Promise<{ method: string; secret: string; otpauthUrl: string }> {
   await ensurePlatformAuthTables();
   const { generateToken } = await import('@/lib/platform-auth/password');
-  const { encryptSecret } = await import('@/lib/platform-auth/crypto');
   const secret = generateToken().replace(/[^A-Z2-7]/gi, '').slice(0, 32).toUpperCase();
   const encrypted = encryptSecret(userId, secret);
   await queryPostgres(
@@ -309,6 +355,7 @@ export async function prepareMfaEnrollment(userId: string): Promise<{ method: st
        SET secret_encrypted = EXCLUDED.secret_encrypted,
            enabled = false,
            verified_at = NULL,
+           backup_codes_encrypted = NULL,
            updated_at = now()`,
     [userId, encrypted],
   );
@@ -318,14 +365,23 @@ export async function prepareMfaEnrollment(userId: string): Promise<{ method: st
   return { method: 'totp', secret, otpauthUrl };
 }
 
-export async function verifyMfaEnrollment(userId: string, _code: string): Promise<PlatformMfaStatus> {
+export async function verifyMfaEnrollment(userId: string, code: string): Promise<PlatformMfaStatus & { backupCodes?: string[] }> {
   await ensurePlatformAuthTables();
+  const secret = await readMfaSecretPlain(userId);
+  if (!secret || !verifyTotpCode(secret, code)) {
+    throw new Error('Invalid MFA verification code.');
+  }
+  const backupCodes = generateBackupCodes();
   await queryPostgres(
-    `UPDATE platform_user_mfa SET enabled = true, verified_at = now(), updated_at = now()
+    `UPDATE platform_user_mfa
+     SET enabled = true,
+         verified_at = now(),
+         backup_codes_encrypted = $2,
+         updated_at = now()
      WHERE user_id = $1`,
-    [userId],
+    [userId, encryptSecret(userId, JSON.stringify(backupCodes))],
   );
-  return getMfaStatus(userId);
+  return { ...(await getMfaStatus(userId)), backupCodes };
 }
 
 export async function disableMfa(userId: string): Promise<void> {

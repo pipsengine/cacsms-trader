@@ -35,6 +35,15 @@ async function main() {
   });
   children.push(app);
 
+  await waitForHttp(`http://127.0.0.1:${appPort}`, 60);
+  try {
+    const bootstrapResponse = await fetch(`http://127.0.0.1:${appPort}/api/system/runtime-bootstrap`, { method: 'POST' });
+    const bootstrapBody = await bootstrapResponse.json().catch(() => ({}));
+    console.log(`[docker-start] runtime bootstrap ${bootstrapResponse.status}`, bootstrapBody);
+  } catch (error) {
+    console.warn('[docker-start] runtime bootstrap skipped:', error instanceof Error ? error.message : error);
+  }
+
   startChartCaptureCleanupScheduler(appPort);
 
   process.on('SIGINT', shutdown);

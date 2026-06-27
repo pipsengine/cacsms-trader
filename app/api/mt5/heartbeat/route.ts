@@ -1,5 +1,6 @@
 import { recordTerminalHeartbeat } from '@/lib/mt5-heartbeat-store';
 import { appendEaCommEvent } from '@/lib/ea-communication-store';
+import { syncPlatformMt5FromHeartbeat } from '@/lib/platform-auth/mt5-platform-sync';
 
 export const runtime = 'nodejs';
 
@@ -64,6 +65,12 @@ export async function POST(request: Request): Promise<Response> {
     severity: tickLagMs != null && tickLagMs > 10_000 ? 'WARNING' : 'INFO',
     message: `Heartbeat received${terminalId ? ` from ${terminalId}` : ''}.`,
     payload: { receivedAt, accountNumber, version, latencyMs, tickLagMs, lastTickTime },
+  }).catch(() => null);
+
+  void syncPlatformMt5FromHeartbeat({
+    terminalId,
+    accountNumber,
+    symbol: String(payload?.symbol ?? 'XAUUSD'),
   }).catch(() => null);
 
   let bridgeForwarded = false;

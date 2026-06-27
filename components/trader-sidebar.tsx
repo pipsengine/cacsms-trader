@@ -21,6 +21,7 @@ import {
 import { useContinuousTradingSession } from "@/components/continuous-trading-session-provider";
 import { usePlatformAuth } from "@/components/platform-auth-provider";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import type { PlatformPermissionKey } from '@/lib/platform-auth/types';
 import { PLATFORM_ADMIN_PAGES, platformAdminHrefForPageId, platformAdminPageIdFromPath } from "@/lib/platform-admin-routes";
 import { strategyPageHref, strategyPageIdFromPath } from "@/lib/strategy-routes";
 import { cn } from "@/lib/utils";
@@ -136,6 +137,36 @@ const navigationModules: NavigationModule[] = [
   navModule("Institutional Strategy Intelligence", BrainCircuit, strategyNavigationItems()),
 ];
 
+const ADMIN_PAGE_PERMISSIONS: Partial<Record<string, PlatformPermissionKey>> = {
+  'administration-dashboard': 'view_admin_dashboard',
+  'user-management': 'view_all_users',
+  'my-mt5-connection': 'manage_own_mt5',
+  'roles-and-permissions': 'manage_roles_permissions',
+  'audit-log': 'view_audit_log',
+};
+
+function filterNavigationModules(
+  modules: NavigationModule[],
+  auth: { authEnabled: boolean; authenticated: boolean; hasPermission: (key: PlatformPermissionKey) => boolean },
+): NavigationModule[] {
+  if (!auth.authEnabled) return modules;
+  if (!auth.authenticated) {
+    return modules.filter((module) => module.id !== 'platform-administration');
+  }
+
+  return modules
+    .map((module) => {
+      if (module.id !== 'platform-administration') return module;
+      const children = module.children.filter((child) => {
+        const permission = ADMIN_PAGE_PERMISSIONS[child.id];
+        return !permission || auth.hasPermission(permission);
+      });
+      if (children.length === 0) return null;
+      return { ...module, children };
+    })
+    .filter((module): module is NavigationModule => module !== null);
+}
+
 const defaultPreferences: SidebarPreferences = {
   collapsed: false,
   openModules: [executiveModuleId],
@@ -167,6 +198,7 @@ function resolveSidebarPreferences(pathname: string, base: SidebarPreferences): 
 }
 
 export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: TraderSidebarProps) {
+  const auth = usePlatformAuth();
   const [preferences, setPreferences] = useState<SidebarPreferences>(defaultPreferences);
   const [preferencesReady, setPreferencesReady] = useState(false);
   const router = useRouter();
@@ -184,9 +216,14 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
     }
   }, [preferencesReady, preferences]);
 
+  const visibleModules = useMemo(
+    () => filterNavigationModules(navigationModules, auth),
+    [auth.authEnabled, auth.authenticated, auth.permissions, auth.hasPermission],
+  );
+
   const activeModuleIds = useMemo(() => {
-    return new Set(navigationModules.filter((item) => hasActiveChild(item, preferences.activePage)).map((item) => item.id));
-  }, [preferences.activePage]);
+    return new Set(visibleModules.filter((item) => hasActiveChild(item, preferences.activePage)).map((item) => item.id));
+  }, [preferences.activePage, visibleModules]);
 
   const setPreference = (patch: Partial<SidebarPreferences>) => {
     setPreferences((current) => ({ ...current, ...patch }));
@@ -231,6 +268,7 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
   return (
     <>
       <SidebarShell
+        modules={visibleModules}
         activeModuleIds={activeModuleIds}
         activePage={preferences.activePage}
         bridgeOnline={bridgeOnline}
@@ -264,6 +302,7 @@ export function TraderSidebar({ bridgeOnline, mobileOpen, onMobileOpenChange }: 
               </button>
             </div>
             <NavigationTree
+              modules={visibleModules}
               activeModuleIds={activeModuleIds}
               activePage={preferences.activePage}
               collapsed={false}
@@ -346,6 +385,7 @@ function PlatformUserSidebarStatus(props: { collapsed: boolean }) {
 }
 
 function SidebarShell(props: {
+  modules: NavigationModule[];
   activeModuleIds: Set<string>;
   activePage: string;
   bridgeOnline: boolean;
@@ -382,7 +422,17 @@ function SidebarShell(props: {
         </button>
       </div>
 
-      <NavigationTree {...props} />
+      <NavigationTree
+        activeModuleIds={props.activeModuleIds}
+        activePage={props.activePage}
+        collapsed={props.collapsed}
+        modules={props.modules}
+        onPageSelect={props.onPageSelect}
+        onToggleGroup={props.onToggleGroup}
+        onToggleModule={props.onToggleModule}
+        openGroups={props.openGroups}
+        openModules={props.openModules}
+      />
 
       <div className="border-t border-slate-200 p-3 space-y-2">
         <div className={cn(
@@ -410,6 +460,7 @@ function SidebarShell(props: {
 }
 
 function NavigationTree(props: {
+  modules: NavigationModule[];
   activeModuleIds: Set<string>;
   activePage: string;
   collapsed: boolean;
@@ -454,7 +505,7 @@ function NavigationTree(props: {
         ) : null}
 
         <div className="space-y-1">
-          {navigationModules.map((item) => (
+          {props.modules.map((item) => (
             <ModuleItem key={item.id} item={item} {...props} />
           ))}
         </div>

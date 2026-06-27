@@ -1,18 +1,14 @@
-import { PLATFORM_ADMIN_PAGES } from '@/lib/platform-admin-routes';
+/** Edge-safe route policy — no Node/pg imports. Keep in sync with route-policy.ts */
 
-/** Paths reachable without an authenticated platform session when auth is enabled. */
+export const PLATFORM_SESSION_COOKIE = 'cacsms_platform_session';
+
 export const PLATFORM_PUBLIC_PAGE_PREFIXES = [
-  PLATFORM_ADMIN_PAGES.login,
+  '/platform-administration/login',
   '/login',
   '/forgot-password',
   '/reset-password',
   '/accept-invite',
 ] as const;
-
-/** Auth-only pages that must not render trading dashboard chrome. */
-export function isPlatformAuthOnlyPage(pathname: string): boolean {
-  return isPlatformPublicPage(pathname);
-}
 
 export const PLATFORM_PUBLIC_API_PREFIXES = [
   '/api/platform-auth/login',
@@ -28,20 +24,19 @@ export const PLATFORM_PUBLIC_API_PREFIXES = [
   '/api/mt5/verify',
 ] as const;
 
-export function isPlatformPublicPage(pathname: string): boolean {
+export function isPlatformAuthEnabledEdge(): boolean {
+  const value = String(process.env.PLATFORM_AUTH_ENABLED ?? 'true').toLowerCase();
+  return value !== 'false' && value !== '0' && value !== 'off';
+}
+
+export function isPlatformPublicPageEdge(pathname: string): boolean {
   return PLATFORM_PUBLIC_PAGE_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
   );
 }
 
-export function isPlatformPublicApi(pathname: string): boolean {
+export function isPlatformPublicApiEdge(pathname: string): boolean {
   return PLATFORM_PUBLIC_API_PREFIXES.some(
     (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
   );
-}
-
-export function platformLoginUrl(redirectPath?: string): string {
-  const base = PLATFORM_ADMIN_PAGES.login;
-  if (!redirectPath || redirectPath === base) return base;
-  return `${base}?redirect=${encodeURIComponent(redirectPath)}`;
 }

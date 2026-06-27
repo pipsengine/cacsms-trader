@@ -19,6 +19,8 @@ export function PlatformLoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [mfaToken, setMfaToken] = useState<string | null>(null);
+  const [mfaCode, setMfaCode] = useState('');
 
   useEffect(() => {
     if (!auth.loaded || !auth.authenticated) return;
@@ -38,11 +40,38 @@ export function PlatformLoginPage() {
       });
       const payload = await response.json();
       if (!payload.ok) throw new Error(payload.error ?? 'Sign in failed.');
+      if (payload.mfaRequired && payload.mfaToken) {
+        setMfaToken(payload.mfaToken);
+        return;
+      }
       await auth.refresh();
       const redirect = searchParams.get('redirect') ?? PLATFORM_ADMIN_PAGES.overview;
       router.push(redirect);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign in failed.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleMfaVerify(event: FormEvent) {
+    event.preventDefault();
+    if (!mfaToken) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await fetch('/api/platform-auth/verify-mfa-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mfaToken, code: mfaCode }),
+      });
+      const payload = await response.json();
+      if (!payload.ok) throw new Error(payload.error ?? 'MFA verification failed.');
+      await auth.refresh();
+      const redirect = searchParams.get('redirect') ?? PLATFORM_ADMIN_PAGES.overview;
+      router.push(redirect);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'MFA verification failed.');
     } finally {
       setLoading(false);
     }
@@ -66,9 +95,33 @@ export function PlatformLoginPage() {
       <div className="mx-auto grid max-w-4xl gap-6 lg:grid-cols-2">
         <Card className={toneCard('violet')}>
           <CardHeader className={toneCardHeader('violet')}>
-            <CardTitle className={toneTitle('violet')}>Sign in</CardTitle>
+            <CardTitle className={toneTitle('violet')}>{mfaToken ? 'Verify MFA' : 'Sign in'}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4 p-6">
+            {mfaToken ? (
+              <form className="space-y-4" onSubmit={handleMfaVerify}>
+                <p className="text-sm text-slate-600">Enter the 6-digit code from your authenticator app.</p>
+                <label className="block space-y-1 text-sm">
+                  <span className="font-medium text-slate-700">Authentication code</span>
+                  <input
+                    className="w-full rounded-md border border-slate-300 px-3 py-2 font-mono"
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value)}
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    required
+                  />
+                </label>
+                {error ? <p className="text-sm text-rose-700">{error}</p> : null}
+                <Button type="submit" disabled={loading} className="w-full">
+                  {loading ? 'Verifying…' : 'Verify and sign in'}
+                </Button>
+                <Button type="button" variant="outline" className="w-full" onClick={() => { setMfaToken(null); setMfaCode(''); }}>
+                  Back
+                </Button>
+              </form>
+            ) : (
+              <>
             <form className="space-y-4" onSubmit={handleLogin}>
               <label className="block space-y-1 text-sm">
                 <span className="font-medium text-slate-700">Email</span>
@@ -104,6 +157,8 @@ export function PlatformLoginPage() {
             >
               Forgot password?
             </Link>
+              </>
+            )}
           </CardContent>
         </Card>
 

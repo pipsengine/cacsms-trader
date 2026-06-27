@@ -130,6 +130,7 @@ export type PlatformTradingAccountLink = {
   isPrimary: boolean;
   tradingEnabled: boolean;
   goldEngineEnabled: boolean;
+  connectionStatus: string;
   createdAt: string;
   updatedAt: string;
 };

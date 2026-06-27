@@ -1,6 +1,7 @@
+import { verifyPassword } from '@/lib/platform-auth/password';
 import { jsonError, jsonOk, requirePlatformAuth } from '@/lib/platform-auth/request-auth';
 import { disableMfa, getMfaStatus, prepareMfaEnrollment, verifyMfaEnrollment } from '@/lib/platform-auth/enterprise-store';
-import { insertAuditLog } from '@/lib/platform-auth/store';
+import { getUserByEmail, insertAuditLog } from '@/lib/platform-auth/store';
 import { clientIp } from '@/lib/platform-auth/request-auth';
 
 export async function GET(request: Request): Promise<Response> {
@@ -48,6 +49,11 @@ export async function POST(request: Request): Promise<Response> {
     }
 
     if (action === 'disable') {
+      const password = String(body.password ?? '');
+      const record = await getUserByEmail(auth.user.email);
+      if (!record || !verifyPassword(password, record.passwordHash)) {
+        return jsonError('Current password is required to disable MFA.', 401);
+      }
       await disableMfa(auth.user.id);
       await insertAuditLog({
         actorUserId: auth.user.id,
