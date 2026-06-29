@@ -11,6 +11,9 @@ import { defaultStopPips, pipSizeForSymbol, type AutonomousTradeSide } from '@/l
 export type AutonomousEntryPlan = {
   mode: 'retracement_limit' | 'hybrid_market_limit' | 'market_fallback';
   side: AutonomousTradeSide;
+  directionBias: 'strong_buy' | 'buy' | 'sell' | 'strong_sell';
+  entryTimingDecision: 'market_order' | 'buy_limit' | 'sell_limit' | 'wait' | 'no_trade';
+  orderTypeRecommendation: 'MARKET' | 'BUY_LIMIT' | 'SELL_LIMIT' | 'WAIT' | 'NO_TRADE';
   currentPrice: number;
   pendingEntryPrice: number;
   zoneLow: number;
@@ -25,6 +28,14 @@ export type AutonomousEntryPlan = {
   confirmationRequired: string[];
   method: string;
   reasons: string[];
+  stageScores: {
+    marketDirection: number;
+    marketQuality: number;
+    priceLocation: number;
+    candleBehaviour: number;
+    pullbackConfidence: number;
+    riskQuality: number;
+  };
   metrics: Record<string, number | string | boolean | null>;
 };
 
@@ -77,6 +88,81 @@ function computeEma(candles: ReconstructedCandle[], period: number): number | nu
   let ema = closes[0];
   for (const close of closes.slice(1)) ema = close * smoothing + ema * (1 - smoothing);
   return ema;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function countConsecutiveDirectionalCandles(candles: ReconstructedCandle[], side: AutonomousTradeSide): number {
+  let count = 0;
+  for (const candle of candles.slice().reverse()) {
+    const bullish = candle.closePrice > candle.openPrice;
+    const bearish = candle.closePrice < candle.openPrice;
+    if ((side === 'BUY' && bullish) || (side === 'SELL' && bearish)) count += 1;
+    else break;
+  }
+  return count;
+}
+
+function analyzeLatestCandle(candles: ReconstructedCandle[], atr: number, side: AutonomousTradeSide): {
+  range: number;
+  body: number;
+  bodyRatio: number;
+  impulseAtr: number;
+  wickAgainstEntryRatio: number;
+  exhaustionRisk: number;
+  behaviorScore: number;
+} {
+  const latest = candles[candles.length - 1];
+  if (!latest) {
+    return {
+      range: 0,
+      body: 0,
+      bodyRatio: 0,
+      impulseAtr: 0,
+      wickAgainstEntryRatio: 0,
+      exhaustionRisk: 0.35,
+      behaviorScore: 55,
+    };
+  }
+  const range = Math.max(0, latest.highPrice - latest.lowPrice);
+  const body = Math.abs(latest.closePrice - latest.openPrice);
+  const upperWick = latest.highPrice - Math.max(latest.openPrice, latest.closePrice);
+  const lowerWick = Math.min(latest.openPrice, latest.closePrice) - latest.lowPrice;
+  const bodyRatio = range > 0 ? body / range : 0;
+  const impulseAtr = atr > 0 ? range / atr : 0;
+  const wickAgainstEntryRatio = range > 0
+    ? side === 'BUY' ? upperWick / range : lowerWick / range
+    : 0;
+  const sameDirectionImpulse =
+    (side === 'BUY' && latest.closePrice > latest.openPrice)
+    || (side === 'SELL' && latest.closePrice < latest.openPrice);
+  const exhaustionRisk = clamp(
+    (sameDirectionImpulse && impulseAtr >= 1.6 ? 0.42 : 0)
+    + (bodyRatio >= 0.72 ? 0.22 : 0)
+    + (wickAgainstEntryRatio >= 0.32 ? 0.18 : 0),
+    0,
+    1,
+  );
+  return {
+    range,
+    body,
+    bodyRatio,
+    impulseAtr,
+    wickAgainstEntryRatio,
+    exhaustionRisk,
+    behaviorScore: Math.round(clamp(100 - exhaustionRisk * 78, 0, 100)),
+  };
+}
+
+function computeDailyRangeConsumption(candles: ReconstructedCandle[], currentPrice: number, side: AutonomousTradeSide): number {
+  const window = candles.slice(-48);
+  const high = Math.max(...window.map((candle) => candle.highPrice).filter(Boolean), 0);
+  const low = Math.min(...window.map((candle) => candle.lowPrice).filter(Boolean), Number.POSITIVE_INFINITY);
+  if (!Number.isFinite(low) || high <= low) return 0.5;
+  const position = clamp((currentPrice - low) / (high - low), 0, 1);
+  return side === 'BUY' ? position : 1 - position;
 }
 
 async function loadRecentCandles(symbol: string, timeframe: string, limit = 120): Promise<ReconstructedCandle[]> {
@@ -141,6 +227,53 @@ export async function planAutonomousRetracementEntry(input: {
 
   const ema20 = computeEma(candles, 20);
   const ema50 = computeEma(candles, 50);
+  const latest = candles[candles.length - 1];
+  const previous = candles[candles.length - 2];
+  const candleBehaviour = analyzeLatestCandle(candles, atr, input.side);
+  const consecutiveDirectionalCandles = countConsecutiveDirectionalCandles(candles, input.side);
+  const dailyRangeConsumed = computeDailyRangeConsumption(candles, currentPrice, input.side);
+  const distanceFromEma20 = ema20 ? Math.abs(currentPrice - ema20) : 0;
+  const distanceFromEma50 = ema50 ? Math.abs(currentPrice - ema50) : 0;
+  const extensionAtr = atr > 0 ? Math.max(distanceFromEma20, distanceFromEma50) / atr : 0;
+  const momentumAcceleration = latest && previous
+    ? Math.abs(latest.closePrice - latest.openPrice) > Math.abs(previous.closePrice - previous.openPrice) * 1.25
+    : false;
+  const priceExtended =
+    extensionAtr >= envNumber('CACSMS_ENTRY_EXTENSION_ATR_LIMIT', 1.15)
+    || dailyRangeConsumed >= envNumber('CACSMS_ENTRY_DAILY_RANGE_CONSUMED_LIMIT', 0.78)
+    || consecutiveDirectionalCandles >= envNumber('CACSMS_ENTRY_CONSECUTIVE_CANDLE_LIMIT', 4)
+    || candleBehaviour.exhaustionRisk >= 0.58;
+  const priceLocationScore = Math.round(clamp(
+    100
+    - extensionAtr * 26
+    - Math.max(0, dailyRangeConsumed - 0.58) * 95
+    - Math.max(0, consecutiveDirectionalCandles - 2) * 12
+    - candleBehaviour.exhaustionRisk * 35,
+    0,
+    100,
+  ));
+  const marketQualityScore = Math.round(clamp(
+    62
+    + (ema20 && ema50
+      ? input.side === 'BUY'
+        ? ema20 >= ema50 ? 18 : -18
+        : ema20 <= ema50 ? 18 : -18
+      : 0)
+    - (momentumAcceleration && priceExtended ? 14 : 0)
+    - (candleBehaviour.impulseAtr >= 2.2 ? 12 : 0),
+    0,
+    100,
+  ));
+  const marketDirectionScore = Math.round(clamp(
+    input.side === 'BUY'
+      ? 70 + (ema20 && ema50 && ema20 >= ema50 ? 15 : 0)
+      : 70 + (ema20 && ema50 && ema20 <= ema50 ? 15 : 0),
+    0,
+    100,
+  ));
+  const directionBias = input.side === 'BUY'
+    ? marketDirectionScore >= 82 ? 'strong_buy' : 'buy'
+    : marketDirectionScore >= 82 ? 'strong_sell' : 'sell';
   if (ema20) candidates.push({ price: ema20, weight: 0.7, source: 'ema20' });
   if (ema50) candidates.push({ price: ema50, weight: 0.55, source: 'ema50' });
 
@@ -218,6 +351,14 @@ export async function planAutonomousRetracementEntry(input: {
   const pendingEntry = selected?.price ?? (input.side === 'BUY' ? currentPrice - fallbackDistance : currentPrice + fallbackDistance);
   const retracementDistance = Math.abs(currentPrice - pendingEntry);
   if (retracementDistance > maxRetracement) return null;
+  const pullbackConfidenceScore = Math.round(clamp(
+    (selected ? 52 + selected.weight * 35 : 44)
+    + Math.min(18, valid.length * 2.5)
+    + (structureAnchors.length > 0 ? 10 : 0)
+    - (priceExtended ? 0 : 8),
+    0,
+    100,
+  ));
 
   const buffer = Math.max(atr * 0.22, pipSizeForSymbol(symbol) * 4);
   const stopLoss = input.side === 'BUY'
@@ -231,11 +372,33 @@ export async function planAutonomousRetracementEntry(input: {
   const zoneHalfWidth = Math.max(atr * 0.12, retracementDistance * 0.18);
   const zoneLow = pendingEntry - zoneHalfWidth;
   const zoneHigh = pendingEntry + zoneHalfWidth;
-  const marketFraction = hybridMarketFraction();
+  const riskQualityScore = Math.round(clamp(
+    55
+    + Math.min(30, (input.rewardRiskRatio - 1.2) * 18)
+    + (stopDistance <= maxRetracement ? 10 : -12)
+    - (priceLocationScore < 45 ? 14 : 0),
+    0,
+    100,
+  ));
+  const allStagesSatisfied =
+    marketDirectionScore >= envNumber('CACSMS_ENTRY_DIRECTION_MIN_SCORE', 65)
+    && marketQualityScore >= envNumber('CACSMS_ENTRY_MARKET_QUALITY_MIN_SCORE', 45)
+    && priceLocationScore >= envNumber('CACSMS_ENTRY_PRICE_LOCATION_MIN_SCORE', 28)
+    && candleBehaviour.behaviorScore >= envNumber('CACSMS_ENTRY_CANDLE_BEHAVIOUR_MIN_SCORE', 30)
+    && pullbackConfidenceScore >= envNumber('CACSMS_ENTRY_PULLBACK_CONFIDENCE_MIN_SCORE', 46)
+    && riskQualityScore >= envNumber('CACSMS_ENTRY_RISK_QUALITY_MIN_SCORE', 45);
+  if (!allStagesSatisfied) return null;
+
+  const marketFraction = priceExtended ? 0 : hybridMarketFraction();
+  const entryTimingDecision = input.side === 'BUY' ? 'buy_limit' : 'sell_limit';
+  const orderTypeRecommendation = input.side === 'BUY' ? 'BUY_LIMIT' : 'SELL_LIMIT';
 
   return {
     mode: marketFraction > 0 ? 'hybrid_market_limit' : 'retracement_limit',
     side: input.side,
+    directionBias,
+    entryTimingDecision,
+    orderTypeRecommendation,
     currentPrice: roundPrice(symbol, currentPrice),
     pendingEntryPrice: roundPrice(symbol, pendingEntry),
     zoneLow: roundPrice(symbol, Math.min(zoneLow, zoneHigh)),
@@ -256,12 +419,34 @@ export async function planAutonomousRetracementEntry(input: {
     ],
     method: selected?.source ?? 'atr_retracement_fallback',
     reasons: [
+      `${directionBias.replace('_', ' ').toUpperCase()} bias accepted; entry timing is separated from direction.`,
+      priceExtended
+        ? 'Price extension detected, so market chasing is disabled and the setup is routed to a limit retracement.'
+        : 'Price is not materially extended; hybrid scout allocation remains available.',
       `Pending ${input.side} limit selected at retracement source ${selected?.source ?? 'ATR fallback'}.`,
       `Entry waits for retracement instead of chasing current price ${roundPrice(symbol, currentPrice)}.`,
       `Cancel setup if retracement exceeds ${roundPrice(symbol, input.side === 'BUY' ? pendingEntry - maxRetracement * 0.45 : pendingEntry + maxRetracement * 0.45)}.`,
     ],
+    stageScores: {
+      marketDirection: marketDirectionScore,
+      marketQuality: marketQualityScore,
+      priceLocation: priceLocationScore,
+      candleBehaviour: candleBehaviour.behaviorScore,
+      pullbackConfidence: pullbackConfidenceScore,
+      riskQuality: riskQualityScore,
+    },
     metrics: {
       atr: roundPrice(symbol, atr),
+      atrExtension: Number(extensionAtr.toFixed(4)),
+      distanceFromEma20: roundPrice(symbol, distanceFromEma20),
+      distanceFromEma50: roundPrice(symbol, distanceFromEma50),
+      consecutiveDirectionalCandles,
+      dailyRangeConsumed: Number(dailyRangeConsumed.toFixed(4)),
+      candleImpulseAtr: Number(candleBehaviour.impulseAtr.toFixed(4)),
+      candleBodyRatio: Number(candleBehaviour.bodyRatio.toFixed(4)),
+      candleExhaustionRisk: Number(candleBehaviour.exhaustionRisk.toFixed(4)),
+      momentumAcceleration,
+      priceExtended,
       retracementDistance: roundPrice(symbol, retracementDistance),
       minRetracement: roundPrice(symbol, minRetracement),
       maxRetracement: roundPrice(symbol, maxRetracement),

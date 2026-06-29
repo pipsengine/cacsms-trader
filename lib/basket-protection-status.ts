@@ -48,6 +48,10 @@ export type BasketProtectionView = {
   legs: BasketProtectionLeg[];
   brokerStopLoss: number | null;
   brokerTakeProfit: number | null;
+  targetStopLoss: number | null;
+  slModificationStatus: string | null;
+  slModificationFailures: number;
+  lastProtectionTick: string | null;
 };
 
 export type TradeProtectionOverview = {
@@ -97,6 +101,10 @@ type EaBasketSnapshot = {
   lockedUsd: number;
   drawdownFromPeakUsd: number;
   closeArmed: boolean;
+  targetStopLoss: number | null;
+  slModificationStatus: string | null;
+  slModificationFailures: number;
+  lastProtectionTick: string | null;
 };
 
 async function fetchEaBasketSnapshots(): Promise<{ enabled: boolean; baskets: EaBasketSnapshot[] }> {
@@ -131,6 +139,10 @@ async function fetchEaBasketSnapshots(): Promise<{ enabled: boolean; baskets: Ea
           lockedUsd: Number(row.lockedUsd ?? 0),
           drawdownFromPeakUsd: Number(row.drawdownFromPeakUsd ?? 0),
           closeArmed: Boolean(row.closeArmed),
+          targetStopLoss: row.targetStopLoss == null ? null : Number(row.targetStopLoss),
+          slModificationStatus: row.slModificationStatus == null ? null : String(row.slModificationStatus),
+          slModificationFailures: Number(row.slModificationFailures ?? 0),
+          lastProtectionTick: row.lastProtectionTick == null || row.lastProtectionTick === '' ? null : String(row.lastProtectionTick),
         } satisfies EaBasketSnapshot;
       })
       .filter((item): item is EaBasketSnapshot => item != null);
@@ -256,6 +268,10 @@ export async function getTradeProtectionOverview(): Promise<TradeProtectionOverv
       legs,
       brokerStopLoss: legs[0]?.stopLoss ?? null,
       brokerTakeProfit: legs[0]?.takeProfit ?? null,
+      targetStopLoss: eaMatch?.targetStopLoss ?? null,
+      slModificationStatus: eaMatch?.slModificationStatus ?? null,
+      slModificationFailures: eaMatch?.slModificationFailures ?? 0,
+      lastProtectionTick: eaMatch?.lastProtectionTick ?? null,
     });
   }
 
@@ -294,6 +310,10 @@ export async function getTradeProtectionOverview(): Promise<TradeProtectionOverv
       legs: [],
       brokerStopLoss: null,
       brokerTakeProfit: null,
+      targetStopLoss: eaBasket.targetStopLoss,
+      slModificationStatus: eaBasket.slModificationStatus,
+      slModificationFailures: eaBasket.slModificationFailures,
+      lastProtectionTick: eaBasket.lastProtectionTick,
     });
   }
 
