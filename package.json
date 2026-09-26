@@ -1,1 +1,36 @@
-{"name":"cacsms-trader","private":true,"version":"2.0.0","type":"module","scripts":{"dev":"vite","build":"tsc -b && vite build","preview":"vite preview"},"dependencies":{"@vitejs/plugin-react":"latest","vite":"latest","typescript":"latest","react":"latest","react-dom":"latest","lucide-react":"latest","recharts":"latest"},"devDependencies":{"@types/react":"latest","@types/react-dom":"latest"}}
+{
+  "name": "cacsms-trader",
+  "private": true,
+  "version": "2.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "db:migrate": "node database/scripts/migrate.mjs",
+    "db:seed": "node database/scripts/seed.mjs",
+    "db:init": "node database/scripts/init.mjs",
+    "db:backup": "node database/scripts/backup.mjs",
+    "db:restore": "node database/scripts/restore.mjs",
+    "db:health": "node database/scripts/health.mjs",
+    "db:test": "node database/scripts/test-crud.mjs",
+    "postinstall": "node database/scripts/postinstall.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "better-sqlite3": "^12.8.0",
+    "dotenv": "^17.3.1",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "recharts": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "tsx": "^4.21.0"
+  }
+}

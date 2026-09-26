@@ -19,6 +19,7 @@ import {
   PauseCircle,
   PlayCircle,
   Radar,
+  ServerCog,
   ShieldAlert,
   SlidersHorizontal,
   Telescope,
@@ -43,6 +44,7 @@ export const nav: NavItem[] = [
   { label: 'Execution & Positions', icon: BriefcaseBusiness },
   { label: 'Performance & Learning', icon: ChartNoAxesCombined, section: 'ANALYTICS', sectionIcon: Crosshair },
   { label: 'System Control', icon: SlidersHorizontal, section: 'SYSTEM', sectionIcon: Cpu },
+  { label: 'MT5 Connection', icon: ServerCog },
 ];
 
 const STORAGE_KEY = 'cacsms.sidebar.collapsed';

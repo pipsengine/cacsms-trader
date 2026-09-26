@@ -1,0 +1,1 @@
+import React from 'react';export function MetricCard({label,value,sub}:{label:string;value:React.ReactNode;sub?:string}){return <div className="mt5-metric"><span>{label}</span><strong>{value}</strong>{sub&&<small>{sub}</small>}</div>}

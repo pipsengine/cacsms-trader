@@ -11,3 +11,10 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 .idea/
+
+# SQLite runtime artifacts (schema/migrations/seeds stay versioned)
+database/cacsms-trader.db
+database/cacsms-trader.db-wal
+database/cacsms-trader.db-shm
+database/backups/*
+!database/backups/.gitkeep

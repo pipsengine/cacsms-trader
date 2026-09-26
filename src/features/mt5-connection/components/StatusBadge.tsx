@@ -1,0 +1,1 @@
+import React from 'react';export function StatusBadge({value}:{value:string}){const k=value.toLowerCase().replaceAll('_','-');return <span className={'mt5-badge mt5-badge--'+k}><i/> {value.replaceAll('_',' ')}</span>}

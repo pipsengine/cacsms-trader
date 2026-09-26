@@ -7,6 +7,8 @@ import { eventBus, type TradingEvent } from '../../../services/eventBus';
 import { decisionAudit } from '../../../services/decisionAudit';
 import { brokerGateway } from '../../../services/brokerGateway';
 import { SYSTEM } from '../../../config/system';
+import { assertExecutionSafe } from '../../mt5-connection/services/mt5ConnectionAdapter';
+import { getMT5Snapshot, getStage9ExecutionSummary } from '../../mt5-connection/services/cacsmsMT5Runtime';
 import { STAGE_DEFINITIONS } from '../data/stageDefinitions';
 import type {
   InstrumentTrace,
@@ -347,12 +349,23 @@ function toWorkflowEvents(): WorkflowEvent[] {
 }
 
 function evaluateExecutionPermission(): { permitted: boolean; reason: string } {
-  if (brokerGateway.mode === 'LIVE') {
-    return { permitted: false, reason: 'Live broker adapter not configured — fail-closed' };
-  }
   if (!deps.getAuto()) {
     return { permitted: false, reason: 'Autonomous trading paused — new executions disabled' };
   }
+
+  const mt5 = getMT5Snapshot();
+  const stage9 = getStage9ExecutionSummary();
+  if (stage9.orderGateway !== 'READY' || !stage9.globalTradingEnabled) {
+    return { permitted: false, reason: 'MT5 Stage 9 gateway not ready — fail-closed' };
+  }
+  const eligible = mt5.accounts.find((a) => assertExecutionSafe(mt5, a.id).ok);
+  if (!eligible) {
+    return { permitted: false, reason: 'No MT5 account passes Stage 9 execution safety checks' };
+  }
+  if (brokerGateway.mode === 'LIVE' && eligible.accountClass === 'LIVE') {
+    return { permitted: false, reason: 'Live broker bridge not configured — fail-closed' };
+  }
+
   const gates: GateResult[] = allPairs.slice(0, 8).map((symbol, idx) => {
     const { instrument, world } = ensureWorld(symbol);
     const risk = riskFor(instrument);
@@ -370,7 +383,13 @@ function evaluateExecutionPermission(): { permitted: boolean; reason: string } {
     reason: 'Upstream market data freshness',
     confidence: 98,
   };
-  const result = executionGate([freshnessGate, ...gates.slice(0, 3)]);
+  const mt5Gate: GateResult = {
+    pass: true,
+    stage: 9,
+    reason: `MT5 account ${eligible.name} ready (${eligible.currency})`,
+    confidence: 94,
+  };
+  const result = executionGate([freshnessGate, ...gates.slice(0, 3), mt5Gate]);
   return { permitted: result.permitted, reason: result.reason };
 }
 

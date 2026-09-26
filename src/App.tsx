@@ -17,6 +17,7 @@ import {
   SystemControl,
 } from './pages/pages';
 import { WorkflowEnginePage } from './features/workflow-engine';
+import { MT5ConnectionPage } from './features/mt5-connection';
 
 const pages: Record<string, React.ComponentType> = {
   Overview,
@@ -32,6 +33,7 @@ const pages: Record<string, React.ComponentType> = {
   'Execution & Positions': Execution,
   'Performance & Learning': Performance,
   'System Control': SystemControl,
+  'MT5 Connection': MT5ConnectionPage,
 };
 
 export default function App() {

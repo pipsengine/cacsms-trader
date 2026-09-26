@@ -1,0 +1,11 @@
+# Runtime SQLite database (authoritative local/central store)
+database/cacsms-trader.db
+database/cacsms-trader.db-wal
+database/cacsms-trader.db-shm
+
+# Local backups — keep folder, ignore artifacts
+database/backups/*
+!database/backups/.gitkeep
+
+# Generated schema snapshot may be committed; ignore accidental local dumps
+database/schema/*.local.sql
