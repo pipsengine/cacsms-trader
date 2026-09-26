@@ -1,3 +1,173 @@
-import{Activity,BarChart3,BrainCircuit,CandlestickChart,ChartNoAxesCombined,CircleGauge,DatabaseZap,Eye,Landmark,ScanSearch,Settings,ShieldCheck,TrendingUp,Workflow}from'lucide-react';import{useTrading}from'../context/TradingContext';
-export const nav=[['Overview',CircleGauge],['Workflow Engine',Workflow],['Market Data',DatabaseZap],['Currency & XAU Strength',BarChart3],['Historical Regime',Activity],['Market Scanner',ScanSearch],['HTF Market Vision',Eye],['Structural Direction',TrendingUp],['H1 Confirmation',CandlestickChart],['Opportunities & Risk',ShieldCheck],['Execution & Positions',Landmark],['Performance & Learning',ChartNoAxesCombined],['System Control',Settings]] as const;
-export default function Sidebar({page,setPage}:{page:string,setPage:(p:string)=>void}){const{auto,setAuto,positions}=useTrading();return <aside className="sidebar"><div className="brand"><BrainCircuit/><div><b>CACSMS TRADER</b><small>Autonomous Trading Intelligence</small></div></div><nav>{nav.map(([n,I],i)=><div key={n}>{[2,6,9,11,12].includes(i)&&<div className="nav-label">{i===2?'MARKET INTELLIGENCE':i===6?'MARKET VISION':i===9?'TRADING':i===11?'ANALYTICS':'SYSTEM'}</div>}<button onClick={()=>setPage(n)} className={page===n?'selected':''}><I size={18}/><span>{n}</span></button></div>)}</nav><div className="engine-box"><div className="engine-title"><span className={auto?'dot on':'dot'}/><b>{auto?'AUTONOMOUS ON':'PAUSED'}</b></div><small>Broker connected · Feed healthy</small><div className="engine-stats"><span>Open <b>{positions.filter(x=>x.status==='ACTIVE').length}</b></span><span>Risk <b>0.80%</b></span></div><button className={auto?'danger':'primary'} onClick={()=>setAuto(!auto)}>{auto?'Pause New Trades':'Resume Trading'}</button></div></aside>}
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Aperture,
+  BadgeCheck,
+  Bot,
+  BrainCircuit,
+  BriefcaseBusiness,
+  ChartNoAxesCombined,
+  ChevronsLeft,
+  ChevronsRight,
+  CircuitBoard,
+  Coins,
+  Cpu,
+  Crosshair,
+  Globe2,
+  History,
+  LayoutDashboard,
+  LineChart,
+  PauseCircle,
+  PlayCircle,
+  Radar,
+  ShieldAlert,
+  SlidersHorizontal,
+  Telescope,
+  Waypoints,
+  type LucideIcon,
+} from 'lucide-react';
+import { useTrading } from '../context/TradingContext';
+
+type NavItem = { label: string; icon: LucideIcon; section?: string; sectionIcon?: LucideIcon };
+
+export const nav: NavItem[] = [
+  { label: 'Overview', icon: LayoutDashboard },
+  { label: 'Workflow Engine', icon: CircuitBoard },
+  { label: 'Market Data', icon: LineChart, section: 'MARKET INTELLIGENCE', sectionIcon: Globe2 },
+  { label: 'Currency & XAU Strength', icon: Coins },
+  { label: 'Historical Regime', icon: History },
+  { label: 'Market Scanner', icon: Radar },
+  { label: 'HTF Market Vision', icon: Telescope, section: 'MARKET VISION', sectionIcon: Aperture },
+  { label: 'Structural Direction', icon: Waypoints },
+  { label: 'H1 Confirmation', icon: BadgeCheck },
+  { label: 'Opportunities & Risk', icon: ShieldAlert, section: 'TRADING', sectionIcon: Bot },
+  { label: 'Execution & Positions', icon: BriefcaseBusiness },
+  { label: 'Performance & Learning', icon: ChartNoAxesCombined, section: 'ANALYTICS', sectionIcon: Crosshair },
+  { label: 'System Control', icon: SlidersHorizontal, section: 'SYSTEM', sectionIcon: Cpu },
+];
+
+const STORAGE_KEY = 'cacsms.sidebar.collapsed';
+
+export default function Sidebar({
+  page,
+  setPage,
+  collapsed,
+  onCollapsedChange,
+}: {
+  page: string;
+  setPage: (p: string) => void;
+  collapsed: boolean;
+  onCollapsedChange: (v: boolean) => void;
+}) {
+  const { auto, setAuto, positions } = useTrading();
+  const openCount = useMemo(() => positions.filter((x) => x.status === 'ACTIVE').length, [positions]);
+
+  return (
+    <aside className={'sidebar' + (collapsed ? ' collapsed' : '')} aria-label="Primary navigation">
+      <div className="sidebar-top">
+        <div className="brand" title="Cacsms Trader">
+          <span className="brand-mark">
+            <BrainCircuit size={22} strokeWidth={1.75} />
+          </span>
+          {!collapsed && (
+            <div className="brand-copy">
+              <b>CACSMS TRADER</b>
+              <small>Autonomous Trading Intelligence</small>
+            </div>
+          )}
+        </div>
+        <button
+          type="button"
+          className="sidebar-toggle"
+          onClick={() => onCollapsedChange(!collapsed)}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          aria-expanded={!collapsed}
+        >
+          {collapsed ? <ChevronsRight size={16} strokeWidth={2} /> : <ChevronsLeft size={16} strokeWidth={2} />}
+        </button>
+      </div>
+
+      <nav>
+        {nav.map((item) => (
+          <div key={item.label} className="nav-block">
+            {item.section && (
+              <div className="nav-label" title={item.section}>
+                {item.sectionIcon && <item.sectionIcon size={12} strokeWidth={2} />}
+                {!collapsed && <span>{item.section}</span>}
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={() => setPage(item.label)}
+              className={page === item.label ? 'selected' : ''}
+              title={item.label}
+              aria-current={page === item.label ? 'page' : undefined}
+            >
+              <item.icon size={18} strokeWidth={1.85} />
+              {!collapsed && <span>{item.label}</span>}
+            </button>
+          </div>
+        ))}
+      </nav>
+
+      <div className={'engine-box' + (collapsed ? ' compact' : '')}>
+        {collapsed ? (
+          <>
+            <div className={'engine-compact ' + (auto ? 'on' : 'off')} title={auto ? 'Autonomous ON' : 'Paused'}>
+              <span className={auto ? 'dot on' : 'dot'} />
+              {auto ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
+            </div>
+            <button
+              type="button"
+              className={'icon-action ' + (auto ? 'danger' : 'primary')}
+              title={auto ? 'Pause New Trades' : 'Resume Trading'}
+              onClick={() => setAuto(!auto)}
+            >
+              {auto ? <PauseCircle size={16} /> : <PlayCircle size={16} />}
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="engine-title">
+              <span className={auto ? 'dot on' : 'dot'} />
+              <b>{auto ? 'AUTONOMOUS ON' : 'PAUSED'}</b>
+            </div>
+            <small>Broker connected · Feed healthy</small>
+            <div className="engine-stats">
+              <span>
+                Open <b>{openCount}</b>
+              </span>
+              <span>
+                Risk <b>0.80%</b>
+              </span>
+            </div>
+            <button type="button" className={auto ? 'danger' : 'primary'} onClick={() => setAuto(!auto)}>
+              {auto ? 'Pause New Trades' : 'Resume Trading'}
+            </button>
+          </>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+/** Persist preference helper used by App. */
+export function useSidebarCollapsed() {
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, collapsed ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, [collapsed]);
+
+  return [collapsed, setCollapsed] as const;
+}
