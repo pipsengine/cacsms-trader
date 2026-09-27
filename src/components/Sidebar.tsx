@@ -171,5 +171,16 @@ export function useSidebarCollapsed() {
     }
   }, [collapsed]);
 
-  return [collapsed, setCollapsed] as const;
+  // Phones get the icon rail regardless of the stored preference; a full sidebar would leave no room for content.
+  const [narrow, setNarrow] = useState(() => typeof window !== 'undefined' && window.matchMedia(NARROW_QUERY).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(NARROW_QUERY);
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener('change', on);
+    return () => mq.removeEventListener('change', on);
+  }, []);
+
+  return [collapsed || narrow, setCollapsed] as const;
 }
+
+const NARROW_QUERY = '(max-width: 760px)';

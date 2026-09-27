@@ -80,6 +80,9 @@ export async function approveRiskNow(setupKey: string, accountId: string) {
   return r;
 }
 
+/** Re-read the persisted state only; never triggers an engine run. */
+export const refreshRisk = () => load();
+
 /** Ref-counted polling of the persisted Stage 8 state. */
 export function startRiskStore(): () => void {
   starts += 1;

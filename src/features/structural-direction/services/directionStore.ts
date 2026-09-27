@@ -60,6 +60,9 @@ export async function runDirectionNow() {
   }
 }
 
+/** Re-read the persisted state only; never triggers an engine run. */
+export const refreshDirection = () => load();
+
 /** Ref-counted polling of the persisted Stage 6 state. */
 export function startDirectionStore(): () => void {
   starts += 1;

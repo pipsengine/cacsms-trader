@@ -60,6 +60,9 @@ export async function runH1Now() {
   }
 }
 
+/** Re-read the persisted state only; never triggers an engine run. */
+export const refreshH1 = () => load();
+
 /** Ref-counted polling of the persisted Stage 7 state. */
 export function startH1Store(): () => void {
   starts += 1;

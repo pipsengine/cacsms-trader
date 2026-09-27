@@ -15,10 +15,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 try:
+    import analysis_gate
     import confirm
     import confirm_store as cs
     import regime
 except ImportError:  # pragma: no cover
+    from bridge.mt5 import analysis_gate  # type: ignore
     from bridge.mt5 import confirm  # type: ignore
     from bridge.mt5 import confirm_store as cs  # type: ignore
     from bridge.mt5 import regime  # type: ignore
@@ -79,6 +81,8 @@ class ConfirmService:
         while True:
             self._wake.wait(timeout=CONFIG["loopSec"])
             self._wake.clear()
+            if analysis_gate.paused():
+                continue  # operator paused analysis: pending triggers are kept and run on resume
             try:
                 self.tick()
             except Exception as exc:  # pragma: no cover

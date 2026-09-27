@@ -782,6 +782,10 @@ class Control(unittest.TestCase):
         self.assertEqual(c["state"], "RECONCILING")
         self.assertTrue(ex.control_state({"executionEnabled": True}, True, True, True)["newEntries"])
 
+    def test_analysis_pause_blocks_entries_but_keeps_management(self):
+        c = ex.control_state({"executionEnabled": True, "analysisPaused": True}, True, True, True)
+        self.assertEqual((c["state"], c["newEntries"], c["management"]), ("ANALYSIS_PAUSED", False, True))
+
     def test_operator_control_goes_through_the_engine(self):
         e = Env()
         r = e.svc.set_control({"tradingEnabled": False, "emergencyStop": True}, "tester", "drill")

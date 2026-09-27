@@ -56,11 +56,12 @@ export function assessInstrument(i: Instrument & { lastTickAt?: string }, now = 
       quality: marketOpen ? 'STALE' : 'CLOSED',
     };
   }
-  if (i.state === 'BLOCKED') {
-    return { ...base, pass: false, reason: 'Instrument state BLOCKED', quality: 'INVALID' };
-  }
+  // The bridge flags any quote older than 1h as BLOCKED, which is expected while the market is closed.
   if (!marketOpen) {
     return { ...base, pass: false, reason: 'FX market closed (weekend)', quality: 'CLOSED' };
+  }
+  if (i.state === 'BLOCKED') {
+    return { ...base, pass: false, reason: 'Instrument state BLOCKED', quality: 'INVALID' };
   }
   return { ...base, pass: true, reason: 'Valid + fresh · history READY', quality: 'GOOD' };
 }

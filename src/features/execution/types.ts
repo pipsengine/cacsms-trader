@@ -16,7 +16,7 @@ export type OrderState =
 
 export type PositionState = 'OPEN' | 'PROTECTED' | 'MANAGING' | 'PARTIAL_EXIT' | 'BREAKEVEN' | 'TRAILING' | 'EXIT_PENDING' | 'CLOSED' | 'ERROR';
 
-export type ControlStateName = 'RUNNING' | 'EMERGENCY_STOP' | 'MT5_DISCONNECTED' | 'RECONCILING' | 'EXECUTION_DISABLED' | 'TRADING_PAUSED';
+export type ControlStateName = 'RUNNING' | 'EMERGENCY_STOP' | 'MT5_DISCONNECTED' | 'RECONCILING' | 'EXECUTION_DISABLED' | 'TRADING_PAUSED' | 'ANALYSIS_PAUSED';
 
 export type Check = { key: string; label: string; status: 'PASS' | 'FAIL' | 'WAIT'; detail: string };
 
@@ -291,6 +291,8 @@ export type ControlSettings = {
   executionEnabled: boolean;
   emergencyStop: boolean;
   emergencyReason?: string | null;
+  analysisPaused?: boolean;
+  analysisReason?: string | null;
   updatedAt?: string | null;
   updatedBy?: string | null;
   reason?: string | null;

@@ -1,66 +1,70 @@
-import { useMemo, useRef, useState } from 'react';
+import { useState } from 'react';
 import './styles/workflow-engine.css';
 import { useWorkflowEngine } from './hooks/useWorkflowEngine';
-import { createCacsmsWorkflowAdapter, type WorkflowEngineAdapter } from './services/workflowEngineAdapter';
+import type { WorkflowEngineAdapter } from './services/workflowEngineAdapter';
 import { WorkflowHeader } from './components/WorkflowHeader';
 import { KpiStrip } from './components/KpiStrip';
 import { StagePipeline } from './components/StagePipeline';
 import { StageInspector } from './components/StageInspector';
 import { InstrumentTraceTable } from './components/InstrumentTraceTable';
 import { OrchestratorPanel } from './components/OrchestratorPanel';
+import { DecisionQueue } from './components/DecisionQueue';
 import { WorldModelPanel } from './components/WorldModelPanel';
 import { EventStream } from './components/EventStream';
 import { RuntimeHealth } from './components/RuntimeHealth';
-import { useTrading } from '../../context/TradingContext';
+import { ConfirmDialog, type ConfirmSpec } from './components/ConfirmDialog';
+import { clock } from './utils/format';
 
-function useBoundAdapter(external?: WorkflowEngineAdapter): WorkflowEngineAdapter {
-  const { auto, setAuto, riskLimit, positions } = useTrading();
-  const bindingsRef = useRef({ auto, setAuto, riskLimit, positions });
-  bindingsRef.current = { auto, setAuto, riskLimit, positions };
-
-  return useMemo(() => {
-    if (external) return external;
-    return createCacsmsWorkflowAdapter({
-      getAuto: () => bindingsRef.current.auto,
-      setAuto: (v) => bindingsRef.current.setAuto(v),
-      getRiskLimit: () => bindingsRef.current.riskLimit,
-      getPositions: () => bindingsRef.current.positions,
-    });
-  }, [external]);
-}
-
+/** Monitoring / control surface only: the pipeline runs on the bridge's central engine whether or not this page is open. */
 export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngineAdapter }) {
-  const bound = useBoundAdapter(adapter);
-  const w = useWorkflowEngine(bound);
+  const w = useWorkflowEngine(adapter);
   const [selected, setSelected] = useState(1);
+  const [worldSymbol, setWorldSymbol] = useState('EURUSD');
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
 
-  if (w.loading && !w.data) return <div className="wf-shell loading">Starting Workflow Engine…</div>;
-  if (w.error && !w.data) return <div className="wf-shell error">{w.error}</div>;
+  if (!w.data) return <div className={`wf-shell ${w.error ? 'wf-error' : 'wf-loading'}`}>{w.error ?? 'Reading the central engine state…'}</div>;
 
-  const d = w.data!;
-  const stage = d.stages.find((x) => x.id === selected) || d.stages[0];
+  const d = w.data;
+  const stage = d.stages.find((x) => x.id === selected) ?? d.stages[0];
+  const focus = (symbol: string) => {
+    setExpanded(symbol);
+    setWorldSymbol(symbol);
+  };
 
   return (
     <div className="wf-shell">
-      <WorkflowHeader d={d} onPause={w.pause} onResume={w.resume} onRefresh={w.refresh} onExecution={w.setExecution} />
-      {w.error && <div className="alert">Last refresh failed: {w.error}</div>}
+      <div className="wf-body">
+      <WorkflowHeader d={d} busy={w.busy} onReconcile={() => void w.reconcile()} onControl={(cmd, reason) => void w.control(cmd, reason)} confirm={setConfirm} />
+      {w.error && <div className="alert">Snapshot failed: {w.error}</div>}
+      {!d.engine.bridgeReachable && <div className="alert">MT5 bridge unreachable — every stage is OFFLINE and nothing downstream is treated as live. Start it with npm run mt5:bridge.</div>}
+      {d.engine.analysisPaused && <div className="alert info">Analysis is PAUSED on the central engine: Stages 2–8 hold their triggers, Stage 9 blocks new entries and keeps managing open positions.</div>}
+      {w.busy && <div className="notice busy">{w.busy} in progress…</div>}
+      {!w.busy && w.notice && (
+        <div className={`notice ${w.notice.ok ? 'ok' : 'bad'}`} onClick={w.clearNotice}>
+          {w.notice.ok ? '✓' : '✗'} {w.notice.message} <small>{clock(new Date(w.notice.at).toISOString())} · click to dismiss</small>
+        </div>
+      )}
       <KpiStrip d={d} />
       <StagePipeline stages={d.stages} selected={selected} onSelect={setSelected} />
       <div className="two">
-        <StageInspector stage={stage} onRetry={() => w.retry(stage.id)} />
+        <StageInspector stage={stage} busy={Boolean(w.busy)} onRerun={() => void w.rerunStage(stage.id)} />
         <OrchestratorPanel d={d} />
       </div>
-      <InstrumentTraceTable rows={d.instruments} onReevaluate={w.reevaluate} />
+      <DecisionQueue rows={d.queue} onSelect={focus} />
+      <InstrumentTraceTable rows={d.instruments} busy={w.busy} onReevaluate={(s) => void w.reevaluate(s)} expanded={expanded} onExpand={setExpanded} />
       <div className="two">
-        <WorldModelPanel rows={d.world} />
-        <EventStream events={d.events} />
+        <WorldModelPanel rows={d.world} symbol={worldSymbol} onSymbol={setWorldSymbol} />
+        <EventStream events={d.events} symbols={d.instruments.map((x) => x.symbol)} />
       </div>
-      <RuntimeHealth stages={d.stages} />
+      <RuntimeHealth stages={d.stages} onSelect={setSelected} />
       <footer className="wf-foot">
         <span>Cacsms Trader · Workflow Engine</span>
-        <span>Shared Market World Model · Event Driven · Fail Closed</span>
-        <span>Last heartbeat {new Date(d.engine.lastHeartbeat).toLocaleTimeString()}</span>
+        <span>Event driven · fail closed · the page never executes</span>
+        <span>Snapshot {clock(d.generatedAt)}</span>
       </footer>
+      </div>
+      {confirm && <ConfirmDialog spec={confirm} onClose={() => setConfirm(null)} />}
     </div>
   );
 }

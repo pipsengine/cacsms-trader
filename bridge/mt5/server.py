@@ -23,6 +23,7 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 try:
+    import analysis_gate
     import confirm
     import confirm_service
     import confirm_store
@@ -60,6 +61,7 @@ try:
         upsert_account,
     )
 except ImportError:
+    from bridge.mt5 import analysis_gate  # type: ignore
     from bridge.mt5 import confirm, confirm_service, confirm_store  # type: ignore
     from bridge.mt5 import direction_service, direction_store  # type: ignore
     from bridge.mt5 import execution_mt5, execution_service, execution_store  # type: ignore
@@ -538,6 +540,10 @@ def _regime_config() -> dict[str, Any]:
 
 def cmd_regime_run(_body: dict[str, Any]) -> dict[str, Any]:
     """Stage 3: fetch D1 closes, continue regime hysteresis incrementally, persist, return DB state."""
+    if analysis_gate.paused():
+        state = load_regime_state()
+        state.update({"ok": True, "paused": True, "message": "Analysis PAUSED by the operator — Stage 2/3 not recomputed"})
+        return state
     with _REGIME_RUN_LOCK:
         started = time.time()
         ensure_regime_schema()
@@ -594,6 +600,8 @@ def _regime_trigger_loop() -> None:
     while True:
         _regime_trigger_pending.wait()
         time.sleep(10)  # coalesce the burst of closes across all 29 symbols
+        while analysis_gate.paused():
+            time.sleep(5)  # the pending close stays set and is processed on resume
         _regime_trigger_pending.clear()
         try:
             state = cmd_regime_run({})
@@ -1170,9 +1178,13 @@ class Handler(BaseHTTPRequestHandler):
                 result = cmd_enrich(body)
                 self._json(200 if result.get("ok") else 400, result)
                 return
+            if parsed.path in ("/scanner/run", "/vision/run", "/direction/run", "/h1/run", "/risk/run") and analysis_gate.paused():
+                self._json(409, {"ok": False, "paused": True, "message": "Analysis PAUSED by the operator — resume analysis before re-running a stage"})
+                return
             if parsed.path == "/regime/run":
                 result = cmd_regime_run(body)
-                SCANNER.mark("REGIME_RUN")
+                if not result.get("paused"):
+                    SCANNER.mark("REGIME_RUN")
                 self._json(200, result)
                 return
             if parsed.path == "/scanner/run":
@@ -1219,9 +1231,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path.startswith("/execution/"):
                 actor = str(body.get("actor") or "operator")
                 if parsed.path == "/execution/control":
-                    patch = {k: body[k] for k in ("tradingEnabled", "executionEnabled", "emergencyStop") if k in body}
+                    patch = {k: body[k] for k in ("tradingEnabled", "executionEnabled", "emergencyStop", "analysisPaused") if k in body}
                     if not patch:
-                        self._json(400, {"ok": False, "message": "tradingEnabled, executionEnabled or emergencyStop required"})
+                        self._json(400, {"ok": False, "message": "tradingEnabled, executionEnabled, emergencyStop or analysisPaused required"})
                         return
                     self._json(200, {**EXECUTION.set_control(patch, actor, body.get("reason")), "state": EXECUTION.state()})
                     return

@@ -13,6 +13,7 @@ const FLAG_HELP: Record<ControlStateName, string> = {
   RECONCILING: 'New executions wait until the broker account is fully reconciled',
   EXECUTION_DISABLED: 'Stage 9 order submission switched off; management of open positions continues',
   TRADING_PAUSED: 'Global trading paused — new entries blocked, open positions still managed',
+  ANALYSIS_PAUSED: 'Stage 2–8 analysis paused — signals frozen, so no new entries; open positions still managed',
 };
 
 /** Operator controls — each command is persisted and executed by the central engine on the bridge, never by this page. */

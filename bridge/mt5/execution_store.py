@@ -85,7 +85,11 @@ def load_control() -> dict[str, Any]:
         c = {}
     # fail closed: execution stays disabled until an operator explicitly enables it
     return {"executionEnabled": bool(c.get("executionEnabled", False)), "emergencyStop": bool(c.get("emergencyStop", False)),
-            "emergencyReason": c.get("emergencyReason"), "updatedAt": c.get("updatedAt"), "updatedBy": c.get("updatedBy"), "reason": c.get("reason")}
+            "emergencyReason": c.get("emergencyReason"), "analysisPaused": bool(c.get("analysisPaused", False)),
+            "analysisReason": c.get("analysisReason"), "updatedAt": c.get("updatedAt"), "updatedBy": c.get("updatedBy"), "reason": c.get("reason")}
+
+
+CONTROL_KEYS = ("executionEnabled", "emergencyStop", "analysisPaused")
 
 
 def save_control(patch: dict[str, Any], actor: str, reason: str | None) -> dict[str, Any]:
@@ -97,7 +101,10 @@ def save_control(patch: dict[str, Any], actor: str, reason: str | None) -> dict[
     if "emergencyStop" in patch:
         nxt["emergencyStop"] = bool(patch["emergencyStop"])
         nxt["emergencyReason"] = (reason or "operator") if patch["emergencyStop"] else None
-    changes = [k for k in ("executionEnabled", "emergencyStop") if nxt[k] != cur[k]]
+    if "analysisPaused" in patch:
+        nxt["analysisPaused"] = bool(patch["analysisPaused"])
+        nxt["analysisReason"] = (reason or "operator") if patch["analysisPaused"] else None
+    changes = [k for k in CONTROL_KEYS if nxt[k] != cur[k]]
     if not changes:
         return {"ok": True, "control": cur, "changed": []}
     nxt.update({"updatedAt": ex.iso(__import__("time").time()), "updatedBy": actor, "reason": reason})

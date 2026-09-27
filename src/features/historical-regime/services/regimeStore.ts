@@ -72,6 +72,9 @@ export async function runRegimeNow() {
   }
 }
 
+/** Re-read the persisted state only; never triggers an engine run. */
+export const refreshRegime = () => loadState();
+
 /** Ref-counted: the first caller starts polling, the last one stops it. */
 export function startRegimeStore(): () => void {
   starts += 1;

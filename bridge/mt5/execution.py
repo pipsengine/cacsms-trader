@@ -27,7 +27,7 @@ IN_FLIGHT = ("SUBMITTING", "ACKNOWLEDGED", "UNKNOWN", "RECONCILING")
 FINAL_ORDER = ("FILLED", "PARTIALLY_FILLED", "REJECTED", "CANCELLED", "EXPIRED")
 OPEN_POSITION = ("OPEN", "PROTECTED", "MANAGING", "PARTIAL_EXIT", "BREAKEVEN", "TRAILING", "EXIT_PENDING", "ERROR")
 
-CONTROL_FLAGS = ("EMERGENCY_STOP", "MT5_DISCONNECTED", "RECONCILING", "EXECUTION_DISABLED", "TRADING_PAUSED")
+CONTROL_FLAGS = ("EMERGENCY_STOP", "MT5_DISCONNECTED", "RECONCILING", "EXECUTION_DISABLED", "TRADING_PAUSED", "ANALYSIS_PAUSED")
 
 CONFIG: dict[str, Any] = {
     # pre-execution revalidation
@@ -184,6 +184,8 @@ def control_state(ctrl: dict[str, Any], auto: bool, connected: bool, reconciled:
         flags.append({"state": "EXECUTION_DISABLED", "reason": "Stage 9 order execution disabled by the operator"})
     if not auto:
         flags.append({"state": "TRADING_PAUSED", "reason": "Global trading PAUSED — new entries blocked, open positions still managed"})
+    if ctrl.get("analysisPaused"):
+        flags.append({"state": "ANALYSIS_PAUSED", "reason": "Analysis PAUSED — Stage 2-8 signals are frozen, so no new entries; open positions still managed"})
     state = flags[0]["state"] if flags else "RUNNING"
     return {"state": state, "flags": flags, "newEntries": not flags, "management": connected,
             "reason": flags[0]["reason"] if flags else "Stage 9 accepting Stage 8 authorizations"}

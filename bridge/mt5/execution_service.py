@@ -20,9 +20,11 @@ import traceback
 from typing import Any, Callable
 
 try:
+    import analysis_gate
     import execution as ex
     import execution_store as default_store
 except ImportError:  # pragma: no cover
+    from bridge.mt5 import analysis_gate  # type: ignore
     from bridge.mt5 import execution as ex  # type: ignore
     from bridge.mt5 import execution_store as default_store  # type: ignore
 
@@ -574,7 +576,7 @@ class ExecutionService:
 
     def _cancel_blocked_entries(self, attached: dict[str, Any], live: list[dict[str, Any]], control: dict[str, Any], cfg: dict[str, Any]) -> None:
         """Unfilled pending entry orders are new entries: withdraw them while paused / disabled / emergency-stopped."""
-        blocking = [f for f in control["flags"] if f["state"] in ("EMERGENCY_STOP", "TRADING_PAUSED", "EXECUTION_DISABLED")]
+        blocking = [f for f in control["flags"] if f["state"] in ("EMERGENCY_STOP", "TRADING_PAUSED", "ANALYSIS_PAUSED", "EXECUTION_DISABLED")]
         if not blocking:
             return
         for x in live:
@@ -832,8 +834,10 @@ class ExecutionService:
         if "tradingEnabled" in patch:
             if self.s.set_trading(bool(patch["tradingEnabled"]), actor, reason).get("changed"):
                 changed.append("tradingEnabled")
-        res = self.s.save_control({k: patch[k] for k in ("executionEnabled", "emergencyStop") if k in patch}, actor, reason)
+        res = self.s.save_control({k: patch[k] for k in ("executionEnabled", "emergencyStop", "analysisPaused") if k in patch}, actor, reason)
         changed += res.get("changed") or []
+        if "analysisPaused" in changed:
+            analysis_gate.invalidate()
         if changed:
             self.mark("CONTROL_CHANGE " + ",".join(changed))
             self._notify("CONTROL_CHANGE")

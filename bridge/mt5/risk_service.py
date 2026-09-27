@@ -18,10 +18,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 try:
+    import analysis_gate
     import confirm_store
     import risk
     import risk_store as rs
 except ImportError:  # pragma: no cover
+    from bridge.mt5 import analysis_gate  # type: ignore
     from bridge.mt5 import confirm_store  # type: ignore
     from bridge.mt5 import risk  # type: ignore
     from bridge.mt5 import risk_store as rs  # type: ignore
@@ -86,6 +88,8 @@ class RiskService:
         while True:
             self._wake.wait(timeout=CONFIG["loopSec"])
             self._wake.clear()
+            if analysis_gate.paused():
+                continue  # operator paused analysis: pending triggers are kept and run on resume
             try:
                 self.tick()
             except Exception as exc:  # pragma: no cover
