@@ -357,6 +357,11 @@ class AutonomousFlow(unittest.TestCase):
         self.assertEqual(self.persisted["AUDCAD"]["out"]["status"], "BLOCKED")
         self.assertIn("Stage 4 NEUTRAL", self.persisted["AUDCAD"]["out"]["reason"])
         self.assertEqual(self.persisted["XAUUSD"]["out"]["status"], "BLOCKED", "not ranked by the scanner")
+        aud = self.persisted["AUDCAD"]
+        self.assertIsNotNone(aud["channels"]["D1"]["analysis"], "unpromoted instruments still get a visible channel")
+        self.assertEqual(aud["out"]["primaryDirection"], "NEUTRAL")
+        self.assertEqual(aud["out"]["confidence"], 0)
+        self.assertEqual(self.events["AUDCAD"], [], "visibility-only analysis publishes no channel events")
         self.assertEqual(eur["scanner"]["evidence"], ["e"])
         self.assertEqual(eur["scanner"]["relationship"], "STRONG_VS_WEAK")
         usd = self.persisted["USDJPY"]["out"]

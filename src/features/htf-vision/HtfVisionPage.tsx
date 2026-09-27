@@ -228,7 +228,7 @@ function ChartCard({ v, charts, view, setView, livePrice }: { v: VisionInstrumen
           <div className="hr-banner err">
             <AlertTriangle size={14} />
             <span>
-              <b>BLOCKED</b> — {v.reason}. Candles are shown for context only; no channel is analysed or published until the instrument qualifies.
+              <b>BLOCKED</b> — {v.reason}. Channels are drawn for visibility only; nothing is published to Structural Direction until the Market Scanner promotes the instrument.
             </span>
           </div>
         ) : view === 'Combined' ? (

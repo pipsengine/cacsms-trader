@@ -34,6 +34,9 @@ CONFIG: dict[str, Any] = {
     "loopSec": 20,
     "fullEverySec": 900,
     "scannerGate": "STAGE4_PROMOTION",   # STAGE4_PROMOTION: promoted by the Market Scanner · ALL: analyse every instrument
+    # Draw D1/H8 channels for unpromoted instruments too. Visibility only: combine() keeps them BLOCKED with a
+    # NEUTRAL direction and zero confidence, and Stage 6 independently requires Stage 4 promotion.
+    "analyseUnpromoted": True,
     "volSpikeAtr": 1.5,             # intrabar move from the last close, in ATR
     "liveMaxTickAgeSec": 600,       # ticks older than this (market closed) do not raise live events
     "extraBars": 200,
@@ -118,7 +121,7 @@ class VisionService:
 
     def tick(self) -> dict[str, Any]:
         scanner = scanner_qualification(vs.scanner_rows())
-        sig = {s: (q["qualified"], q["bias"]) for s, q in scanner.items()}
+        sig = {s: (q["qualified"], q["bias"], q["state"]) for s, q in scanner.items()}
         if self._prev_scanner is not None:
             changed = [s for s in SYMBOLS if self._prev_scanner.get(s) != sig.get(s)]
             if changed:
@@ -205,7 +208,7 @@ class VisionService:
             available = int(row["candle_count"] or 0) if row else hs.candle_stats(sym, tf)[0]
             data[tf] = vision.data_status(tf, row, available)
             a = None
-            if scan["qualified"] and data[tf][0] in ("READY", "STALE") and available >= vision.TF_CFG[tf]["minBars"]:
+            if (scan["qualified"] or CONFIG["analyseUnpromoted"]) and data[tf][0] in ("READY", "STALE") and available >= vision.TF_CFG[tf]["minBars"]:
                 need = vision.TF_CFG[tf]["lookback"] + CONFIG["extraBars"]
                 bars = hs.candle_tail(sym, tf, need)
                 if len(bars) >= vision.TF_CFG[tf]["minBars"]:
@@ -224,7 +227,8 @@ class VisionService:
             if a:
                 out[tf.lower()]["reason"] = a["reason"]
 
-        events = self._events(sym, analyses, data)
+        # Channel events feed the event bus / Stage 6 triggers, so visibility-only analyses stay silent.
+        events = self._events(sym, analyses, data) if scan["qualified"] else []
         new = vs.persist(out, channels, events, trigger, int((time.time() - t0) * 1000))
         self._cache[sym] = {"out": out, "analyses": analyses}
         for tf in TFS:
