@@ -393,6 +393,22 @@ async function persistAccount(account: MT5Account) {
   return result;
 }
 
+/** Stage 8 reads account permissions and prop rules from SQL Server; a setting that cannot be persisted is rolled back. */
+async function applyAccountSetting(id: string, patch: Partial<MT5Account>): Promise<MT5CommandResult> {
+  const before = snapshot.accounts.find((a) => a.id === id);
+  if (!before) return { ok: false, message: 'Account not found' };
+  const prior = Object.fromEntries(Object.keys(patch).map((k) => [k, before[k as keyof MT5Account]])) as Partial<MT5Account>;
+  setAccountState(id, patch);
+  const after = snapshot.accounts.find((a) => a.id === id)!;
+  const result = await persistAccount(after);
+  if (!result.ok) {
+    setAccountState(id, prior);
+    emit();
+    return { ok: false, message: `Not saved to db_Cacsms-Trader: ${result.message}` };
+  }
+  return { ok: true, message: 'Saved' };
+}
+
 async function hydrateFromDb() {
   const data = await bridgeListAccounts();
   if (!data.ok) {
@@ -744,7 +760,8 @@ export async function mt5SetAccountTrading(id: string, enabled: boolean): Promis
   if (enabled && account.state !== 'HEALTHY') {
     return { ok: false, message: 'Cannot enable trading until account is HEALTHY' };
   }
-  setAccountState(id, { tradingEnabled: enabled });
+  const saved = await applyAccountSetting(id, { tradingEnabled: enabled });
+  if (!saved.ok) return saved;
   refreshGatewayHealth();
   pushEvent(`Account trading ${enabled ? 'enabled' : 'paused'}`, enabled ? 'INFO' : 'WARNING', 'COMPLIANCE', id);
   emit();
@@ -820,14 +837,16 @@ export async function mt5EmergencyStop(scope: { accountId?: string; symbol?: str
 }
 
 export async function mt5SavePropRules(accountId: string, rules: PropRules): Promise<MT5CommandResult> {
-  setAccountState(accountId, { propRules: rules, accountClass: 'PROP' });
+  const saved = await applyAccountSetting(accountId, { propRules: rules, accountClass: 'PROP' });
+  if (!saved.ok) return saved;
   pushEvent('Prop firm rule profile updated', 'INFO', 'COMPLIANCE', accountId);
   emit();
   return { ok: true, message: 'Prop rules saved' };
 }
 
 export async function mt5SetTradingMode(accountId: string, mode: TradingMode): Promise<MT5CommandResult> {
-  setAccountState(accountId, { tradingMode: mode });
+  const saved = await applyAccountSetting(accountId, { tradingMode: mode });
+  if (!saved.ok) return saved;
   pushEvent(`Trading mode set to ${mode}`, 'INFO', 'COMPLIANCE', accountId);
   emit();
   return { ok: true, message: 'Trading mode updated' };

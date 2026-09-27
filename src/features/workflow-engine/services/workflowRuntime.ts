@@ -2,7 +2,6 @@ import { allPairs, instruments, positions } from '../../../data/market';
 import type { Instrument } from '../../../types';
 import { createWorldState, type WorldState } from '../../../engine/worldModel';
 import { executionGate, routeEvent, type GateResult, type MarketEvent } from '../../../engine/orchestrator';
-import { qualifyRisk } from '../../../engine/risk';
 import { eventBus, type TradingEvent } from '../../../services/eventBus';
 import { decisionAudit } from '../../../services/decisionAudit';
 import { brokerGateway, type GatewayMode } from '../../../services/brokerGateway';
@@ -20,6 +19,18 @@ import { getVisionSnapshot, visionRunAgeMs, visionStageStatus, type VisionStageS
 import { stage5Output } from '../../htf-vision/services/visionStage';
 import { getScannerInstrument, getScannerSnapshot, scannerRunAgeMs, scannerStageStatus, type ScannerStageStatus } from '../../market-scanner/services/scannerStore';
 import { stage4Output } from '../../market-scanner/services/scannerStage';
+import {
+  directionRunAgeMs,
+  directionStageStatus,
+  getDirectionDecision,
+  getDirectionSnapshot,
+  type DirectionStageStatus,
+} from '../../structural-direction/services/directionStore';
+import { stage6Output } from '../../structural-direction/services/directionStage';
+import { getH1Decision, getH1Snapshot, h1RunAgeMs, h1StageStatus, type H1StageStatus } from '../../h1-confirmation/services/confirmStore';
+import { stage7Output } from '../../h1-confirmation/services/confirmStage';
+import { getRiskSnapshot, riskRunAgeMs, riskStageStatus, type RiskStageStatus } from '../../opportunity-risk/services/riskStore';
+import { stage8Output } from '../../opportunity-risk/services/riskStage';
 import type {
   InstrumentTrace,
   StageRuntime,
@@ -53,21 +64,22 @@ export function resolveInstrument(symbol: string): Instrument {
     change: 0,
     d1: 'NEUTRAL',
     h8: 'NEUTRAL',
-    h1: 'Waiting',
+    h1: 'WAITING_FOR_STAGE6',
     score: 0,
     state: 'WAIT',
     strengthDiff: 0,
-    channelPos: 50,
+    channelPos: 0,
     confidence: 0,
   };
 }
 
-function mapH1(phase: string) {
-  const p = phase.toUpperCase();
-  if (p.includes('CONFIRM') || p.includes('BOS')) return 'CONFIRMED';
-  if (p.includes('PULL')) return 'PULLBACK';
-  if (p.includes('CHOCH')) return 'CHOCH';
-  return 'WAIT';
+/** Stage 7 state for the trace; CONFIRMED only when Stage 7 confirmed with every mandatory gate passed. */
+function mapH1(symbol: string) {
+  const d = getH1Decision(symbol);
+  if (!d || h1StageStatus() === 'ERROR' || h1StageStatus() === 'WAITING') return 'WAITING_FOR_STAGE6';
+  if (h1StageStatus() === 'STALE') return 'STALE';
+  if (d.state === 'CONFIRMED' && !d.confirmed) return 'CONFIRMING';
+  return d.state;
 }
 
 function mapDecision(i: Instrument, riskApproved: boolean, open: boolean): InstrumentTrace['decision'] {
@@ -150,6 +162,30 @@ const VISION_STAGE_STATUS: Record<VisionStageStatus, StageStatus> = {
   ERROR: 'error',
 };
 
+const DIRECTION_STAGE_STATUS: Record<DirectionStageStatus, StageStatus> = {
+  WAITING: 'waiting',
+  HEALTHY: 'healthy',
+  DEGRADED: 'running',
+  STALE: 'stale',
+  ERROR: 'error',
+};
+
+const H1_STAGE_STATUS: Record<H1StageStatus, StageStatus> = {
+  WAITING: 'waiting',
+  HEALTHY: 'healthy',
+  DEGRADED: 'running',
+  STALE: 'stale',
+  ERROR: 'error',
+};
+
+const RISK_STAGE_STATUS: Record<RiskStageStatus, StageStatus> = {
+  WAITING: 'waiting',
+  HEALTHY: 'healthy',
+  DEGRADED: 'running',
+  STALE: 'stale',
+  ERROR: 'error',
+};
+
 function regimeLabel(symbol: string): string {
   const p = getPairRegime(symbol);
   if (!p) return getRegimeSnapshot().state ? 'NO DATA' : 'WAITING';
@@ -190,11 +226,12 @@ function regimeStageDetail() {
 
 function currentStage(i: Instrument, riskApproved: boolean, open: boolean) {
   if (open) return 9;
-  if (i.state === 'READY' && riskApproved) return 8;
-  if (i.h1 === 'Confirmed') return 7;
-  if (i.d1 !== 'NEUTRAL' && i.h8 !== 'NEUTRAL') return 6;
+  if (riskApproved) return 9;
+  if (mapH1(i.symbol) === 'CONFIRMED') return 8;
+  const s6 = getDirectionDecision(i.symbol);
+  if (s6?.readyForH1) return 7;
   const s4 = getScannerInstrument(i.symbol);
-  if (s4?.state === 'PROMOTED') return 5;
+  if (s4?.state === 'PROMOTED') return s6?.upstream.vision?.qualified && s6.reasonCode !== 'WAITING_FOR_HTF_VISION' ? 6 : 5;
   if (s4 && s4.direction !== 'NEUTRAL') return 4;
   return 3;
 }
@@ -234,13 +271,17 @@ let deps: RuntimeDeps = {
     'STRENGTH_CHANGE',
     'SCANNER_CHANGE',
     'STRUCTURE_CHANGE',
+    'DIRECTION_CHANGE',
+    'CONFIRMATION_CHANGE',
+    'RISK_CHANGE',
     'CHANNEL_APPROACH',
     'CHANNEL_BREAK',
   ] as const
 ).forEach((type) =>
   eventBus.on(type, (e) => {
     const src = e.payload.source;
-    if ((src !== 'history' && src !== 'strength' && src !== 'scanner' && src !== 'vision') || !Array.isArray(e.payload.stages)) return;
+    const sources = ['history', 'strength', 'scanner', 'vision', 'direction', 'confirmation', 'risk'];
+    if (!sources.includes(String(src)) || !Array.isArray(e.payload.stages)) return;
     for (const stage of e.payload.stages as number[]) {
       stageProcessed.set(stage, (stageProcessed.get(stage) ?? 0) + 1);
       stageUpdated.set(stage, e.at);
@@ -269,27 +310,22 @@ function ensureWorld(symbol: string) {
   return { instrument, world };
 }
 
+/** Stage 8 result for the instrument: approved only when Stage 8 issued an execution authorization for at least one account. */
 function riskFor(instrument: Instrument) {
-  const openRisk = deps
-    .getPositions()
-    .filter((p) => p.status === 'ACTIVE')
-    .reduce((a, p) => a + p.risk, 0);
-  return qualifyRisk({
-    setupScore: instrument.score,
-    spreadOk: instrument.spread <= (instrument.kind === 'GOLD' ? 3 : 2.5),
-    volatilityOk: Math.abs(instrument.change) < 1.5,
-    rr: instrument.state === 'READY' ? 2.2 : 1.6,
-    portfolioHeat: openRisk,
-    clusterExposure: instrument.symbol.includes('USD') ? 1.1 : 0.4,
-    riskPerTrade: deps.getRiskLimit(),
-  });
+  const s8 = stage8Output();
+  const usable = s8.status === 'HEALTHY' || s8.status === 'DEGRADED';
+  const opps = usable ? s8.opportunities.filter((o) => o.symbol === instrument.symbol) : [];
+  const auth = opps.find((o) => o.state === 'AUTHORIZED');
+  const best = auth ?? opps[0];
+  const reasons = auth ? [] : [best ? `${best.state}: ${best.reason}` : usable ? 'No Stage 7 confirmed setup for Stage 8' : `Stage 8 ${s8.status}`];
+  return { approved: !!auth, reasons, positionRisk: auth?.proposedRiskPct ?? 0, state: best?.state ?? null };
 }
 
 function buildTrace(symbol: string): { trace: InstrumentTrace; world: WorldModelRecord } {
   const { instrument, world } = ensureWorld(symbol);
   const risk = riskFor(instrument);
   const open = deps.getPositions().some((p) => p.symbol === symbol && p.status === 'ACTIVE');
-  const approved = open || risk.approved || (instrument.state === 'READY' && instrument.score >= 84);
+  const approved = open || risk.approved;
   const decision = mapDecision(instrument, approved, open);
   const stage = currentStage(instrument, approved, open);
   const confidence = Math.round((instrument.confidence + world.d1.confidence + world.h8.confidence) / 3);
@@ -312,7 +348,7 @@ function buildTrace(symbol: string): { trace: InstrumentTrace; world: WorldModel
     regime: regimeLabel(symbol),
     d1: world.d1.direction === 'BULLISH' ? 'ASCENDING' : world.d1.direction === 'BEARISH' ? 'DESCENDING' : 'RANGE',
     h8: world.h8.direction === 'BULLISH' ? 'ASCENDING' : world.h8.direction === 'BEARISH' ? 'DESCENDING' : 'RANGE',
-    h1: mapH1(world.h1.phase),
+    h1: mapH1(symbol),
     risk: riskLabel,
     decision,
     confidence,
@@ -361,6 +397,9 @@ function stageStatus(id: number, traces: InstrumentTrace[]): StageStatus {
   if (id === 3) return REGIME_STAGE_STATUS[regimeStageStatus()];
   if (id === 4) return SCANNER_STAGE_STATUS[scannerStageStatus()];
   if (id === 5) return VISION_STAGE_STATUS[visionStageStatus()];
+  if (id === 6) return DIRECTION_STAGE_STATUS[directionStageStatus()];
+  if (id === 7) return H1_STAGE_STATUS[h1StageStatus()];
+  if (id === 8) return RISK_STAGE_STATUS[riskStageStatus()];
 
   if (id === 9 && !executionEnabled) return 'blocked';
   if (id === 9 && !deps.getAuto()) return 'waiting';
@@ -624,6 +663,131 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
       };
     }
 
+    if (id === 6 && status !== 'paused') {
+      const snap = getDirectionSnapshot();
+      const s6 = stage6Output();
+      const run = snap.state?.run;
+      const c = s6.counters;
+      const lat = run?.durationMs ?? 0;
+      if (lat > 0 && stageLatency.get(6) !== lat) pushStageLatency(6, lat);
+      const age = directionRunAgeMs(snap);
+      const conf = s6.ready.length ? Math.round(s6.ready.reduce((a, h) => a + h.confidence, 0) / s6.ready.length) : 0;
+      return {
+        id,
+        name: def.name,
+        status,
+        confidence: conf,
+        latencyMs: lat,
+        latencyHistory: stageLatencyHistory.get(6) ?? (lat > 0 ? [lat] : []),
+        freshnessSec: age == null ? 0 : Math.round(age / 1000),
+        input: [
+          `Stage 4 promoted ${run?.upstream?.promoted ?? 0} · Stage 5 ${run?.upstream?.visionStatus ?? '—'}`,
+          'Stage 2/3 strength & regime (via Stage 4) · D1 authority + H8 phase',
+          run?.triggers?.length ? `Triggers ${run.triggers.slice(0, 3).join(', ')}` : 'Triggers —',
+        ],
+        output: [
+          c ? `Candidates ${c.candidates} · aligned ${c.aligned} · pullback/waiting ${c.pullbackWaiting}` : 'Structural directional bias',
+          c ? `Conflicts ${c.conflicts} · blocked ${c.blocked} · stale ${c.stale}` : 'Conflicts —',
+          `READY_FOR_H1 ${s6.ready.length} → H1 Confirmation${s6.ready.length ? ` (${s6.ready.slice(0, 4).map((h) => h.instrument).join(', ')})` : ''}`,
+        ],
+        message:
+          status === 'waiting'
+            ? 'Awaiting first Structural Direction decision from the MT5 bridge'
+            : status === 'stale'
+              ? `Structural Direction stale (${age == null ? '—' : Math.round(age / 60000)}m since last decision)`
+              : status === 'error'
+                ? snap.error || 'Structural Direction unavailable'
+                : run?.message || 'Structural decisions current',
+        updatedAt: run?.runAt ?? now,
+        processed: stageProcessed.get(6) ?? s6.decisions.length,
+        failed,
+      };
+    }
+
+    if (id === 7 && status !== 'paused') {
+      const snap = getH1Snapshot();
+      const s7 = stage7Output();
+      const run = snap.state?.run;
+      const c = s7.counters;
+      const lat = run?.durationMs ?? 0;
+      if (lat > 0 && stageLatency.get(7) !== lat) pushStageLatency(7, lat);
+      const age = h1RunAgeMs(snap);
+      const conf = s7.confirmed.length ? Math.round(s7.confirmed.reduce((a, h) => a + h.confidence, 0) / s7.confirmed.length) : 0;
+      return {
+        id,
+        name: def.name,
+        status,
+        confidence: conf,
+        latencyMs: lat,
+        latencyHistory: stageLatencyHistory.get(7) ?? (lat > 0 ? [lat] : []),
+        freshnessSec: age == null ? 0 : Math.round(age / 1000),
+        input: [
+          `Stage 6 READY_FOR_H1 ${run?.candidates?.length ?? 0} · Stage 6 ${run?.upstream?.directionStatus ?? '—'}`,
+          'Stage 1 validated closed H1 candles · Stage 5/6 D1/H8 location',
+          run?.triggers?.length ? `Triggers ${run.triggers.slice(0, 3).join(', ')}` : 'Triggers —',
+        ],
+        output: [
+          c ? `Candidates ${c.candidates} · monitoring ${c.monitoring} · rejected ${c.rejected} · invalidated ${c.invalidated}` : 'H1 BOS/CHoCH confirmation state',
+          c ? `Blocked/stale ${c.blocked}` : 'Blocked —',
+          `CONFIRMED ${s7.confirmed.length} → Opportunities & Risk${s7.confirmed.length ? ` (${s7.confirmed.slice(0, 4).map((h) => h.instrument).join(', ')})` : ''}`,
+        ],
+        message:
+          status === 'waiting'
+            ? 'Awaiting first H1 Confirmation evaluation from the MT5 bridge'
+            : status === 'stale'
+              ? `H1 Confirmation stale (${age == null ? '—' : Math.round(age / 60000)}m since last evaluation)`
+              : status === 'error'
+                ? snap.error || 'H1 Confirmation unavailable'
+                : run?.message || 'H1 confirmations current',
+        updatedAt: run?.runAt ?? now,
+        processed: stageProcessed.get(7) ?? s7.decisions.length,
+        failed,
+      };
+    }
+
+    if (id === 8 && status !== 'paused') {
+      const snap = getRiskSnapshot();
+      const s8 = stage8Output();
+      const run = snap.state?.run;
+      const c = s8.counters;
+      const lat = run?.durationMs ?? 0;
+      if (lat > 0 && stageLatency.get(8) !== lat) pushStageLatency(8, lat);
+      const age = riskRunAgeMs(snap);
+      const scored = s8.opportunities.filter((o) => o.components.length);
+      const conf = scored.length ? Math.round(scored.reduce((a, o) => a + o.score, 0) / scored.length) : 0;
+      const cfg = snap.state?.config;
+      return {
+        id,
+        name: def.name,
+        status,
+        confidence: conf,
+        latencyMs: lat,
+        latencyHistory: stageLatencyHistory.get(8) ?? (lat > 0 ? [lat] : []),
+        freshnessSec: age == null ? 0 : Math.round(age / 1000),
+        input: [
+          `Stage 7 CONFIRMED ${run?.upstream?.confirmed ?? 0} · Stage 7 ${run?.upstream?.h1Status ?? '—'}`,
+          `${s8.accounts.length} accounts · risk/trade ${cfg?.riskPerTradePct ?? '—'}% · portfolio ${cfg?.maxPortfolioRiskPct ?? '—'}%`,
+          run?.triggers?.length ? `Triggers ${run.triggers.slice(0, 3).join(', ')}` : 'Triggers —',
+        ],
+        output: [
+          c ? `Setup-qualified ${c.qualified} · waiting ${c.waiting} · blocked ${c.blocked} · stale ${c.stale} · expired ${c.expired}` : 'Setup and account risk qualification',
+          c ? `Account-eligible ${c.eligible} · trading ${s8.auto ? 'RUNNING' : 'PAUSED'}` : 'Accounts —',
+          `AUTHORIZED ${s8.pending.length} → Execution & Positions${s8.pending.length ? ` (${s8.pending.slice(0, 4).map((a) => `${a.instrument} ${a.direction}`).join(', ')})` : ''}`,
+        ],
+        message:
+          status === 'waiting'
+            ? 'Awaiting first Opportunities & Risk evaluation from the MT5 bridge'
+            : status === 'stale'
+              ? `Opportunities & Risk stale (${age == null ? '—' : Math.round(age / 60000)}m since last evaluation)`
+              : status === 'error'
+                ? snap.error || 'Opportunities & Risk unavailable'
+                : run?.message || 'Risk qualification current',
+        updatedAt: run?.runAt ?? now,
+        processed: stageProcessed.get(8) ?? s8.opportunities.length,
+        failed,
+      };
+    }
+
     return {
       id,
       name: def.name,
@@ -710,7 +874,7 @@ function evaluateExecutionPermission(): { permitted: boolean; reason: string } {
     const pass =
       s1.pass &&
       world.dataQuality > 0 &&
-      (risk.approved || instrument.score >= 80) &&
+      risk.approved &&
       world.updatedAt > Date.now() - 60_000;
     return {
       pass: s1.pass && world.dataQuality > 0 && (pass || instrument.state !== 'BLOCKED'),
@@ -820,7 +984,7 @@ export const workflowActions = {
       decisionAudit.append({
         id: `audit-${s}-${Date.now()}`,
         symbol: s,
-        decision: instrument.state === 'READY' && risk.approved ? 'QUALIFIED' : instrument.state === 'BLOCKED' ? 'BLOCKED' : 'WAIT',
+        decision: risk.approved ? 'QUALIFIED' : instrument.state === 'BLOCKED' ? 'BLOCKED' : 'WAIT',
         reason: risk.approved ? 'Re-evaluation passed risk gates' : risk.reasons[0] ?? 'Awaiting confirmation',
         confidence: instrument.confidence,
         evidence: [

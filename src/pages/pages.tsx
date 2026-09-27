@@ -33,8 +33,11 @@ import { MarketDataPage } from '../features/market-data';
 import { assessInstrument, gatedState } from '../features/market-data/services/stage1Gate';
 import { HistoricalRegimePage, regimeStageStatus, useRegimeStore } from '../features/historical-regime';
 import { CurrencyStrengthPage } from '../features/currency-strength';
-import { ageText, headline, HtfVisionPage, tfDirection, useVisionStore, visionPosition, visionStageStatus } from '../features/htf-vision';
+import { ageText, HtfVisionPage, useVisionStore, visionStageStatus } from '../features/htf-vision';
 import { MarketScannerPage, scannerStageStatus, useScannerStore } from '../features/market-scanner';
+import { directionStageStatus, StructuralDirectionPage, useDirectionStore } from '../features/structural-direction';
+import { H1ConfirmationPage, h1StageStatus, useH1Store } from '../features/h1-confirmation';
+import { OpportunitiesRiskPage, riskStageStatus, startRiskStore, useRiskStore } from '../features/opportunity-risk';
 
 const dir = (x: string) => (x === 'BULLISH' ? 'green' : x === 'BEARISH' ? 'red' : 'gray');
 
@@ -122,15 +125,39 @@ export function Overview() {
   const scannerStore = useScannerStore();
   const scannerStatus = scannerStageStatus(scannerStore);
   const scan = scannerStore.state?.run?.counters;
+  const visionStore = useVisionStore();
+  const visionStatus = visionStageStatus(visionStore);
+  const vsum = visionStore.state?.run?.summary;
+  const directionStore = useDirectionStore();
+  const directionStatus = directionStageStatus(directionStore);
+  const dc = directionStore.state?.run?.counters;
+  const h1Store = useH1Store();
+  const h1Status = h1StageStatus(h1Store);
+  const hc = h1Store.state?.run?.counters;
+  const riskStore = useRiskStore();
+  const riskStatus = riskStageStatus(riskStore);
+  const rc = riskStore.state?.run?.counters;
   const stageOk = (idx: number) =>
     idx === 2
       ? regimeStatus === 'HEALTHY' || regimeStatus === 'RUNNING'
       : idx === 3
         ? scannerStatus === 'HEALTHY'
-        : !!stage1Pass || idx === 8;
+        : idx === 4
+          ? visionStatus === 'HEALTHY'
+          : idx === 5
+            ? directionStatus === 'HEALTHY'
+            : idx === 6
+              ? h1Status === 'HEALTHY'
+              : idx === 7
+                ? riskStatus === 'HEALTHY'
+                : !!stage1Pass || idx === 8;
   const stageNote = (idx: number) => {
     if (idx === 2) return `${regimeStatus} · ${regimeClassified}/9 classified`;
     if (idx === 3) return scan ? `${scannerStatus} · ${scan.directional} directional · ${scan.promoted} promoted` : scannerStatus;
+    if (idx === 4) return vsum ? `${visionStatus} · ${vsum.qualified} qualified · ${vsum.confirmedD1} confirmed D1` : visionStatus;
+    if (idx === 5) return dc ? `${directionStatus} · ${dc.candidates} candidates · ${dc.ready} ready for H1` : directionStatus;
+    if (idx === 6) return hc ? `${h1Status} · ${hc.candidates} candidates · ${hc.confirmed} confirmed` : h1Status;
+    if (idx === 7) return rc ? `${riskStatus} · ${rc.qualified} qualified · ${rc.authorized} authorized` : riskStatus;
     if (!instruments.length) return 'Idle · No data';
     if (idx === 0) return `${stage1Pass}/${instruments.length} pass Stage 1`;
     if (idx === 8) return `Managing ${open} positions`;
@@ -144,7 +171,7 @@ export function Overview() {
       {dbError && <p className="alert">{dbError}</p>}
       <div className="metrics">
         <Metric label="Instruments" value={String(instruments.length || allPairs.length)} sub={`${instruments.length} live · ${allPairs.length} universe`} />
-        <Metric label="Qualified" value={readyCount} sub="H1 confirmed" />
+        <Metric label="H1 Confirmed" value={hc ? hc.confirmed : '—'} sub={hc ? `${hc.candidates} Stage 6 candidates · Stage 7 ${h1Status}` : `Stage 7 ${h1Status}`} />
         <Metric label="Open Positions" value={String(open)} sub={`${riskUsed.toFixed(2)}% risk used`} />
         <Metric label="System Confidence" value={avgConf === '—' ? '—' : `${avgConf}%`} sub="Across active candidates" />
       </div>
@@ -277,212 +304,35 @@ export function Scanner() {
   );
 }
 
-function ChannelChart({ empty }: { empty?: boolean }) {
-  if (empty) return <EmptyState title="No chart series" detail="Historical bars will appear when market data is written to the database." />;
-  return (
-    <div className="channel-chart">
-      <EmptyState title="Awaiting history" detail="No synthetic series — connect a live history source." />
-    </div>
-  );
-}
-
 export function Vision() {
   return <HtfVisionPage />;
 }
 
-/** Stage 6 consumes the Stage 5 contract; a direction is shown only for confirmed channels on READY data. */
+/** Stage 6 decides from the published Stage 4 and Stage 5 outputs on the bridge; the page reads persisted decisions. */
 export function Direction() {
-  const { instruments, setSelected } = useTrading();
-  const vstore = useVisionStore();
-  const vstatus = visionStageStatus(vstore);
-  const rows = [...(vstore.state?.instruments ?? [])].sort((a, b) => {
-    const ca = a.status === 'READY' && a.d1?.confirmed ? 1 : 0;
-    const cb = b.status === 'READY' && b.d1?.confirmed ? 1 : 0;
-    return cb - ca || b.confidence - a.confidence || a.symbol.localeCompare(b.symbol);
-  });
-  const diff = new Map(instruments.map((i) => [i.symbol, i.strengthDiff]));
-  const aligned = rows.filter((v) => v.status === 'READY' && v.agreement === 'AGREE').length;
-  const tfCell = (v: (typeof rows)[number], tf: 'd1' | 'h8') => {
-    const s = v[tf];
-    const d = tfDirection(v, tf);
-    return (
-      <span title={s?.reason ?? s?.dataReason}>
-        <small>
-          {tf.toUpperCase()} ·{' '}
-          {s?.dataStatus !== 'READY' ? s?.dataStatus?.replace(/_/g, ' ') : !s?.status ? 'NOT ANALYSED' : s.status === 'NONE' ? 'NO CHANNEL' : s.status}
-        </small>
-        <b className={d === 'BULLISH' ? 'positive' : d === 'BEARISH' ? 'negative' : 'muted'}>{d === 'BULLISH' ? '↑' : d === 'BEARISH' ? '↓' : '→'}</b>
-      </span>
-    );
-  };
-  return (
-    <>
-      <PageHeader title="Structural Direction" subtitle="Combines macro strength, historical regime and D1/H8 market vision (Stage 5 → Stage 6)" />
-      {(vstore.error || vstatus === 'STALE') && (
-        <div className="hr-banner warn">
-          <AlertTriangle size={14} />
-          <span>
-            {vstore.error
-              ? `Stage 5 unavailable — ${vstore.error}. No structural direction is published.`
-              : 'Stage 5 output is stale — directions below are not treated as confirmed until the engine runs again.'}
-          </span>
-        </div>
-      )}
-      <Card>
-        <div className="card-head">
-          <div>
-            <h3>Multi-Timeframe Direction Board</h3>
-            <p>
-              Stage 5 {vstatus} · {rows.filter((v) => v.status === 'READY' && v.d1?.confirmed).length} confirmed D1 channels · last run{' '}
-              {ageText(vstore.state?.run?.runAt)}
-            </p>
-          </div>
-          <Badge tone={aligned ? 'green' : 'gray'}>{aligned} D1/H8 aligned</Badge>
-        </div>
-        {!rows.length ? (
-          <EmptyState
-            title={vstore.loading ? 'Loading Stage 5 output…' : 'No structural direction'}
-            detail={vstore.error || 'HTF Market Vision has not published any instrument yet.'}
-          />
-        ) : (
-          <div className="direction-board">
-            {rows.map((v) => {
-              const h = headline(v);
-              const d = diff.get(v.symbol);
-              const pos = visionPosition(v, 'd1');
-              return (
-                <div key={v.symbol} className="hr-click" onClick={() => setSelected(v.symbol)} title={[...v.reasoning, ...v.invalidation].join('\n')}>
-                  <div>
-                    <b className={v.symbol === 'XAUUSD' ? 'hr-gold' : undefined}>{v.symbol}</b>
-                    <small>
-                      Strength Δ {d == null ? '—' : `${d > 0 ? '+' : ''}${d.toFixed(2)}`} · {v.agreement} · {v.phase?.replace(/_/g, ' ') ?? '—'}
-                    </small>
-                  </div>
-                  {tfCell(v, 'd1')}
-                  {tfCell(v, 'h8')}
-                  <span>
-                    <small>Position</small>
-                    <b>{pos == null ? '—' : `${pos.toFixed(0)}%`}</b>
-                  </span>
-                  <span>
-                    <small>Confidence</small>
-                    <b>{v.status === 'BLOCKED' ? '—' : `${v.confidence.toFixed(0)}%`}</b>
-                  </span>
-                  <Badge tone={h.tone}>{h.label}</Badge>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
-    </>
-  );
+  return <StructuralDirectionPage />;
 }
 
+/** Stage 7 confirms the Stage 6 direction on closed H1 structure on the bridge; the page reads persisted decisions. */
 export function H1() {
-  const { selected, instruments } = useTrading();
-  const vstore = useVisionStore();
-  const x = instruments.find((i) => i.symbol === selected) || instruments[0];
-  const htfPos = x ? visionPosition(vstore.state?.instruments.find((v) => v.symbol === x.symbol), 'd1') : null;
-  return (
-    <>
-      <PageHeader title="H1 Confirmation" subtitle="Final structure confirmation using BOS, CHoCH, momentum and pullback state" />
-      {!x ? (
-        <Card>
-          <EmptyState title="No H1 confirmation target" detail="Load instrument state from the database first." />
-        </Card>
-      ) : (
-        <div className="grid-vision">
-          <Card>
-            <div className="card-head">
-              <div>
-                <h3>
-                  {x.symbol} · H1 Live Structure
-                </h3>
-                <p>
-                  HTF direction: {x.d1} · H1 phase: {x.h1}
-                </p>
-              </div>
-              <Badge tone={x.state === 'READY' ? 'green' : 'amber'}>{x.state}</Badge>
-            </div>
-            <ChannelChart empty />
-          </Card>
-          <Card>
-            <h3>Confirmation Checklist</h3>
-            {[
-              ['HTF Direction', x.d1, x.d1 !== 'NEUTRAL'],
-              ['Channel Location', htfPos == null ? 'No Stage 5 channel' : `${htfPos.toFixed(0)}%`, htfPos != null],
-              ['Score', String(x.score), x.score > 0],
-              ['H1 Phase', x.h1, !!x.h1],
-            ].map(([a, b, ok]) => (
-              <div className="check-row" key={a as string}>
-                <span className={ok ? 'check ok' : 'check'}>{ok ? <CheckCircle2 /> : <PauseCircle />}</span>
-                <div>
-                  <small>{a as string}</small>
-                  <b>{b as string}</b>
-                </div>
-              </div>
-            ))}
-          </Card>
-        </div>
-      )}
-    </>
-  );
+  return <H1ConfirmationPage />;
 }
 
+/** Stage 8 qualifies Stage 7 confirmations against portfolio and per-account risk on the bridge; the page reads persisted state. */
 export function Risk() {
-  const { riskLimit, setRiskLimit, instruments, riskUsed } = useTrading();
-  const setups = instruments.filter((x) => x.score >= 78);
-  return (
-    <>
-      <PageHeader title="Opportunities & Risk" subtitle="Final qualification gate: setup quality, correlation, exposure and account risk" />
-      <div className="metrics">
-        <Metric label="Qualified Setups" value={setups.length} sub={`${instruments.filter((i) => i.state === 'READY').length} ready for execution`} />
-        <Metric label="Risk Available" value={`${Math.max(0, riskLimit * 3 - riskUsed).toFixed(2)}%`} sub="Portfolio budget remaining" />
-        <Metric label="Open Risk" value={`${riskUsed.toFixed(2)}%`} sub="Active positions" />
-        <Metric label="Risk / Trade" value={`${riskLimit.toFixed(2)}%`} sub="Configured limit" />
-      </div>
-      <div className="grid-2">
-        <Card>
-          <h3>Setup Qualification</h3>
-          {!setups.length ? (
-            <EmptyState title="No qualified setups" detail="Scored instruments in the database appear here when score ≥ 78." />
-          ) : (
-            setups.slice(0, 8).map((x) => (
-              <div className="setup" key={x.symbol}>
-                <div>
-                  <b>{x.symbol}</b>
-                  <small>
-                    {x.d1} · {x.h1}
-                  </small>
-                </div>
-                <div className="score">{x.score}</div>
-                <Badge tone={x.state === 'READY' ? 'green' : 'amber'}>{x.state}</Badge>
-              </div>
-            ))
-          )}
-        </Card>
-        <Card>
-          <h3>Risk Controls</h3>
-          <label className="range-label">
-            <span>Maximum risk per trade</span>
-            <b>{riskLimit.toFixed(2)}%</b>
-          </label>
-          <input className="range" type="range" min=".25" max="2" step=".25" value={riskLimit} onChange={(e) => setRiskLimit(+e.target.value)} />
-          <div className="alert">
-            <AlertTriangle />
-            <span>Risk settings persist to dbo.app_settings in db_Cacsms-Trader.</span>
-          </div>
-        </Card>
-      </div>
-    </>
-  );
+  return <OpportunitiesRiskPage />;
 }
 
 export function Execution() {
   const { positions, closePosition, auto, riskUsed } = useTrading();
+  const riskStore = useRiskStore();
   const active = positions.filter((x) => x.status === 'ACTIVE');
   const pnl = active.reduce((s, p) => s + p.pnl, 0);
+  const now = Date.now();
+  const riskStatus = riskStageStatus(riskStore);
+  const auths = riskStore.state?.authorizations ?? [];
+  const pending = riskStatus === 'HEALTHY' || riskStatus === 'DEGRADED' ? auths.filter((a) => a.status === 'PENDING' && Date.parse(a.expiresAt) > now) : [];
+  useEffect(() => startRiskStore(), []);
   return (
     <>
       <PageHeader title="Execution & Positions" subtitle="Broker execution, live position management and trade lifecycle control" />
@@ -490,8 +340,72 @@ export function Execution() {
         <Metric label="Engine" value={auto ? 'AUTO' : 'PAUSED'} sub="New trade execution" />
         <Metric label="Open P&L" value={active.length ? `$${pnl.toFixed(2)}` : '$0.00'} sub="Across active positions" />
         <Metric label="Open Risk" value={`${riskUsed.toFixed(2)}%`} sub={`${active.length} active positions`} />
-        <Metric label="Positions" value={positions.length} sub="Stored in SQL Server" />
+        <Metric label="Authorized" value={pending.length} sub={`Stage 8 → Stage 9 queue · Stage 8 ${riskStatus}`} />
       </div>
+      <Card>
+        <div className="card-head">
+          <div>
+            <h3>Stage 8 Authorization Queue</h3>
+            <p>Immutable execution authorizations from Opportunities &amp; Risk — Stage 9 may act only on a PENDING, unexpired authorization and its exact terms</p>
+          </div>
+          <Badge tone={pending.length ? 'green' : 'gray'}>{pending.length} pending</Badge>
+        </div>
+        {!auths.length ? (
+          <EmptyState
+            title={riskStore.loading ? 'Loading Stage 8 authorizations…' : 'No execution authorization'}
+            detail={riskStore.error || 'An authorization is issued only when a Stage 7 confirmed setup passes every setup, portfolio, account and permission gate while trading is RUNNING.'}
+          />
+        ) : (
+          <div className="table-wrap">
+            <table className="cs-table">
+              <thead>
+                <tr>
+                  <th>Execution ID</th>
+                  <th>Account</th>
+                  <th>Instrument</th>
+                  <th>Side</th>
+                  <th>Volume</th>
+                  <th>Entry ref.</th>
+                  <th>SL</th>
+                  <th>TP</th>
+                  <th>Risk</th>
+                  <th>Expires</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {auths.slice(0, 12).map((a) => (
+                  <tr key={a.executionId}>
+                    <td>
+                      <code>{a.executionId}</code>
+                    </td>
+                    <td>
+                      {a.accountName ?? a.accountId} <small className="muted">{a.accountClass}</small>
+                    </td>
+                    <td>
+                      <b>{a.instrument}</b>
+                    </td>
+                    <td>
+                      <Badge tone={a.direction === 'BUY' ? 'green' : 'red'}>{a.direction}</Badge>
+                    </td>
+                    <td>{a.volume}</td>
+                    <td>{a.entryPolicy.referencePrice}</td>
+                    <td>{a.stopLoss}</td>
+                    <td>{a.takeProfit ?? '—'}</td>
+                    <td>
+                      {a.riskAmount.toFixed(2)} {a.riskCurrency} <small className="muted">({a.riskPct.toFixed(2)}%)</small>
+                    </td>
+                    <td>{new Date(a.expiresAt).toLocaleTimeString()}</td>
+                    <td>
+                      <Badge tone={a.status === 'PENDING' && Date.parse(a.expiresAt) > now ? 'green' : a.status === 'REVOKED' ? 'red' : 'gray'}>{a.status}</Badge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
       <Card>
         <h3>Open Positions</h3>
         {!active.length ? (

@@ -60,8 +60,10 @@ def scanner_qualification(rows: dict[str, dict[str, Any]]) -> dict[str, dict[str
 
 
 class VisionService:
-    def __init__(self, tick_fn: Callable[[list[str]], dict[str, dict[str, Any]]] | None = None):
+    def __init__(self, tick_fn: Callable[[list[str]], dict[str, dict[str, Any]]] | None = None,
+                 on_run: Callable[[list[str]], None] | None = None):
         self.tick_fn = tick_fn
+        self.on_run = on_run
         self._dirty: dict[str, str] = {}
         self._dlock = threading.Lock()
         self._run_lock = threading.Lock()
@@ -170,6 +172,11 @@ class VisionService:
                 "config": {"engine": vision.CONFIG, "timeframes": vision.TF_CFG, "service": CONFIG},
             })
             vs.save_meta(self.meta)
+            if self.on_run:
+                try:
+                    self.on_run(list(dirty))
+                except Exception:
+                    traceback.print_exc()
             return {"analysed": ok, "failed": failed, "newEvents": new_events}
 
     def _summary(self) -> dict[str, Any]:

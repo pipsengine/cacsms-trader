@@ -23,9 +23,17 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 try:
+    import confirm
+    import confirm_service
+    import confirm_store
+    import direction_service
+    import direction_store
     import history
     import history_store
     import regime
+    import risk_mt5
+    import risk_service
+    import risk_store
     import scanner
     import scanner_service
     import scanner_store
@@ -49,8 +57,11 @@ try:
         upsert_account,
     )
 except ImportError:
+    from bridge.mt5 import confirm, confirm_service, confirm_store  # type: ignore
+    from bridge.mt5 import direction_service, direction_store  # type: ignore
     from bridge.mt5 import history, history_store  # type: ignore
     from bridge.mt5 import regime  # type: ignore
+    from bridge.mt5 import risk_mt5, risk_service, risk_store  # type: ignore
     from bridge.mt5 import scanner, scanner_service, scanner_store  # type: ignore
     from bridge.mt5 import vision, vision_service, vision_store  # type: ignore
     from bridge.mt5.db import (  # type: ignore
@@ -364,34 +375,21 @@ def _symbol_enrich(symbol: str) -> dict[str, Any]:
     if h4 is not None and len(h4) >= 2:
         h8_dir = _dir_from_closes(float(h4[-2]["close"]), float(h4[-1]["close"]))
 
-    h1_phase = "Waiting"
+    # H1 confirmation is owned by Stage 7 (closed-candle structure engine); a quote snapshot never labels H1 confirmed.
     h1_dir = "NEUTRAL"
-    if h1 is not None and len(h1) >= 3:
-        c0, c1, c2 = float(h1[-3]["close"]), float(h1[-2]["close"]), float(h1[-1]["close"])
-        h1_dir = _dir_from_closes(c1, c2)
-        if (c2 > c1 > c0) or (c2 < c1 < c0):
-            h1_phase = "Confirmed"
-        elif abs(c2 - c1) / max(point, 1e-9) < 5:
-            h1_phase = "Range"
-        else:
-            h1_phase = "Pullback"
+    if h1 is not None and len(h1) >= 2:
+        h1_dir = _dir_from_closes(float(h1[-2]["close"]), float(h1[-1]["close"]))
 
     score = 0.0
     if d1_dir == h8_dir and d1_dir != "NEUTRAL":
         score += 40
-    if h1_phase == "Confirmed":
-        score += 35
-    elif h1_phase == "Pullback":
-        score += 20
     score += min(25, abs(change) * 8)
     score = round(min(99, score), 1)
 
-    # Stale quotes fail closed before any setup scoring can qualify the symbol.
+    # Stale quotes fail closed; trade readiness is decided downstream (Stage 7 → Stage 8), never here.
     state = "WAIT"
     if tick.time and (time.time() - int(tick.time)) > 3600:
         state = "BLOCKED"
-    elif score >= 75 and h1_phase == "Confirmed":
-        state = "READY"
 
     bars = {
         "D1": int(len(d1)) if d1 is not None else 0,
@@ -410,7 +408,6 @@ def _symbol_enrich(symbol: str) -> dict[str, Any]:
             "change": change,
             "d1": d1_dir,
             "h8": h8_dir,
-            "h1": h1_phase,
             "h1Dir": h1_dir,
             "score": score,
             "state": state,
@@ -617,14 +614,25 @@ def _vision_ticks(symbols: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
-VISION = vision_service.VisionService(_vision_ticks)
+RISK = risk_service.RiskService(
+    risk_mt5.RiskMT5(mt5, _MT5_LOCK, lambda: _mt5_ready, lambda: HISTORY.server_offset),
+    lambda: HISTORY.server_offset,
+)
+CONFIRM = confirm_service.ConfirmService(_vision_ticks, on_confirm_change=RISK.on_stage7_change)
+DIRECTION = direction_service.DirectionService(on_ready_change=CONFIRM.on_stage6_change)
+VISION = vision_service.VisionService(_vision_ticks, on_run=DIRECTION.on_stage5_run)
 
 
 def _scanner_context() -> dict[str, Any]:
     return {"providerOk": bool(HISTORY.provider_ok), "marketOpen": history.fx_market_open(datetime.now(timezone.utc))}
 
 
-SCANNER = scanner_service.ScannerService(_vision_ticks, _scanner_context, VISION.mark)
+def _on_promotion_change(symbols: list[str], reason: str) -> None:
+    VISION.mark(symbols, reason)
+    DIRECTION.mark("STAGE4_PROMOTION_CHANGE")
+
+
+SCANNER = scanner_service.ScannerService(_vision_ticks, _scanner_context, _on_promotion_change)
 
 
 def _on_candles(timeframe: str, symbols: list[str], kind: str = "INCREMENTAL") -> None:
@@ -632,6 +640,9 @@ def _on_candles(timeframe: str, symbols: list[str], kind: str = "INCREMENTAL") -
         _regime_trigger_pending.set()
     SCANNER.on_candles(timeframe, symbols, kind)
     VISION.on_candles(timeframe, symbols, kind)
+    DIRECTION.on_candles(timeframe, symbols, kind)
+    CONFIRM.on_candles(timeframe, symbols, kind)
+    RISK.on_candles(timeframe, symbols, kind)
 
 
 HISTORY = history.HistoryService(history.MT5Provider(mt5, _MT5_LOCK, _ensure_terminal), on_candles=_on_candles)
@@ -662,6 +673,60 @@ def _scanner_state() -> dict[str, Any]:
     state = scanner_store.load_state()
     state["service"] = {k: SCANNER.meta.get(k) for k in ("status", "message", "runAt", "runs", "errors", "lastError")}
     return state
+
+
+def _direction_state() -> dict[str, Any]:
+    state = direction_store.load_state()
+    state["service"] = {k: DIRECTION.meta.get(k) for k in ("status", "message", "runAt", "runs", "errors", "lastError")}
+    return state
+
+
+def _h1_state() -> dict[str, Any]:
+    state = confirm_store.load_state()
+    state["service"] = {k: CONFIRM.meta.get(k) for k in ("status", "message", "runAt", "runs", "errors", "lastError")}
+    return state
+
+
+def _risk_state() -> dict[str, Any]:
+    state = risk_store.load_state()
+    state["service"] = {k: RISK.meta.get(k) for k in ("status", "message", "runAt", "runs", "errors", "lastError")}
+    return state
+
+
+def cmd_h1_chart(symbol: str, bars: int) -> dict[str, Any]:
+    """H1 chart payload: stored closed H1 candles, labelled swings + BOS/CHoCH from the Stage 7 analysis, the persisted Stage 7
+    decision (pullback zone, trigger, invalidation) and the persisted Stage 5 D1/H8 channels projected onto the H1 window."""
+    bars = max(60, min(int(bars), 400))
+    rows = history_store.candle_tail(symbol, "H1", confirm.CONFIG["lookback"])
+    decision = confirm_store.load_decision(symbol)
+    if not rows:
+        return {"ok": True, "symbol": symbol, "candles": [], "swings": [], "events": [], "channels": [], "decision": decision}
+    view = rows[-bars:]
+    first = view[0][0]
+    st = confirm.analyse_h1(rows)
+    channels = []
+    for tf in ("D1", "H8"):
+        ch = vision_store.channel_analysis(symbol, tf)
+        defn = ((ch or {}).get("analysis") or {}).get("def")
+        if not defn:
+            continue
+        tf_rows = history_store.candle_tail(symbol, tf, vision.TF_CFG[tf]["lookback"] + vision_service.CONFIG["extraBars"])
+        lines = vision.channel_lines(defn, [r[0] for r in tf_rows], 2, tf)
+        span = vision.TF_SEC[tf]
+        pts = [x for x in lines if x["ts"] >= first - span]
+        if pts:
+            channels.append({"timeframe": tf, "lines": pts, "status": ((ch or {}).get("analysis") or {}).get("status"),
+                             "direction": ((ch or {}).get("analysis") or {}).get("direction")})
+    tick = _vision_ticks([symbol]).get(symbol)
+    return {
+        "ok": True, "symbol": symbol,
+        "candles": [{"ts": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4]} for r in view],
+        "swings": [{k: s[k] for k in ("ts", "kind", "price", "label", "confirmTs")} for s in st["swings"] if s["ts"] >= first],
+        "events": [{k: e[k] for k in ("type", "side", "ts", "level", "swingTs", "price")} for e in st["events"] if e["ts"] >= first],
+        "channels": channels,
+        "live": None if not tick else {"price": (tick["bid"] + tick["ask"]) / 2, "bid": tick["bid"], "ask": tick["ask"], "time": tick["time"]},
+        "decision": decision,
+    }
 
 
 def _q(qs: dict[str, list[str]], key: str) -> str | None:
@@ -733,24 +798,27 @@ def cmd_sync(body: dict[str, Any]) -> dict[str, Any]:
     account = _account_payload(info)
     positions = _positions_payload(str(info.login), info.currency)
 
-    # Persist live balances when accountId is known
+    # Persist live balances when accountId is known. Operator-owned settings (class, mode, trading flag, risk profile,
+    # prop rules, symbol assignment) are kept from the stored row when the caller omits them — a reconnect never resets them.
     if account_id:
         try:
+            prior = next((a for a in list_accounts() if a["id"] == account_id), None) or {}
+            keep = lambda key, default=None: body.get(key) if body.get(key) is not None else prior.get(key, default)  # noqa: E731
             upsert_account(
                 {
                     "id": account_id,
-                    "name": body.get("name") or account.get("name") or f"MT5 {login}",
-                    "accountClass": body.get("accountClass") or "DEMO",
+                    "name": body.get("name") or prior.get("name") or account.get("name") or f"MT5 {login}",
+                    "accountClass": keep("accountClass", "DEMO"),
                     "currency": account["currency"],
                     "broker": body.get("broker") or account.get("company") or "Broker",
-                    "firm": body.get("firm"),
+                    "firm": keep("firm"),
                     "server": account["server"],
                     "login": account["login"],
-                    "secretRef": body.get("secretRef"),
-                    "terminalInstance": body.get("terminalInstance") or "CACSMS-MT5-0001",
+                    "secretRef": keep("secretRef"),
+                    "terminalInstance": keep("terminalInstance", "CACSMS-MT5-0001"),
                     "state": "HEALTHY",
-                    "tradingMode": body.get("tradingMode") or "ANALYSIS_ONLY",
-                    "tradingEnabled": bool(body.get("tradingEnabled")),
+                    "tradingMode": keep("tradingMode", "ANALYSIS_ONLY"),
+                    "tradingEnabled": bool(keep("tradingEnabled", False)),
                     "leverage": account["leverage"],
                     "balance": account["balance"],
                     "equity": account["equity"],
@@ -759,11 +827,11 @@ def cmd_sync(body: dict[str, Any]) -> dict[str, Any]:
                     "profit": account["profit"],
                     "latencyMs": int((term.ping_last or 0) / 1000) if term else 0,
                     "lastHeartbeat": __import__("datetime").datetime.utcnow().isoformat() + "Z",
-                    "connectedAt": body.get("connectedAt"),
-                    "riskProfile": body.get("riskProfile") or "BALANCED",
-                    "maxConcurrentTrades": body.get("maxConcurrentTrades") or 2,
-                    "assignedSymbols": body.get("assignedSymbols") or [],
-                    "propRules": body.get("propRules"),
+                    "connectedAt": keep("connectedAt"),
+                    "riskProfile": keep("riskProfile", "BALANCED"),
+                    "maxConcurrentTrades": keep("maxConcurrentTrades", 2),
+                    "assignedSymbols": keep("assignedSymbols", []),
+                    "propRules": keep("propRules"),
                 }
             )
             replace_positions(
@@ -953,6 +1021,56 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._json(200, scanner_store.load_detail(symbol))
                 return
+            if parsed.path == "/direction/state":
+                self._json(200, _direction_state())
+                return
+            if parsed.path == "/direction/handoff":
+                self._json(200, {"ok": True, "candidates": direction_store.handoffs()})
+                return
+            if parsed.path == "/direction/detail":
+                symbol = (_q(parse_qs(parsed.query), "symbol") or "").upper()
+                if symbol not in regime.SYMBOLS:
+                    self._json(400, {"ok": False, "message": f"Unknown symbol {symbol}"})
+                    return
+                self._json(200, direction_store.load_detail(symbol))
+                return
+            if parsed.path == "/h1/state":
+                self._json(200, _h1_state())
+                return
+            if parsed.path == "/h1/handoff":
+                self._json(200, {"ok": True, "candidates": confirm_store.handoffs()})
+                return
+            if parsed.path.startswith("/risk/"):
+                qs = parse_qs(parsed.query)
+                if parsed.path == "/risk/state":
+                    self._json(200, _risk_state())
+                    return
+                if parsed.path == "/risk/detail":
+                    key = _q(qs, "setupKey")
+                    if not key:
+                        self._json(400, {"ok": False, "message": "setupKey required"})
+                        return
+                    self._json(200, risk_store.load_detail(key))
+                    return
+                if parsed.path == "/risk/authorizations":
+                    status = (_q(qs, "status") or "").upper() or None
+                    self._json(200, {"ok": True, "authorizations": risk_store.authorizations(status, int(_q(qs, "limit") or 60))})
+                    return
+                if parsed.path == "/risk/config":
+                    cfg, overrides = risk_store.load_config()
+                    self._json(200, {"ok": True, "config": cfg, "overrides": overrides, "audit": risk_store.config_audit(50)})
+                    return
+            if parsed.path in ("/h1/detail", "/h1/chart"):
+                qs = parse_qs(parsed.query)
+                symbol = (_q(qs, "symbol") or "").upper()
+                if symbol not in regime.SYMBOLS:
+                    self._json(400, {"ok": False, "message": f"Unknown symbol {symbol}"})
+                    return
+                if parsed.path == "/h1/detail":
+                    self._json(200, confirm_store.load_detail(symbol))
+                else:
+                    self._json(200, cmd_h1_chart(symbol, int(_q(qs, "bars") or 180)))
+                return
             if parsed.path.startswith("/vision/"):
                 qs = parse_qs(parsed.query)
                 if parsed.path == "/vision/state":
@@ -1046,6 +1164,32 @@ class Handler(BaseHTTPRequestHandler):
                 result = SCANNER.run(["CONFIG_CHANGE"])
                 self._json(200, {"ok": True, **result, "state": _scanner_state()})
                 return
+            if parsed.path == "/direction/run":
+                result = DIRECTION.run(["MANUAL"])
+                self._json(200, {"ok": True, **result, "state": _direction_state()})
+                return
+            if parsed.path == "/h1/run":
+                result = CONFIRM.run(["MANUAL"])
+                self._json(200, {"ok": True, **result, "state": _h1_state()})
+                return
+            if parsed.path == "/risk/run":
+                result = RISK.run(["MANUAL"])
+                self._json(200, {"ok": True, **result, "state": _risk_state()})
+                return
+            if parsed.path == "/risk/config":
+                result = risk_store.save_config(body.get("changes") or {}, str(body.get("actor") or "operator"), body.get("reason"))
+                if not result.get("ok"):
+                    self._json(400, {"ok": False, "message": "; ".join(result.get("errors") or []), "errors": result.get("errors")})
+                    return
+                run = RISK.run(["RISK_CONFIG_CHANGE " + ",".join(result.get("changed") or [])[:120]]) if result.get("changed") else {}
+                self._json(200, {**result, "run": run, "state": _risk_state()})
+                return
+            if parsed.path == "/risk/approve":
+                result = risk_store.approve(str(body.get("setupKey") or ""), str(body.get("accountId") or ""), str(body.get("actor") or "operator"))
+                if result.get("ok"):
+                    RISK.run(["OPERATOR_APPROVAL"])
+                self._json(200 if result.get("ok") else 400, {**result, "state": _risk_state()})
+                return
             if parsed.path == "/vision/run":
                 symbol = str(body.get("symbol") or "").upper()
                 targets = [symbol] if symbol in regime.SYMBOLS else list(regime.SYMBOLS)
@@ -1134,7 +1278,10 @@ def main() -> None:
         history_store.ensure_history_schema()
         scanner_store.ensure_scanner_schema()
         vision_store.ensure_vision_schema()
-        print("[mt5-bridge] scanner + vision schema ready")
+        direction_store.ensure_direction_schema()
+        confirm_store.ensure_confirm_schema()
+        risk_store.ensure_risk_schema()
+        print("[mt5-bridge] scanner + vision + direction + H1 confirmation + opportunities & risk schema ready")
         history_ready = True
     except Exception as exc:
         history_ready = False
@@ -1152,6 +1299,12 @@ def main() -> None:
         print("[mt5-bridge] Stage 4 Market Scanner engine started")
         VISION.start()
         print("[mt5-bridge] Stage 5 HTF Market Vision engine started")
+        DIRECTION.start()
+        print("[mt5-bridge] Stage 6 Structural Direction engine started")
+        CONFIRM.start()
+        print("[mt5-bridge] Stage 7 H1 Confirmation engine started")
+        RISK.start()
+        print("[mt5-bridge] Stage 8 Opportunities & Risk engine started")
     print("[mt5-bridge] keep MetaTrader 5 running; Ctrl+C to stop")
     try:
         server.serve_forever()

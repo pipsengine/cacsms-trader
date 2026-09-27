@@ -1,0 +1,167 @@
+.or-page {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+.or-page > .page-head,
+.or-page > .metrics {
+  margin-bottom: 0;
+}
+.or-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(360px, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+@media (max-width: 1280px) {
+  .or-layout {
+    grid-template-columns: 1fr;
+  }
+}
+.or-setups td,
+.or-setups th {
+  white-space: nowrap;
+}
+.or-setups td.hv-wrap {
+  white-space: normal;
+}
+.or-closed {
+  opacity: 0.55;
+}
+.or-code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  color: #9fd0ff;
+}
+.or-fails {
+  margin: 6px 0 10px;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+  color: #9fb4ca;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* risk controls */
+.or-controls {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0;
+}
+.or-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 128px minmax(90px, 150px);
+  gap: 10px;
+  align-items: center;
+  padding: 7px 10px;
+  border: 1px solid #1d3048;
+  border-radius: 8px;
+  background: #0b1a2a;
+}
+.or-control.changed {
+  border-color: #f2aa1f;
+}
+.or-control label b {
+  display: block;
+  font-size: 12px;
+}
+.or-control label small {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  color: #56708a;
+  font-size: 10px;
+}
+.or-crit {
+  color: #f2aa1f;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.or-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.or-input input[type='number'],
+.or-input select,
+.or-save input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid #2b4d6e;
+  border-radius: 6px;
+  background: #07111f;
+  color: #e8f0fb;
+  font: inherit;
+}
+.or-input small {
+  color: #7890aa;
+  font-size: 11px;
+}
+.or-save {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.or-save input {
+  flex: 1;
+}
+.or-util {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.or-util::before {
+  content: '';
+  grid-area: 1 / 1;
+  height: 6px;
+  border-radius: 6px;
+  background: #13283b;
+}
+.or-util i {
+  grid-area: 1 / 1;
+  display: block;
+  height: 6px;
+  border-radius: 6px;
+}
+.or-util i.green {
+  background: #20d783;
+}
+.or-util i.amber {
+  background: #f2aa1f;
+}
+.or-util i.red {
+  background: #ef4444;
+}
+.or-util small {
+  color: #7890aa;
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.or-util.compact {
+  display: inline-grid;
+  width: 48px;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+.progress-row i.or-neg {
+  background: #ff6b7a;
+}
+.or-page .progress-row {
+  grid-template-columns: 40px 1fr 120px;
+}
+@media (max-width: 640px) {
+  .or-control {
+    grid-template-columns: 1fr 110px;
+  }
+  .or-control > .or-util,
+  .or-control > span:last-child {
+    grid-column: 1 / -1;
+  }
+}

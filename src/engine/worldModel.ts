@@ -2,6 +2,7 @@ import { Instrument } from '../types';
 import { getVisionInstrument } from '../features/htf-vision/services/visionStore';
 import { tfDirection, visionPosition } from '../features/htf-vision/services/visionStage';
 import type { VisionInstrument } from '../features/htf-vision/types';
+import { getH1Decision } from '../features/h1-confirmation/services/confirmStore';
 
 export type ChannelStatus =
   | 'FORMING'
@@ -42,6 +43,7 @@ export function createWorldState(i: Instrument): WorldState {
   const validQuote = i.bid > 0 && i.ask >= i.bid;
   const conf = Number.isFinite(i.confidence) ? i.confidence : 0;
   const v = getVisionInstrument(i.symbol);
+  const h1 = getH1Decision(i.symbol);
   const dataQuality = validQuote ? Math.min(100, Math.max(conf, i.score > 0 ? 50 : 25)) : 0;
 
   return {
@@ -61,10 +63,10 @@ export function createWorldState(i: Instrument): WorldState {
     d1: htf(v, 'd1'),
     h8: htf(v, 'h8'),
     h1: {
-      phase: i.h1,
-      choch: i.h1 === 'Confirmed',
-      bos: i.state === 'READY',
-      confirmed: i.state === 'READY',
+      phase: h1?.phase ?? i.h1,
+      choch: h1?.gates.choch.status === 'PASS',
+      bos: h1?.gates.bos.status === 'PASS',
+      confirmed: h1?.state === 'CONFIRMED' && h1.confirmed,
     },
     risk: {
       approved: i.state === 'READY',

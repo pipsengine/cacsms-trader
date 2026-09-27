@@ -175,7 +175,7 @@ function LiveMarketTab() {
         change: 0,
         d1: 'NEUTRAL' as const,
         h8: 'NEUTRAL' as const,
-        h1: 'Waiting',
+        h1: 'WAITING_FOR_STAGE6',
         score: 0,
         state: 'WAIT' as const,
         strengthDiff: 0,

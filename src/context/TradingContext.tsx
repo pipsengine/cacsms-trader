@@ -11,6 +11,12 @@ import { getVisionSnapshot, startVisionStore, subscribeVision, visionStageStatus
 import { instrumentFields, publishStage5 } from '../features/htf-vision/services/visionStage';
 import { getScannerSnapshot, scannerStageStatus, startScannerStore, subscribeScanner } from '../features/market-scanner/services/scannerStore';
 import { publishStage4 } from '../features/market-scanner/services/scannerStage';
+import { directionStageStatus, getDirectionSnapshot, startDirectionStore, subscribeDirection } from '../features/structural-direction/services/directionStore';
+import { publishStage6 } from '../features/structural-direction/services/directionStage';
+import { getH1Snapshot, h1StageStatus, startH1Store, subscribeH1 } from '../features/h1-confirmation/services/confirmStore';
+import { publishStage7 } from '../features/h1-confirmation/services/confirmStage';
+import { getRiskSnapshot, riskStageStatus, saveRiskConfigNow, startRiskStore, subscribeRisk } from '../features/opportunity-risk/services/riskStore';
+import { publishStage8 } from '../features/opportunity-risk/services/riskStage';
 import { eventBus } from '../services/eventBus';
 import type { CurrencyStrength, Instrument, Position } from '../types';
 
@@ -52,7 +58,8 @@ function asInstrument(raw: unknown): Instrument | null {
     // Structure fields are re-derived from Stage 5 on load, never trusted from the persisted snapshot.
     d1: 'NEUTRAL',
     h8: 'NEUTRAL',
-    h1: String(r.h1 || 'Waiting'),
+    // H1 confirmation is owned by Stage 7; re-derived from its persisted decisions, never trusted from the snapshot.
+    h1: 'WAITING_FOR_STAGE6',
     score: Number(r.score || 0),
     state: (r.state as Instrument['state']) || 'WAIT',
     strengthDiff: Number(r.strengthDiff || 0),
@@ -397,14 +404,101 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
     };
   }, [ready]);
 
+  /** Stage 6 Structural Direction decides on the bridge; publish decision changes and READY_FOR_H1 hand-offs to the Workflow Engine. */
+  useEffect(() => {
+    if (!ready) return;
+    const stop = startDirectionStore();
+    let lastFetch: number | null = null;
+    const apply = () => {
+      const snap = getDirectionSnapshot();
+      if (snap.lastFetchAt === lastFetch) return;
+      lastFetch = snap.lastFetchAt;
+      const status = directionStageStatus(snap);
+      if (status === 'HEALTHY' || status === 'DEGRADED') publishStage6(snap.state);
+    };
+    apply();
+    const unsub = subscribeDirection(apply);
+    return () => {
+      unsub();
+      stop();
+    };
+  }, [ready]);
+
+  /** Stage 7 H1 Confirmation owns each instrument's H1 state; publish confirmation changes and Stage 8 hand-offs. */
+  useEffect(() => {
+    if (!ready) return;
+    const stop = startH1Store();
+    let lastKey = '';
+    const apply = () => {
+      const snap = getH1Snapshot();
+      const status = h1StageStatus(snap);
+      const key = `${snap.lastFetchAt}|${status}`;
+      if (key === lastKey) return;
+      lastKey = key;
+      const usable = status === 'HEALTHY' || status === 'DEGRADED';
+      const bySymbol = new Map((usable ? snap.state?.instruments ?? [] : []).map((d) => [d.symbol, d.state as string]));
+      const fallback = status === 'STALE' ? 'STALE' : status === 'ERROR' ? 'BLOCKED' : 'WAITING_FOR_STAGE6';
+      setInstrumentsState((prev) => {
+        let changed = false;
+        const next = prev.map((i) => {
+          const h1 = bySymbol.get(i.symbol) ?? fallback;
+          if (h1 === i.h1) return i;
+          changed = true;
+          return { ...i, h1 };
+        });
+        if (!changed) return prev;
+        syncModuleExports(next, posRef.current, strengthsRef.current);
+        return next;
+      });
+      if (usable) publishStage7(snap.state);
+    };
+    apply();
+    const unsub = subscribeH1(apply);
+    return () => {
+      unsub();
+      stop();
+    };
+  }, [ready, syncModuleExports]);
+
+  /** Stage 8 Opportunities & Risk owns risk per trade and portfolio risk; publish its runs and authorizations to the Workflow Engine. */
+  const [stage8OpenRisk, setStage8OpenRisk] = useState<number | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    const stop = startRiskStore();
+    let lastKey = '';
+    const apply = () => {
+      const snap = getRiskSnapshot();
+      const status = riskStageStatus(snap);
+      const key = `${snap.lastFetchAt}|${status}`;
+      if (key === lastKey) return;
+      lastKey = key;
+      const usable = status === 'HEALTHY' || status === 'DEGRADED';
+      const perTrade = Number(snap.state?.config?.riskPerTradePct);
+      if (Number.isFinite(perTrade) && perTrade > 0) setRiskLimitState(perTrade);
+      const run = snap.state?.run;
+      const acct = run?.accounts.find((a) => a.accountId === run.terminal?.accountId) ?? run?.accounts[0];
+      setStage8OpenRisk(usable && acct ? acct.openRiskPct + acct.pendingRiskPct : null);
+      if (usable) publishStage8(snap.state);
+    };
+    apply();
+    const unsub = subscribeRisk(apply);
+    return () => {
+      unsub();
+      stop();
+    };
+  }, [ready]);
+
   const setAuto = (v: boolean) => {
     setAutoState(v);
     schedulePersist({ auto: v });
   };
 
+  /** Risk per trade is a Stage 8 setting: saved (and audited) through the risk configuration, which also syncs app_settings.riskLimit. */
   const setRiskLimit = (n: number) => {
     setRiskLimitState(n);
-    schedulePersist({ riskLimit: n });
+    void saveRiskConfigNow({ riskPerTradePct: n }, 'Risk per trade changed from the application').catch((e: unknown) =>
+      setDbError(e instanceof Error ? e.message : 'Risk configuration save failed'),
+    );
   };
 
   const setInstruments = (i: Instrument[]) => {
@@ -437,8 +531,8 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
   };
 
   const riskUsed = useMemo(
-    () => pos.filter((p) => p.status === 'ACTIVE').reduce((sum, p) => sum + (p.risk || 0), 0),
-    [pos],
+    () => stage8OpenRisk ?? pos.filter((p) => p.status === 'ACTIVE').reduce((sum, p) => sum + (p.risk || 0), 0),
+    [pos, stage8OpenRisk],
   );
 
   const value = useMemo(

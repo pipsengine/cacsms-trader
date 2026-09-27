@@ -51,7 +51,7 @@ export function mergeTicksIntoInstruments(current: Instrument[], ticks: BridgeTi
         change: 0,
         d1: 'NEUTRAL',
         h8: 'NEUTRAL',
-        h1: 'Waiting',
+        h1: 'WAITING_FOR_STAGE6',
         score: 0,
         state: 'WAIT',
         strengthDiff: 0,
@@ -74,7 +74,6 @@ export function mergeEnrichIntoInstruments(
     change?: number;
     d1?: string;
     h8?: string;
-    h1?: string;
     score?: number;
     state?: string;
     confidence?: number;
@@ -99,7 +98,8 @@ export function mergeEnrichIntoInstruments(
       // D1/H8 structure and channel position are owned by Stage 5 HTF Market Vision.
       d1: prev?.d1 ?? 'NEUTRAL',
       h8: prev?.h8 ?? 'NEUTRAL',
-      h1: r.h1 || prev?.h1 || 'Waiting',
+      // H1 confirmation state is owned by Stage 7.
+      h1: prev?.h1 ?? 'WAITING_FOR_STAGE6',
       score: r.score ?? prev?.score ?? 0,
       state: (r.state as Instrument['state']) || prev?.state || 'WAIT',
       strengthDiff: prev?.strengthDiff ?? 0,
