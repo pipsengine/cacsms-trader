@@ -22,12 +22,17 @@ export function publishLiveFeed(update: Omit<LiveFeedUpdate, 'at'> & { at?: stri
   listeners.forEach((l) => l(payload));
 }
 
+export function spreadPips(symbol: string, bid: number, ask: number): number {
+  const factor = symbol.includes('JPY') || symbol === 'XAUUSD' ? 100 : 10000;
+  return Number((Math.abs(ask - bid) * factor).toFixed(1));
+}
+
 export function mergeTicksIntoInstruments(current: Instrument[], ticks: BridgeTick[]): Instrument[] {
   if (!ticks.length) return current;
   const bySymbol = new Map(current.map((i) => [i.symbol, i]));
   for (const t of ticks) {
     const prev = bySymbol.get(t.symbol);
-    const spread = Number((Math.abs(t.ask - t.bid) * (t.symbol.includes('JPY') || t.symbol === 'XAUUSD' ? 100 : 10000)).toFixed(1));
+    const spread = spreadPips(t.symbol, t.bid, t.ask);
     if (prev) {
       bySymbol.set(t.symbol, {
         ...prev,
@@ -50,7 +55,7 @@ export function mergeTicksIntoInstruments(current: Instrument[], ticks: BridgeTi
         score: 0,
         state: 'WAIT',
         strengthDiff: 0,
-        channelPos: 50,
+        channelPos: 0,
         confidence: 0,
         lastTickAt: t.time,
       });
@@ -82,20 +87,23 @@ export function mergeEnrichIntoInstruments(
   for (const r of rows) {
     if (!r.symbol || r.bid == null) continue;
     const prev = bySymbol.get(r.symbol);
+    const ask = r.ask ?? r.bid;
     bySymbol.set(r.symbol, {
       symbol: r.symbol,
       kind: r.symbol === 'XAUUSD' ? 'GOLD' : 'FX',
       bid: r.bid,
-      ask: r.ask ?? r.bid,
-      spread: r.spread ?? prev?.spread ?? 0,
+      ask,
+      // Bridge reports spread in points; the app uses pips everywhere (same as the tick feed).
+      spread: spreadPips(r.symbol, r.bid, ask) || prev?.spread || 0,
       change: r.change ?? prev?.change ?? 0,
-      d1: (r.d1 as Instrument['d1']) || prev?.d1 || 'NEUTRAL',
-      h8: (r.h8 as Instrument['h8']) || prev?.h8 || 'NEUTRAL',
+      // D1/H8 structure and channel position are owned by Stage 5 HTF Market Vision.
+      d1: prev?.d1 ?? 'NEUTRAL',
+      h8: prev?.h8 ?? 'NEUTRAL',
       h1: r.h1 || prev?.h1 || 'Waiting',
       score: r.score ?? prev?.score ?? 0,
       state: (r.state as Instrument['state']) || prev?.state || 'WAIT',
-      strengthDiff: r.strengthDiff ?? prev?.strengthDiff ?? 0,
-      channelPos: r.channelPos ?? prev?.channelPos ?? 50,
+      strengthDiff: prev?.strengthDiff ?? 0,
+      channelPos: prev?.channelPos ?? 0,
       confidence: r.confidence ?? prev?.confidence ?? 0,
       lastTickAt: r.time || prev?.lastTickAt,
     });

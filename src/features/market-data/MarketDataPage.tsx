@@ -1,14 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import {
-  Activity,
-  AlertTriangle,
-  Database,
-  Radio,
-  RefreshCw,
-  Search,
-  Wifi,
-  X,
-} from 'lucide-react';
+import { AlertTriangle, Database, Radio, Search, Wifi, X } from 'lucide-react';
 import { allPairs } from '../../data/market';
 import { useTrading } from '../../context/TradingContext';
 import { Badge, Card, Metric, PageHeader, Tabs } from '../../components/UI';
@@ -27,7 +18,9 @@ import {
   nextTransition,
   type NamedSession,
 } from './services/sessions';
-import { buildQualityIssues, freshnessSec, stage1Summary } from './services/stage1Gate';
+import { buildQualityIssues, freshnessSec, historyQualityIssues, stage1Summary } from './services/stage1Gate';
+import { useHistoryStore } from './services/historyStore';
+import { HistoricalDataTab } from './HistoricalDataTab';
 import type { Instrument } from '../../types';
 import './market-data.css';
 
@@ -377,23 +370,33 @@ function SessionsTab() {
 
 function DataQualityTab() {
   const { instruments } = useTrading();
-  const issues = useMemo(() => buildQualityIssues(instruments), [instruments]);
-  const summary = useMemo(() => stage1Summary(instruments), [instruments]);
+  const history = useHistoryStore();
+  const series = history.status?.series;
+  const issues = useMemo(
+    () => [...buildQualityIssues(instruments), ...historyQualityIssues(series ?? [])],
+    [instruments, series, history.lastFetchAt],
+  );
+  const summary = useMemo(() => stage1Summary(instruments), [instruments, history.lastFetchAt]);
   const score = summary.total ? Math.round((summary.pass / summary.total) * 100) : 0;
+  const hs = history.status?.summary;
 
   return (
     <>
       <div className="metrics">
         <Metric label="Quality Score" value={summary.total ? `${score}%` : '—'} sub="Stage 1 pass rate" />
-        <Metric label="Passing" value={summary.pass} sub="Valid + fresh" />
-        <Metric label="Blocked" value={summary.blocked} sub="Cannot open new trades" />
-        <Metric label="Issues" value={issues.length} sub="Detected anomalies" />
+        <Metric label="Passing" value={summary.pass} sub="Valid + fresh + history READY" />
+        <Metric
+          label="Historical Quality"
+          value={hs?.quality != null ? hs.quality : '—'}
+          sub={hs ? `${hs.ready}/${hs.series} series READY · ${hs.completeness ?? '—'}% complete` : history.error || 'Loading…'}
+        />
+        <Metric label="Issues" value={issues.length} sub={`${summary.blocked} instruments blocked`} />
       </div>
       <Card>
         <div className="card-head">
           <div>
             <h3>Validation Issues</h3>
-            <p>Instrument-level fail-closed gates for Stage 1</p>
+            <p>Live tick gates and historical candle validation (single bridge validation engine) for Stage 1</p>
           </div>
         </div>
         {!issues.length ? (
@@ -440,6 +443,7 @@ function DataQualityTab() {
                 <th>Symbol</th>
                 <th>Gate</th>
                 <th>Quality</th>
+                <th>History</th>
                 <th>Freshness</th>
                 <th>Reason</th>
               </tr>
@@ -454,6 +458,9 @@ function DataQualityTab() {
                     <Badge tone={g.pass ? 'green' : 'red'}>{g.pass ? 'PASS' : 'BLOCKED'}</Badge>
                   </td>
                   <td>{g.quality}</td>
+                  <td>
+                    <Badge tone={g.history === 'READY' ? 'green' : g.history === 'SYNCING' ? 'blue' : 'amber'}>{g.history}</Badge>
+                  </td>
                   <td>{g.freshnessSec == null ? '—' : `${g.freshnessSec}s`}</td>
                   <td>{g.reason}</td>
                 </tr>
@@ -461,144 +468,6 @@ function DataQualityTab() {
             </tbody>
           </table>
         </div>
-      </Card>
-    </>
-  );
-}
-
-function HistoricalTab() {
-  const { instruments, selected, setSelected } = useTrading();
-  const [tf, setTf] = useState<(typeof TIMEFRAMES)[number]>('H1');
-  const [symbol, setSymbol] = useState(selected || allPairs[0]);
-  const [rows, setRows] = useState<
-    Array<{ symbol: string; timeframe: string; count: number; from?: string; to?: string; status: string; message?: string }>
-  >([]);
-  const [busy, setBusy] = useState(false);
-
-  const universe = instruments.length ? instruments.map((i) => i.symbol) : [...allPairs];
-
-  const syncOne = async (sym: string, timeframe: string) => {
-    const r = await bridgeBars(sym, timeframe, 500);
-    return {
-      symbol: sym,
-      timeframe,
-      count: r.count || r.bars.length,
-      from: r.bars[0]?.time,
-      to: r.bars[r.bars.length - 1]?.time,
-      status: r.ok ? 'SYNCED' : 'ERROR',
-      message: r.message,
-    };
-  };
-
-  const syncVisible = async () => {
-    setBusy(true);
-    const batch = universe.slice(0, 12);
-    const out = [];
-    for (const sym of batch) {
-      out.push(await syncOne(sym, tf));
-    }
-    setRows(out);
-    setBusy(false);
-  };
-
-  const syncSelected = async () => {
-    setBusy(true);
-    const row = await syncOne(symbol, tf);
-    setRows((prev) => {
-      const rest = prev.filter((p) => !(p.symbol === row.symbol && p.timeframe === row.timeframe));
-      return [row, ...rest];
-    });
-    setBusy(false);
-  };
-
-  return (
-    <>
-      <div className="metrics">
-        <Metric label="Timeframe" value={tf} sub="Active sync target" />
-        <Metric label="Cached Rows" value={rows.length} sub="Last sync batch" />
-        <Metric label="Selected" value={symbol} sub="Instrument focus" />
-        <Metric label="Universe" value={universe.length} sub="Available symbols" />
-      </div>
-      <Card>
-        <div className="card-head">
-          <div>
-            <h3>Historical Synchronization</h3>
-            <p>Incremental MT5 rates — MN1 → W1 → D1 → H8 → H1 (+ M15/M5)</p>
-          </div>
-        </div>
-        <div className="md-toolbar">
-          <select
-            value={symbol}
-            onChange={(e) => {
-              setSymbol(e.target.value);
-              setSelected(e.target.value);
-            }}
-          >
-            {universe.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-          <select value={tf} onChange={(e) => setTf(e.target.value as (typeof TIMEFRAMES)[number])}>
-            {TIMEFRAMES.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="primary" disabled={busy} onClick={() => void syncSelected()}>
-            <RefreshCw size={14} /> Sync Selected
-          </button>
-          <button type="button" disabled={busy} onClick={() => void syncVisible()}>
-            Sync First 12
-          </button>
-          <button
-            type="button"
-            disabled={busy || !rows.length}
-            onClick={() => void syncVisible()}
-            title="Re-query MT5 for missing/errored rows"
-          >
-            Re-sync Missing
-          </button>
-        </div>
-        {busy && <p className="muted">Synchronizing from MT5 terminal…</p>}
-        {!rows.length ? (
-          <Empty title="No history synced this session" detail="Run Sync Selected or Sync First 12 to pull candles from MetaTrader 5." />
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Instrument</th>
-                  <th>TF</th>
-                  <th>Candles</th>
-                  <th>From</th>
-                  <th>To</th>
-                  <th>Completeness</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => (
-                  <tr key={`${r.symbol}-${r.timeframe}`}>
-                    <td>
-                      <b>{r.symbol}</b>
-                    </td>
-                    <td>{r.timeframe}</td>
-                    <td>{r.count}</td>
-                    <td>{r.from ? new Date(r.from).toLocaleString() : '—'}</td>
-                    <td>{r.to ? new Date(r.to).toLocaleString() : '—'}</td>
-                    <td>{r.count ? `${Math.min(100, Math.round((r.count / 500) * 100))}%` : '0%'}</td>
-                    <td>
-                      <Badge tone={r.status === 'SYNCED' ? 'green' : 'red'}>{r.status}</Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </Card>
     </>
   );
@@ -748,7 +617,7 @@ export function MarketDataPage() {
       {tab === 'Live Market' && <LiveMarketTab />}
       {tab === 'Sessions' && <SessionsTab />}
       {tab === 'Data Quality' && <DataQualityTab />}
-      {tab === 'Historical Data' && <HistoricalTab />}
+      {tab === 'Historical Data' && <HistoricalDataTab />}
       {tab === 'Feed Status' && <FeedStatusTab />}
     </>
   );

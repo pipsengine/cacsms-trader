@@ -563,6 +563,324 @@ def save_app_state(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "message": "App state saved to db_Cacsms-Trader"}
 
 
+# ---------------------------------------------------------------- Stage 3 Historical Regime
+
+_regime_schema_ready = False
+
+
+def ensure_regime_schema() -> None:
+    global _regime_schema_ready
+    if _regime_schema_ready:
+        return
+    sql = (ROOT / "database" / "mssql" / "003_historical_regime.sql").read_text(encoding="utf-8")
+    batches = [b.strip() for b in sql.split("\nGO") if b.strip()]
+    with connect() as conn:
+        cur = conn.cursor()
+        for batch in batches:
+            cur.execute(batch)
+        conn.commit()
+    _regime_schema_ready = True
+
+
+def _iso(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat() + "Z"
+    return value.isoformat()
+
+
+def regime_load_states() -> dict[str, dict[str, Any]]:
+    """Latest closed hysteresis state per asset — incremental runs continue from here."""
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT s.asset, s.obs_date, s.regime, s.regime_since, s.candidate, s.candidate_count, s.candidate_since
+            FROM dbo.app_regime_snapshot s
+            JOIN (
+              SELECT asset, MAX(obs_date) AS obs_date FROM dbo.app_regime_snapshot WHERE is_closed = 1 GROUP BY asset
+            ) x ON x.asset = s.asset AND x.obs_date = s.obs_date
+            """
+        )
+        out: dict[str, dict[str, Any]] = {}
+        for asset, obs_date, regime, since, candidate, count, cand_since in cur.fetchall():
+            out[asset] = {
+                "lastClosedDate": obs_date,
+                "regime": regime,
+                "since": since,
+                "candidate": candidate,
+                "candidateCount": int(count or 0),
+                "candidateSince": cand_since,
+            }
+        return out
+
+
+_SNAPSHOT_MERGE = """
+MERGE dbo.app_regime_snapshot AS t
+USING (SELECT ? AS asset, ? AS obs_date) AS s ON t.asset = s.asset AND t.obs_date = s.obs_date
+WHEN MATCHED THEN UPDATE SET
+  is_closed=?, q=?, m=?, w=?, d=?, macro=?, current_strength=?, composite=?, prev_composite=?,
+  momentum=?, acceleration=?, raw_regime=?, regime=?, regime_since=?, candidate=?, candidate_count=?,
+  candidate_since=?, duration_obs=?, confidence=?, obs_confidence=?, persistence=?, updated_at=SYSUTCDATETIME()
+WHEN NOT MATCHED THEN INSERT (
+  asset, obs_date, is_closed, q, m, w, d, macro, current_strength, composite, prev_composite,
+  momentum, acceleration, raw_regime, regime, regime_since, candidate, candidate_count,
+  candidate_since, duration_obs, confidence, obs_confidence, persistence
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+"""
+
+
+def _snapshot_params(r: dict[str, Any]) -> list[Any]:
+    body = [
+        1 if r["closed"] else 0, r["q"], r["m"], r["w"], r["d"], r["macro"], r["current"], r["composite"],
+        r["prev"], r["momentum"], r["acceleration"], r["raw"], r["regime"], r["since"], r["candidate"],
+        int(r["candidateCount"]), r["candidateSince"], int(r["duration"]), r["confidence"], r["obsConfidence"],
+        r["persistence"],
+    ]
+    return [r["asset"], r["date"], *body, r["asset"], r["date"], *body]
+
+
+def _executemany(cur: Any, sql: str, rows: list[list[Any]]) -> None:
+    if not rows:
+        return
+    try:
+        cur.fast_executemany = True
+        cur.executemany(sql, rows)
+    except pyodbc.Error:
+        cur.fast_executemany = False
+        for row in rows:
+            cur.execute(sql, row)
+
+
+def regime_persist(result: dict[str, Any], meta: dict[str, Any]) -> dict[str, int]:
+    """Upsert new/changed snapshots, append confirmed transitions, refresh pair + strength outputs."""
+    snapshots = result.get("snapshots") or []
+    transitions = result.get("transitions") or []
+    pairs = result.get("pairs") or []
+    strengths = result.get("strengths") or []
+    written_t = 0
+    with connect() as conn:
+        cur = conn.cursor()
+        _executemany(cur, _SNAPSHOT_MERGE, [_snapshot_params(r) for r in snapshots])
+
+        for t in transitions:
+            cur.execute(
+                """
+                IF NOT EXISTS (SELECT 1 FROM dbo.app_regime_transition WHERE asset = ? AND confirmed_at = ?)
+                INSERT INTO dbo.app_regime_transition
+                  (asset, confirmed_at, first_seen, prev_regime, new_regime, confidence, reason, evidence_json)
+                VALUES (?,?,?,?,?,?,?,?)
+                """,
+                t["asset"], t["confirmedAt"],
+                t["asset"], t["confirmedAt"], t["firstSeen"], t["prev"], t["new"], t["confidence"],
+                t["reason"][:600], json.dumps(t["evidence"]),
+            )
+            written_t += max(0, cur.rowcount)
+
+        for p in pairs:
+            params = [
+                p["base"], p["quote"], p["status"], p["bias"], p["differential"], p["conviction"], p["persistence"],
+                p["momentum"], p["confidence"], p["baseRegime"], p["quoteRegime"], p["relationship"],
+                p["reason"][:600], p["date"],
+            ]
+            cur.execute(
+                """
+                MERGE dbo.app_regime_pair AS t
+                USING (SELECT ? AS symbol) AS s ON t.symbol = s.symbol
+                WHEN MATCHED THEN UPDATE SET
+                  base=?, quote=?, status=?, bias=?, differential=?, conviction=?, persistence=?, momentum=?,
+                  confidence=?, base_regime=?, quote_regime=?, relationship=?, reason=?, obs_date=?,
+                  updated_at=SYSUTCDATETIME()
+                WHEN NOT MATCHED THEN INSERT
+                  (symbol, base, quote, status, bias, differential, conviction, persistence, momentum,
+                   confidence, base_regime, quote_regime, relationship, reason, obs_date)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);
+                """,
+                p["symbol"], *params, p["symbol"], *params,
+            )
+
+        if strengths:
+            cur.execute("DELETE FROM dbo.app_currency_strength")
+            for s in strengths:
+                cur.execute(
+                    "INSERT INTO dbo.app_currency_strength (code, q, m, score, trend, classification) VALUES (?,?,?,?,?,?)",
+                    s["code"], s["q"], s["m"], s["score"], s["trend"], s["classification"],
+                )
+
+        cur.execute(
+            """
+            MERGE dbo.app_settings AS t
+            USING (SELECT N'regime.last_run' AS [key]) AS s ON t.[key] = s.[key]
+            WHEN MATCHED THEN UPDATE SET [value]=?, updated_at=SYSUTCDATETIME()
+            WHEN NOT MATCHED THEN INSERT ([key], [value]) VALUES (N'regime.last_run', ?);
+            """,
+            json.dumps(meta, default=str),
+            json.dumps(meta, default=str),
+        )
+        conn.commit()
+    return {"snapshots": len(snapshots), "transitions": written_t, "pairs": len(pairs)}
+
+
+def save_regime_meta(meta: dict[str, Any]) -> None:
+    set_setting("regime.last_run", json.dumps(meta, default=str))
+
+
+_SNAPSHOT_COLS = """
+asset, obs_date, is_closed, q, m, w, d, macro, current_strength, composite, prev_composite, momentum,
+acceleration, raw_regime, regime, regime_since, candidate, candidate_count, candidate_since, duration_obs,
+confidence, obs_confidence, persistence, updated_at
+"""
+
+
+def _snapshot_dict(d: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "asset": d["asset"],
+        "date": _iso(d["obs_date"]),
+        "closed": bool(d["is_closed"]),
+        "q": d["q"], "m": d["m"], "w": d["w"], "d": d["d"],
+        "macro": d["macro"],
+        "current": d["current_strength"],
+        "composite": d["composite"],
+        "previous": d["prev_composite"],
+        "momentum": d["momentum"],
+        "acceleration": d["acceleration"],
+        "rawRegime": d["raw_regime"],
+        "regime": d["regime"],
+        "regimeSince": _iso(d["regime_since"]),
+        "candidate": d["candidate"],
+        "candidateCount": int(d["candidate_count"] or 0),
+        "candidateSince": _iso(d["candidate_since"]),
+        "durationObs": int(d["duration_obs"] or 0),
+        "confidence": d["confidence"],
+        "obsConfidence": d["obs_confidence"],
+        "persistence": d["persistence"],
+        "updatedAt": _iso(d["updated_at"]),
+    }
+
+
+def regime_history(asset: str, limit: int = 260) -> list[dict[str, Any]]:
+    limit = max(5, min(int(limit), 2000))
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT TOP ({limit}) {_SNAPSHOT_COLS} FROM dbo.app_regime_snapshot WHERE asset = ? ORDER BY obs_date DESC",
+            asset,
+        )
+        cols = [c[0] for c in cur.description]
+        rows = [_snapshot_dict(dict(zip(cols, raw))) for raw in cur.fetchall()]
+    rows.reverse()
+    return rows
+
+
+def load_regime_state(history_limit: int = 130) -> dict[str, Any]:
+    ensure_regime_schema()
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT [value], updated_at FROM dbo.app_settings WHERE [key] = N'regime.last_run'")
+        row = cur.fetchone()
+        run = None
+        if row:
+            try:
+                run = json.loads(row[0])
+            except Exception:
+                run = None
+
+        cur.execute(
+            f"""
+            SELECT {_SNAPSHOT_COLS} FROM (
+              SELECT *, ROW_NUMBER() OVER (PARTITION BY asset ORDER BY obs_date DESC) AS rn
+              FROM dbo.app_regime_snapshot
+            ) x WHERE rn <= ? ORDER BY asset, obs_date
+            """,
+            int(history_limit),
+        )
+        cols = [c[0] for c in cur.description]
+        history: dict[str, list[dict[str, Any]]] = {}
+        for raw in cur.fetchall():
+            snap = _snapshot_dict(dict(zip(cols, raw)))
+            history.setdefault(snap["asset"], []).append(snap)
+
+        cur.execute("SELECT asset, COUNT(*) FROM dbo.app_regime_snapshot WHERE is_closed = 1 GROUP BY asset")
+        counts = {a: int(c) for a, c in cur.fetchall()}
+
+        cur.execute(
+            """
+            SELECT symbol, base, quote, status, bias, differential, conviction, persistence, momentum, confidence,
+                   base_regime, quote_regime, relationship, reason, obs_date, updated_at
+            FROM dbo.app_regime_pair ORDER BY symbol
+            """
+        )
+        pcols = [c[0] for c in cur.description]
+        pairs = []
+        for raw in cur.fetchall():
+            p = dict(zip(pcols, raw))
+            pairs.append({
+                "symbol": p["symbol"], "base": p["base"], "quote": p["quote"], "status": p["status"],
+                "bias": p["bias"], "differential": p["differential"], "conviction": p["conviction"],
+                "persistence": p["persistence"], "momentum": p["momentum"], "confidence": p["confidence"],
+                "baseRegime": p["base_regime"], "quoteRegime": p["quote_regime"],
+                "relationship": p["relationship"], "reason": p["reason"],
+                "date": _iso(p["obs_date"]), "updatedAt": _iso(p["updated_at"]),
+            })
+
+        cur.execute(
+            """
+            SELECT TOP 500 id, asset, confirmed_at, first_seen, prev_regime, new_regime, confidence, reason,
+                   evidence_json, created_at
+            FROM dbo.app_regime_transition ORDER BY confirmed_at DESC, id DESC
+            """
+        )
+        tcols = [c[0] for c in cur.description]
+        transitions = []
+        for raw in cur.fetchall():
+            t = dict(zip(tcols, raw))
+            try:
+                evidence = json.loads(t["evidence_json"])
+            except Exception:
+                evidence = {}
+            transitions.append({
+                "id": int(t["id"]), "asset": t["asset"], "confirmedAt": _iso(t["confirmed_at"]),
+                "firstSeen": _iso(t["first_seen"]), "previous": t["prev_regime"], "next": t["new_regime"],
+                "confidence": t["confidence"], "reason": t["reason"], "evidence": evidence,
+                "createdAt": _iso(t["created_at"]),
+            })
+
+        cur.execute("SELECT code, q, m, score, trend, classification FROM dbo.app_currency_strength ORDER BY score DESC")
+        scols = [c[0] for c in cur.description]
+        strengths = [dict(zip(scols, raw)) for raw in cur.fetchall()]
+
+    run_assets = (run or {}).get("assets") or {}
+    assets = []
+    for a in ["USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "XAU"]:
+        hist = history.get(a, [])
+        meta = run_assets.get(a) or {}
+        latest = hist[-1] if hist else None
+        status = "CLASSIFIED" if latest and latest["regime"] else meta.get("status") or ("WARMING_UP" if hist else "NO_DATA")
+        assets.append({
+            "asset": a,
+            "kind": "METAL" if a == "XAU" else "FIAT",
+            "status": status,
+            "latest": latest,
+            "history": hist,
+            "observations": {
+                "collected": counts.get(a, meta.get("collected", 0)),
+                "required": meta.get("required") or (run or {}).get("config", {}).get("requiredObs") or 0,
+            },
+            "bars": {"collected": meta.get("bars"), "required": meta.get("barsRequired")},
+            "message": meta.get("message"),
+        })
+
+    return {
+        "ok": True,
+        "run": run,
+        "assets": assets,
+        "pairs": pairs,
+        "transitions": transitions,
+        "strengths": strengths,
+    }
+
+
 def append_event(message: str, severity: str = "INFO", source: str = "SYSTEM") -> None:
     with connect() as conn:
         cur = conn.cursor()

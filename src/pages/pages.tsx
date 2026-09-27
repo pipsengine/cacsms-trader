@@ -30,6 +30,10 @@ import { Badge, Card, Metric, PageHeader, Tabs } from '../components/UI';
 import { getDatabaseStatus } from '../db';
 import { bridgeDbHealth } from '../features/mt5-connection/services/mt5BridgeClient';
 import { MarketDataPage } from '../features/market-data';
+import { assessInstrument, gatedState } from '../features/market-data/services/stage1Gate';
+import { HistoricalRegimePage, regimeStageStatus, useRegimeStore } from '../features/historical-regime';
+import { CurrencyStrengthPage, stage2Output } from '../features/currency-strength';
+import { ageText, headline, HtfVisionPage, tfDirection, useVisionStore, visionPosition, visionStageStatus } from '../features/htf-vision';
 
 const dir = (x: string) => (x === 'BULLISH' ? 'green' : x === 'BEARISH' ? 'red' : 'gray');
 
@@ -44,7 +48,11 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
 
 function InstrumentTable({ limit }: { limit?: number }) {
   const { selected, setSelected, instruments } = useTrading();
-  const rows = limit ? instruments.slice(0, limit) : instruments;
+  const gated = instruments.map((i) => ({ ...i, state: gatedState(i) }));
+  const rank = (s: string) => (s === 'READY' ? 0 : s === 'WAIT' ? 1 : 2);
+  const rows = limit
+    ? [...gated].sort((a, b) => rank(a.state) - rank(b.state) || b.score - a.score).slice(0, limit)
+    : gated;
   if (!rows.length) {
     return <EmptyState title="No instrument data" detail="Connect MT5 and sync market state into db_Cacsms-Trader." />;
   }
@@ -98,11 +106,27 @@ function InstrumentTable({ limit }: { limit?: number }) {
 
 export function Overview() {
   const { instruments, positions, riskUsed, events, ready, dbError } = useTrading();
-  const readyCount = instruments.filter((x) => x.state === 'READY').length;
+  const gates = instruments.map((i) => assessInstrument(i));
+  const passing = instruments.filter((_, idx) => gates[idx].pass);
+  const stage1Pass = passing.length;
+  const blockReason = gates.find((g) => !g.pass)?.reason;
+  const readyCount = passing.filter((x) => x.state === 'READY').length;
   const open = positions.filter((p) => p.status === 'ACTIVE').length;
-  const avgConf = instruments.length
-    ? (instruments.reduce((s, i) => s + i.confidence, 0) / instruments.length).toFixed(1)
+  const avgConf = passing.length
+    ? (passing.reduce((s, i) => s + i.confidence, 0) / passing.length).toFixed(1)
     : '—';
+  const regimeStore = useRegimeStore();
+  const regimeStatus = regimeStageStatus(regimeStore);
+  const regimeClassified = (regimeStore.state?.assets ?? []).filter((a) => a.latest?.regime).length;
+  const stageOk = (idx: number) =>
+    idx === 2 ? regimeStatus === 'HEALTHY' || regimeStatus === 'RUNNING' : !!stage1Pass || idx === 8;
+  const stageNote = (idx: number) => {
+    if (idx === 2) return `${regimeStatus} · ${regimeClassified}/9 classified`;
+    if (!instruments.length) return 'Idle · No data';
+    if (idx === 0) return `${stage1Pass}/${instruments.length} pass Stage 1`;
+    if (idx === 8) return `Managing ${open} positions`;
+    return stage1Pass ? `${stage1Pass} instruments in flow` : 'Blocked upstream (Stage 1)';
+  };
 
   return (
     <>
@@ -140,9 +164,9 @@ export function Overview() {
                   <span>{i + 1}</span>
                   <div>
                     <b>{x}</b>
-                    <small>{i === 8 ? `Managing ${open} positions` : instruments.length ? 'Awaiting live feed' : 'Idle · No data'}</small>
+                    <small>{stageNote(i)}</small>
                   </div>
-                  <CheckCircle2 size={17} />
+                  {stageOk(i) ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}
                 </div>
               ),
             )}
@@ -155,8 +179,14 @@ export function Overview() {
           <div className="status-big">
             <Zap />
             <div>
-              <b>{instruments.length ? 'READY' : 'IDLE'}</b>
-              <span>{instruments.length ? 'Event-driven · Waiting for signals' : 'No market state in database yet'}</span>
+              <b>{!instruments.length ? 'IDLE' : stage1Pass ? 'READY' : 'BLOCKED'}</b>
+              <span>
+                {!instruments.length
+                  ? 'No market state in database yet'
+                  : stage1Pass
+                    ? `Event-driven · ${readyCount} qualified of ${stage1Pass} valid`
+                    : `Stage 1 fail-closed · ${blockReason ?? 'no valid data'}`}
+              </span>
             </div>
           </div>
         </Card>
@@ -203,101 +233,106 @@ export function MarketData() {
 }
 
 export function Strength() {
-  const [tab, setTab] = useState('Strength Matrix');
-  const { strengths } = useTrading();
-  return (
-    <>
-      <PageHeader title="Currency & XAU Strength" subtitle="Quarterly + Monthly macro strength intelligence and normalized XAU regime" />
-      <Tabs items={['Strength Matrix', 'Rankings', 'Heatmap', 'Trends', 'XAU']} active={tab} onChange={setTab} />
-      {!strengths.length ? (
-        <Card>
-          <EmptyState title="No strength data" detail="Currency strength rows are loaded from dbo.app_currency_strength." />
-        </Card>
-      ) : (
-        <div className="grid-2">
-          <Card>
-            <h3>Macro Strength Ranking</h3>
-            <div className="strength-list">
-              {strengths.map((x, i) => (
-                <div key={x.code}>
-                  <span className="rank">{i + 1}</span>
-                  <b>{x.code}</b>
-                  <div className="strength-bar">
-                    <i className={x.score >= 0 ? 'pos' : 'neg'} style={{ width: Math.min(100, Math.abs(x.score) * 9) + '%' }} />
-                  </div>
-                  <strong className={x.score >= 0 ? 'positive' : 'negative'}>
-                    {x.score > 0 ? '+' : ''}
-                    {x.score}
-                  </strong>
-                  <Badge tone={x.score > 2 ? 'green' : x.score < -2 ? 'red' : 'gray'}>{x.classification}</Badge>
-                </div>
-              ))}
-            </div>
-          </Card>
-          <Card>
-            <h3>Quarterly vs Monthly</h3>
-            <div className="chart-lg">
-              <ResponsiveContainer>
-                <BarChart data={strengths}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="code" />
-                  <YAxis />
-                  <Tooltip />
-                  <Bar dataKey="q" name="Quarterly" />
-                  <Bar dataKey="m" name="Monthly" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </Card>
-        </div>
-      )}
-    </>
-  );
+  return <CurrencyStrengthPage />;
 }
 
 export function Regime() {
-  const { strengths } = useTrading();
-  const strengthening = strengths.filter((s) => s.trend === 'Strengthening').length;
-  const weakening = strengths.filter((s) => s.trend === 'Weakening').length;
+  return <HistoricalRegimePage />;
+}
+
+function RegimeConvictionTable() {
+  const { instruments, setSelected, selected } = useTrading();
+  const store = useRegimeStore();
+  const { state, error } = store;
+  const pairs = [...(state?.pairs ?? [])].sort((a, b) => (b.conviction ?? -1) - (a.conviction ?? -1));
+  const s2 = stage2Output(store);
+  const s2Asset = new Map(s2.assets.map((a) => [a.asset, a]));
+  if (!pairs.length) {
+    return (
+      <EmptyState
+        title="No regime intelligence published"
+        detail={error || 'Stage 3 (Historical Regime) publishes pair conviction after both legs are classified.'}
+      />
+    );
+  }
+  const bySymbol = new Map(instruments.map((i) => [i.symbol, i]));
   return (
-    <>
-      <PageHeader title="Historical Regime" subtitle="Persistence, acceleration, deterioration and reversal intelligence" />
-      <div className="metrics">
-        <Metric label="Strengthening" value={strengthening} sub={strengths.filter((s) => s.trend === 'Strengthening').map((s) => s.code).join(' · ') || '—'} />
-        <Metric label="Weakening" value={weakening} sub={strengths.filter((s) => s.trend === 'Weakening').map((s) => s.code).join(' · ') || '—'} />
-        <Metric label="Transitions" value={strengths.filter((s) => s.trend === 'Recovering').length} sub="Recovering" />
-        <Metric label="Stable" value={strengths.filter((s) => s.trend === 'Stable').length} sub="Neutral regimes" />
-      </div>
-      <Card>
-        {!strengths.length ? (
-          <EmptyState title="No regime data" detail="Persist strength/regime rows to SQL Server to populate this view." />
-        ) : (
-          <div className="regime-list">
-            {strengths.map((x) => (
-              <div key={x.code}>
-                <b>{x.code}</b>
-                <Badge tone={x.trend === 'Strengthening' ? 'green' : x.trend === 'Weakening' ? 'red' : 'blue'}>{x.trend}</Badge>
-                <span>
-                  Q {x.q > 0 ? '+' : ''}
-                  {x.q}
-                </span>
-                <span>
-                  M {x.m > 0 ? '+' : ''}
-                  {x.m}
-                </span>
-                <strong>{x.classification}</strong>
-              </div>
-            ))}
-          </div>
-        )}
-      </Card>
-    </>
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Instrument</th>
+            <th title="Directional bias from base vs quote regime">Regime bias</th>
+            <th title="Base composite minus quote composite (±20)">Differential</th>
+            <th title="Regime-weighted conviction (0–100)">Conviction</th>
+            <th>Relationship</th>
+            <th>Base · Quote</th>
+            <th title={`Stage 2 composite strength (base · quote) · ${s2.state}${s2.obsDate ? ` · D1 ${s2.obsDate}` : ''}`}>
+              Stage 2 strength
+            </th>
+            <th title="Stage 1 market-data gate">Stage 1</th>
+          </tr>
+        </thead>
+        <tbody>
+          {pairs.map((p, idx) => {
+            const inst = bySymbol.get(p.symbol);
+            const s1 = inst ? gatedState(inst) : 'BLOCKED';
+            return (
+              <tr
+                key={p.symbol}
+                className={selected === p.symbol ? 'row-selected' : ''}
+                onClick={() => setSelected(p.symbol)}
+                title={p.reason ?? ''}
+              >
+                <td>{idx + 1}</td>
+                <td>
+                  <b>{p.symbol}</b>
+                </td>
+                <td>
+                  <Badge tone={p.status !== 'READY' ? 'blue' : dir(p.bias)}>{p.status === 'READY' ? p.bias : 'WARMING UP'}</Badge>
+                </td>
+                <td className={(p.differential ?? 0) >= 0 ? 'positive' : 'negative'}>
+                  {p.differential == null ? '—' : `${p.differential > 0 ? '+' : ''}${p.differential.toFixed(2)}`}
+                </td>
+                <td>
+                  <b>{p.status === 'READY' && p.conviction != null ? p.conviction.toFixed(0) : '—'}</b>
+                </td>
+                <td>
+                  <small>{p.relationship.replace('_', ' ')}</small>
+                </td>
+                <td>
+                  <small>
+                    {p.baseRegime ?? '—'} · {p.quoteRegime ?? '—'}
+                  </small>
+                </td>
+                <td>
+                  <small className={s2.state === 'STALE' ? 'muted' : undefined}>
+                    {[p.base, p.quote]
+                      .map((c) => {
+                        const v = s2Asset.get(c)?.composite;
+                        return `${c} ${v == null ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(1)}`}`;
+                      })
+                      .join(' · ')}
+                  </small>
+                </td>
+                <td>
+                  <Badge tone={s1 === 'READY' ? 'green' : s1 === 'BLOCKED' ? 'red' : 'amber'}>{s1}</Badge>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
 export function Scanner() {
   const { instruments } = useTrading();
+  const { state } = useRegimeStore();
   const qualified = instruments.filter((x) => x.score >= 75);
+  const regimeReady = (state?.pairs ?? []).filter((p) => p.status === 'READY' && p.bias !== 'NEUTRAL');
   return (
     <>
       <PageHeader title="Market Scanner" subtitle="Ranks all 28 FX combinations plus XAUUSD and promotes the best candidates" />
@@ -312,6 +347,11 @@ export function Scanner() {
           <span>In database</span>
         </div>
         <i>→</i>
+        <div title="Pairs with a directional Stage 3 regime bias">
+          <b>{state ? regimeReady.length : '—'}</b>
+          <span>Regime directional</span>
+        </div>
+        <i>→</i>
         <div>
           <b>{qualified.length}</b>
           <span>Channel qualified</span>
@@ -322,6 +362,16 @@ export function Scanner() {
           <span>H1 ready</span>
         </div>
       </div>
+      <Card>
+        <div className="card-head">
+          <div>
+            <h3>Regime Conviction Ranking</h3>
+            <p>Published by Stage 2 strength and Stage 3 Historical Regime · base/quote differential, regime alignment, persistence and momentum</p>
+          </div>
+          <Badge tone={state?.pairs.length ? 'green' : 'gray'}>{state?.pairs.length ?? 0} pairs</Badge>
+        </div>
+        <RegimeConvictionTable />
+      </Card>
       <Card>
         <div className="card-head">
           <div>
@@ -356,96 +406,91 @@ function ChannelChart({ empty }: { empty?: boolean }) {
 }
 
 export function Vision() {
-  const { selected, instruments } = useTrading();
-  const x = instruments.find((i) => i.symbol === selected);
-  return (
-    <>
-      <PageHeader title="HTF Market Vision" subtitle="AI-assisted D1/H8 channel detection, touch validation and visual structure" />
-      {!x ? (
-        <Card>
-          <EmptyState title="No vision target" detail="Select an instrument after market state is stored in the database." />
-        </Card>
-      ) : (
-        <div className="grid-vision">
-          <Card>
-            <div className="card-head">
-              <div>
-                <h3>
-                  {x.symbol} · D1 Channel
-                </h3>
-                <p>Automatic structural vision</p>
-              </div>
-              <Badge tone={dir(x.d1)}>{x.d1}</Badge>
-            </div>
-            <ChannelChart empty />
-            <div className="vision-stats">
-              <span>
-                Position <b>{x.channelPos}%</b>
-              </span>
-              <span>
-                Confidence <b>{x.confidence}%</b>
-              </span>
-              <span>
-                Status <b>{x.state}</b>
-              </span>
-            </div>
-          </Card>
-          <Card>
-            <h3>Vision Interpretation</h3>
-            <div className="decision">
-              <Eye />
-              <b>{x.score >= 75 ? 'STRUCTURE PRESENT' : 'INSUFFICIENT DATA'}</b>
-              <p>
-                {x.score >= 75
-                  ? 'Stored HTF fields indicate an active structure for this symbol.'
-                  : 'Persist scored instrument rows from the analysis pipeline to enable vision.'}
-              </p>
-            </div>
-          </Card>
-        </div>
-      )}
-    </>
-  );
+  return <HtfVisionPage />;
 }
 
+/** Stage 6 consumes the Stage 5 contract; a direction is shown only for confirmed channels on READY data. */
 export function Direction() {
-  const { instruments } = useTrading();
+  const { instruments, setSelected } = useTrading();
+  const vstore = useVisionStore();
+  const vstatus = visionStageStatus(vstore);
+  const rows = [...(vstore.state?.instruments ?? [])].sort((a, b) => {
+    const ca = a.status === 'READY' && a.d1?.confirmed ? 1 : 0;
+    const cb = b.status === 'READY' && b.d1?.confirmed ? 1 : 0;
+    return cb - ca || b.confidence - a.confidence || a.symbol.localeCompare(b.symbol);
+  });
+  const diff = new Map(instruments.map((i) => [i.symbol, i.strengthDiff]));
+  const aligned = rows.filter((v) => v.status === 'READY' && v.agreement === 'AGREE').length;
+  const tfCell = (v: (typeof rows)[number], tf: 'd1' | 'h8') => {
+    const s = v[tf];
+    const d = tfDirection(v, tf);
+    return (
+      <span title={s?.reason ?? s?.dataReason}>
+        <small>
+          {tf.toUpperCase()} ·{' '}
+          {s?.dataStatus !== 'READY' ? s?.dataStatus?.replace(/_/g, ' ') : !s?.status ? 'NOT ANALYSED' : s.status === 'NONE' ? 'NO CHANNEL' : s.status}
+        </small>
+        <b className={d === 'BULLISH' ? 'positive' : d === 'BEARISH' ? 'negative' : 'muted'}>{d === 'BULLISH' ? '↑' : d === 'BEARISH' ? '↓' : '→'}</b>
+      </span>
+    );
+  };
   return (
     <>
-      <PageHeader title="Structural Direction" subtitle="Combines macro strength, historical regime and D1/H8 market vision" />
+      <PageHeader title="Structural Direction" subtitle="Combines macro strength, historical regime and D1/H8 market vision (Stage 5 → Stage 6)" />
+      {(vstore.error || vstatus === 'STALE') && (
+        <div className="hr-banner warn">
+          <AlertTriangle size={14} />
+          <span>
+            {vstore.error
+              ? `Stage 5 unavailable — ${vstore.error}. No structural direction is published.`
+              : 'Stage 5 output is stale — directions below are not treated as confirmed until the engine runs again.'}
+          </span>
+        </div>
+      )}
       <Card>
         <div className="card-head">
-          <h3>Multi-Timeframe Direction Board</h3>
-          <Badge tone="green">{instruments.filter((i) => i.d1 === i.h8 && i.d1 !== 'NEUTRAL').length} aligned</Badge>
+          <div>
+            <h3>Multi-Timeframe Direction Board</h3>
+            <p>
+              Stage 5 {vstatus} · {rows.filter((v) => v.status === 'READY' && v.d1?.confirmed).length} confirmed D1 channels · last run{' '}
+              {ageText(vstore.state?.run?.runAt)}
+            </p>
+          </div>
+          <Badge tone={aligned ? 'green' : 'gray'}>{aligned} D1/H8 aligned</Badge>
         </div>
-        {!instruments.length ? (
-          <EmptyState title="No direction board data" detail="Instrument rows from dbo.app_instruments populate this board." />
+        {!rows.length ? (
+          <EmptyState
+            title={vstore.loading ? 'Loading Stage 5 output…' : 'No structural direction'}
+            detail={vstore.error || 'HTF Market Vision has not published any instrument yet.'}
+          />
         ) : (
           <div className="direction-board">
-            {instruments.slice(0, 12).map((x) => (
-              <div key={x.symbol}>
-                <div>
-                  <b>{x.symbol}</b>
-                  <small>
-                    Strength Δ {x.strengthDiff > 0 ? '+' : ''}
-                    {x.strengthDiff}
-                  </small>
+            {rows.map((v) => {
+              const h = headline(v);
+              const d = diff.get(v.symbol);
+              const pos = visionPosition(v, 'd1');
+              return (
+                <div key={v.symbol} className="hr-click" onClick={() => setSelected(v.symbol)} title={[...v.reasoning, ...v.invalidation].join('\n')}>
+                  <div>
+                    <b className={v.symbol === 'XAUUSD' ? 'hr-gold' : undefined}>{v.symbol}</b>
+                    <small>
+                      Strength Δ {d == null ? '—' : `${d > 0 ? '+' : ''}${d.toFixed(2)}`} · {v.agreement} · {v.phase?.replace(/_/g, ' ') ?? '—'}
+                    </small>
+                  </div>
+                  {tfCell(v, 'd1')}
+                  {tfCell(v, 'h8')}
+                  <span>
+                    <small>Position</small>
+                    <b>{pos == null ? '—' : `${pos.toFixed(0)}%`}</b>
+                  </span>
+                  <span>
+                    <small>Confidence</small>
+                    <b>{v.status === 'BLOCKED' ? '—' : `${v.confidence.toFixed(0)}%`}</b>
+                  </span>
+                  <Badge tone={h.tone}>{h.label}</Badge>
                 </div>
-                <span>
-                  <small>D1</small>
-                  <b>{x.d1 === 'BULLISH' ? '↑' : x.d1 === 'BEARISH' ? '↓' : '→'}</b>
-                </span>
-                <span>
-                  <small>H8</small>
-                  <b>{x.h8 === 'BULLISH' ? '↑' : x.h8 === 'BEARISH' ? '↓' : '→'}</b>
-                </span>
-                <span>
-                  <small>Position</small>
-                  <b>{x.channelPos}%</b>
-                </span>
-                <Badge tone={dir(x.d1)}>{x.d1}</Badge>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Card>
@@ -455,7 +500,9 @@ export function Direction() {
 
 export function H1() {
   const { selected, instruments } = useTrading();
+  const vstore = useVisionStore();
   const x = instruments.find((i) => i.symbol === selected) || instruments[0];
+  const htfPos = x ? visionPosition(vstore.state?.instruments.find((v) => v.symbol === x.symbol), 'd1') : null;
   return (
     <>
       <PageHeader title="H1 Confirmation" subtitle="Final structure confirmation using BOS, CHoCH, momentum and pullback state" />
@@ -483,7 +530,7 @@ export function H1() {
             <h3>Confirmation Checklist</h3>
             {[
               ['HTF Direction', x.d1, x.d1 !== 'NEUTRAL'],
-              ['Channel Location', `${x.channelPos}%`, x.channelPos > 0],
+              ['Channel Location', htfPos == null ? 'No Stage 5 channel' : `${htfPos.toFixed(0)}%`, htfPos != null],
               ['Score', String(x.score), x.score > 0],
               ['H1 Phase', x.h1, !!x.h1],
             ].map(([a, b, ok]) => (

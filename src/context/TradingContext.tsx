@@ -4,6 +4,12 @@ import { loadAppState, saveAppState, type AppEvent } from '../services/appDb';
 import { mergeEnrichIntoInstruments, mergeTicksIntoInstruments, subscribeLiveFeed } from '../services/liveFeed';
 import { subscribeMT5 } from '../features/mt5-connection/services/cacsmsMT5Runtime';
 import { bridgeEnrich } from '../features/mt5-connection/services/mt5BridgeClient';
+import { getRegimeSnapshot, runRegimeNow, startRegimeStore, subscribeRegime } from '../features/historical-regime/services/regimeStore';
+import { startHistoryStore } from '../features/market-data/services/historyStore';
+import { publishStage2 } from '../features/currency-strength/services/strengthStage';
+import { getVisionSnapshot, startVisionStore, subscribeVision, visionStageStatus } from '../features/htf-vision/services/visionStore';
+import { instrumentFields, publishStage5 } from '../features/htf-vision/services/visionStage';
+import { eventBus } from '../services/eventBus';
 import type { CurrencyStrength, Instrument, Position } from '../types';
 
 type Ctx = {
@@ -41,13 +47,14 @@ function asInstrument(raw: unknown): Instrument | null {
     ask: Number(r.ask || 0),
     spread: Number(r.spread || 0),
     change: Number(r.change || 0),
-    d1: (r.d1 as Instrument['d1']) || 'NEUTRAL',
-    h8: (r.h8 as Instrument['h8']) || 'NEUTRAL',
+    // Structure fields are re-derived from Stage 5 on load, never trusted from the persisted snapshot.
+    d1: 'NEUTRAL',
+    h8: 'NEUTRAL',
     h1: String(r.h1 || 'Waiting'),
     score: Number(r.score || 0),
     state: (r.state as Instrument['state']) || 'WAIT',
     strengthDiff: Number(r.strengthDiff || 0),
-    channelPos: Number(r.channelPos || 50),
+    channelPos: 0,
     confidence: Number(r.confidence || 0),
   };
 }
@@ -120,6 +127,7 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const instrumentPersistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const skipPersist = useRef(true);
+  const dbLoaded = useRef(false);
   const instrumentsRef = useRef<Instrument[]>([]);
   const posRef = useRef<Position[]>([]);
   const strengthsRef = useRef<CurrencyStrength[]>([]);
@@ -151,7 +159,7 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
           },
           instruments: next.instruments ?? instrumentsRef.current,
           positions: next.positions ?? posRef.current,
-          strengths: next.strengths ?? strengthsRef.current,
+          ...(next.strengths ? { strengths: next.strengths } : {}),
           events: (next.events ?? []).filter((e) => !e.id),
         }).then((r) => {
           if (!r.ok) setDbError(r.message);
@@ -165,14 +173,22 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
   const scheduleInstrumentPersist = useCallback((rows: Instrument[]) => {
     if (instrumentPersistTimer.current) clearTimeout(instrumentPersistTimer.current);
     instrumentPersistTimer.current = setTimeout(() => {
-      void saveAppState({ instruments: rows });
+      void saveAppState({ instruments: rows }).then((r) => {
+        if (r.ok && dbLoaded.current) setDbError('');
+      });
     }, 8000);
   }, []);
 
   const refreshFromDb = useCallback(async () => {
     const data = await loadAppState();
-    if (data.ok === false && data.message) setDbError(data.message);
-    else setDbError('');
+    if (data.ok === false) {
+      // Keep whatever live state we already have; a failed read must not wipe settings/positions.
+      setDbError(data.message || 'App DB load failed');
+      setReady(true);
+      return;
+    }
+    setDbError('');
+    dbLoaded.current = true;
 
     const dbInstruments = (data.instruments || []).map(asInstrument).filter(Boolean) as Instrument[];
     const dbPositions = (data.positions || []).map(asPosition).filter(Boolean) as Position[];
@@ -213,6 +229,12 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void refreshFromDb();
   }, [refreshFromDb]);
+
+  useEffect(() => {
+    if (!dbError || dbLoaded.current) return;
+    const timer = window.setTimeout(() => void refreshFromDb(), 5000);
+    return () => window.clearTimeout(timer);
+  }, [dbError, refreshFromDb]);
 
   /** Start MT5 pulse only after first DB hydrate — avoids empty overwrite race. */
   useEffect(() => {
@@ -268,6 +290,90 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
       window.clearInterval(timer);
     };
   }, [ready, syncModuleExports, scheduleInstrumentPersist]);
+
+  /** Stage 1 historical data: the bridge synchronizes autonomously; closes drive downstream refreshes. */
+  useEffect(() => {
+    if (!ready) return;
+    const stop = startHistoryStore();
+    const refreshRegime = (e: { payload: Record<string, unknown> }) => {
+      if (e.payload.source === 'history') void runRegimeNow();
+    };
+    const offs = (['D1_CLOSE', 'W1_CLOSE', 'MN_CLOSE'] as const).map((t) => eventBus.on(t, refreshRegime));
+    return () => {
+      offs.forEach((off) => off());
+      stop();
+    };
+  }, [ready]);
+
+  /** Stage 3 regime engine owns strength trajectories; the bridge persists them, so no client write-back. */
+  useEffect(() => {
+    if (!ready) return;
+    const stop = startRegimeStore();
+    let lastFetch: number | null = null;
+    const apply = () => {
+      const snap = getRegimeSnapshot();
+      if (!snap.state || snap.lastFetchAt === lastFetch) return;
+      lastFetch = snap.lastFetchAt;
+      const rows = (snap.state.strengths || []).map(asStrength).filter(Boolean) as CurrencyStrength[];
+      if (rows.length) {
+        strengthsRef.current = rows;
+        setStrengthsState(rows);
+      }
+      const pairs = new Map(snap.state.pairs.map((p) => [p.symbol, p]));
+      setInstrumentsState((prev) => {
+        const next = prev.map((i) => {
+          const p = pairs.get(i.symbol);
+          if (!p) return i;
+          const d = p.status === 'READY' && p.differential != null ? p.differential : 0;
+          return d !== i.strengthDiff ? { ...i, strengthDiff: d } : i;
+        });
+        syncModuleExports(next, posRef.current, strengthsRef.current);
+        return next;
+      });
+      publishStage2(snap.state);
+    };
+    apply();
+    const unsub = subscribeRegime(apply);
+    return () => {
+      unsub();
+      stop();
+    };
+  }, [ready, syncModuleExports]);
+
+  /** Stage 5 HTF Market Vision owns the D1/H8 structure fields; the bridge analyses autonomously. */
+  useEffect(() => {
+    if (!ready) return;
+    const stop = startVisionStore();
+    let lastKey = '';
+    const apply = () => {
+      const snap = getVisionSnapshot();
+      const status = visionStageStatus(snap);
+      const key = `${snap.lastFetchAt}|${status}`;
+      if (key === lastKey) return;
+      lastKey = key;
+      const usable = status === 'HEALTHY' || status === 'DEGRADED';
+      const bySymbol = new Map((usable ? snap.state?.instruments ?? [] : []).map((v) => [v.symbol, v]));
+      setInstrumentsState((prev) => {
+        let changed = false;
+        const next = prev.map((i) => {
+          const f = instrumentFields(bySymbol.get(i.symbol));
+          if (f.d1 === i.d1 && f.h8 === i.h8 && f.channelPos === i.channelPos) return i;
+          changed = true;
+          return { ...i, ...f };
+        });
+        if (!changed) return prev;
+        syncModuleExports(next, posRef.current, strengthsRef.current);
+        return next;
+      });
+      if (usable) publishStage5(snap.state);
+    };
+    apply();
+    const unsub = subscribeVision(apply);
+    return () => {
+      unsub();
+      stop();
+    };
+  }, [ready, syncModuleExports]);
 
   const setAuto = (v: boolean) => {
     setAutoState(v);

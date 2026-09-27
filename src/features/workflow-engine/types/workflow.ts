@@ -1,4 +1,4 @@
-export type StageStatus='running'|'completed'|'waiting'|'blocked'|'error'|'paused';
+export type StageStatus='running'|'completed'|'waiting'|'blocked'|'error'|'paused'|'warming'|'healthy'|'stale';
 export type Direction='BULLISH'|'BEARISH'|'RANGE'|'NEUTRAL';
 export interface StageRuntime {
   id: number;

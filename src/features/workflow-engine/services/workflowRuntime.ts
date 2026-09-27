@@ -10,7 +10,14 @@ import { SYSTEM } from '../../../config/system';
 import { assertExecutionSafe } from '../../mt5-connection/services/mt5ConnectionAdapter';
 import { getMT5Snapshot, getStage9ExecutionSummary } from '../../mt5-connection/services/cacsmsMT5Runtime';
 import { assessInstrument } from '../../market-data/services/stage1Gate';
+import { getHistorySnapshot, historyReadyCount } from '../../market-data/services/historyStore';
 import { STAGE_DEFINITIONS } from '../data/stageDefinitions';
+import { getPairRegime, getRegimeSnapshot, regimeRunAgeMs, regimeStageStatus } from '../../historical-regime/services/regimeStore';
+import type { RegimeStageStatus } from '../../historical-regime/types';
+import { stage2Output } from '../../currency-strength/services/strengthStage';
+import type { DataState } from '../../currency-strength/services/strengthModel';
+import { getVisionSnapshot, visionRunAgeMs, visionStageStatus, type VisionStageStatus } from '../../htf-vision/services/visionStore';
+import { stage5Output } from '../../htf-vision/services/visionStage';
 import type {
   InstrumentTrace,
   StageRuntime,
@@ -105,6 +112,72 @@ function pushStageLatency(id: number, ms: number) {
   stageLatencyHistory.set(id, hist.slice(-12));
 }
 
+const REGIME_STAGE_STATUS: Record<RegimeStageStatus, StageStatus> = {
+  WAITING: 'waiting',
+  'WARMING UP': 'warming',
+  RUNNING: 'running',
+  HEALTHY: 'healthy',
+  STALE: 'stale',
+  BLOCKED: 'blocked',
+  ERROR: 'error',
+};
+
+const STRENGTH_STAGE_STATUS: Record<DataState, StageStatus> = {
+  LOADING: 'waiting',
+  DISCONNECTED: 'error',
+  ERROR: 'error',
+  EMPTY: 'waiting',
+  WARMING_UP: 'warming',
+  STALE: 'stale',
+  CURRENT: 'healthy',
+};
+
+const VISION_STAGE_STATUS: Record<VisionStageStatus, StageStatus> = {
+  WAITING: 'waiting',
+  HEALTHY: 'healthy',
+  DEGRADED: 'running',
+  STALE: 'stale',
+  ERROR: 'error',
+};
+
+function regimeLabel(symbol: string): string {
+  const p = getPairRegime(symbol);
+  if (!p) return getRegimeSnapshot().state ? 'NO DATA' : 'WAITING';
+  if (p.status !== 'READY') return 'WARMING UP';
+  return p.conviction != null ? `${p.bias} · ${Math.round(p.conviction)}` : p.bias;
+}
+
+function regimeStageDetail() {
+  const snap = getRegimeSnapshot();
+  const s = snap.state;
+  const assets = s?.assets ?? [];
+  const classified = assets.filter((a) => a.latest?.regime);
+  const pairsReady = (s?.pairs ?? []).filter((p) => p.status === 'READY').length;
+  const confidence = classified.length
+    ? Math.round(classified.reduce((a, x) => a + (x.latest?.confidence ?? 0), 0) / classified.length)
+    : 0;
+  const obs = assets.map((a) => a.observations);
+  const minObs = obs.length ? Math.min(...obs.map((o) => o.collected)) : 0;
+  const required = obs[0]?.required ?? 0;
+  const age = regimeRunAgeMs(snap);
+  return {
+    status: regimeStageStatus(snap),
+    classified: classified.length,
+    total: assets.length,
+    pairsReady,
+    pairsTotal: s?.pairs.length ?? 0,
+    transitions: s?.transitions.length ?? 0,
+    confidence,
+    minObs,
+    required,
+    bars: assets[0]?.bars.collected ?? null,
+    latency: snap.lastRunLatencyMs ?? s?.run?.durationMs ?? 0,
+    freshnessSec: age == null ? 0 : Math.round(age / 1000),
+    updatedAt: s?.run?.runAt,
+    message: snap.error || s?.run?.message || '',
+  };
+}
+
 function currentStage(i: Instrument, riskApproved: boolean, open: boolean) {
   if (open) return 9;
   if (i.state === 'READY' && riskApproved) return 8;
@@ -132,6 +205,36 @@ let deps: RuntimeDeps = {
   getRiskLimit: () => SYSTEM.safety.defaultRiskPct,
   getPositions: () => positions,
 };
+
+/**
+ * Candle closes persisted by the historical synchronizer and Stage 2 strength publications advance
+ * the stages the orchestrator routes them to.
+ */
+(
+  [
+    'MN_CLOSE',
+    'W1_CLOSE',
+    'D1_CLOSE',
+    'H8_CLOSE',
+    'H1_CLOSE',
+    'M15_CLOSE',
+    'M5_CLOSE',
+    'DATA_EVENT',
+    'STRENGTH_CHANGE',
+    'STRUCTURE_CHANGE',
+    'CHANNEL_APPROACH',
+    'CHANNEL_BREAK',
+  ] as const
+).forEach((type) =>
+  eventBus.on(type, (e) => {
+    const src = e.payload.source;
+    if ((src !== 'history' && src !== 'strength' && src !== 'vision') || !Array.isArray(e.payload.stages)) return;
+    for (const stage of e.payload.stages as number[]) {
+      stageProcessed.set(stage, (stageProcessed.get(stage) ?? 0) + 1);
+      stageUpdated.set(stage, e.at);
+    }
+  }),
+);
 
 function emit(type: TradingEvent['type'], symbol: string | undefined, payload: Record<string, unknown>, stage: number) {
   const event: TradingEvent = {
@@ -194,7 +297,7 @@ function buildTrace(symbol: string): { trace: InstrumentTrace; world: WorldModel
       world.macro.bias === 'BULLISH' || world.macro.bias === 'BEARISH' || world.macro.bias === 'NEUTRAL'
         ? world.macro.bias
         : 'NEUTRAL',
-    regime: world.regime.state,
+    regime: regimeLabel(symbol),
     d1: world.d1.direction === 'BULLISH' ? 'ASCENDING' : world.d1.direction === 'BEARISH' ? 'DESCENDING' : 'RANGE',
     h8: world.h8.direction === 'BULLISH' ? 'ASCENDING' : world.h8.direction === 'BEARISH' ? 'DESCENDING' : 'RANGE',
     h1: mapH1(world.h1.phase),
@@ -214,7 +317,7 @@ function buildTrace(symbol: string): { trace: InstrumentTrace; world: WorldModel
     ask: instrument.ask,
     spread: instrument.spread,
     strength: world.macro.bias,
-    regime: world.regime.state,
+    regime: trace.regime,
     d1: trace.d1,
     h8: trace.h8,
     h1: trace.h1,
@@ -242,6 +345,10 @@ function stageStatus(id: number, traces: InstrumentTrace[]): StageStatus {
     return 'running';
   }
 
+  if (id === 2) return STRENGTH_STAGE_STATUS[stage2Output().state];
+  if (id === 3) return REGIME_STAGE_STATUS[regimeStageStatus()];
+  if (id === 5) return VISION_STAGE_STATUS[visionStageStatus()];
+
   if (id === 9 && !executionEnabled) return 'blocked';
   if (id === 9 && !deps.getAuto()) return 'waiting';
   if (id >= 8 && traces.every((t) => t.decision === 'WAIT' || t.decision === 'BLOCKED')) return 'waiting';
@@ -258,6 +365,11 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
   const mode = resolveEngineMode();
   const liveCount = instruments.filter((i) => i.bid > 0 && i.ask > 0).length;
   const stage1Pass = instruments.filter((i) => assessInstrument(i).pass).length;
+  const hist = historyReadyCount();
+  const histStatus = getHistorySnapshot().status;
+  const histLabel = histStatus
+    ? `History READY ${hist.ready}/${hist.total} · series ${histStatus.summary.ready}/${histStatus.summary.series}`
+    : 'History status loading';
 
   if (feedMs > 0) pushStageLatency(1, feedMs);
 
@@ -283,6 +395,7 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
         ? [
             'Broker/MT5 feed adapter',
             `Live quotes ${liveCount}/${allPairs.length}`,
+            histStatus ? `Historical store ${histStatus.summary.candles.toLocaleString()} candles` : 'Historical store —',
             `Mode ${mode}`,
           ]
         : [
@@ -295,6 +408,7 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
       id === 1
         ? [
             `Validated snapshots ${liveCount}`,
+            histLabel,
             `Stage 1 pass ${stage1Pass}/${allPairs.length}`,
           ]
         : id === 2
@@ -323,7 +437,9 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
         : status === 'blocked'
           ? id === 1
             ? stage1Pass === 0 && liveCount > 0
-              ? 'Stage 1 fail-closed — no valid+fresh instrument'
+              ? hist.ready === 0
+                ? `Stage 1 fail-closed — ${histLabel}; no instrument has complete, valid, fresh history`
+                : 'Stage 1 fail-closed — no valid+fresh instrument'
               : 'Execution permission disabled — fail-closed'
             : 'Execution permission disabled — fail-closed'
           : status === 'waiting'
@@ -333,6 +449,126 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
               : 'Processing current market state';
 
     stageUpdated.set(id, stageUpdated.get(id) ?? now);
+
+    if (id === 2 && status !== 'paused') {
+      const s2 = stage2Output();
+      const r = regimeStageDetail();
+      const ready = s2.assets.filter((a) => a.composite != null);
+      const s2Conf = ready.length ? Math.round(ready.reduce((a, x) => a + (x.confidence ?? 0), 0) / ready.length) : 0;
+      return {
+        id,
+        name: def.name,
+        status,
+        confidence: s2Conf,
+        latencyMs: r.latency,
+        latencyHistory: stageLatencyHistory.get(3) ?? (r.latency > 0 ? [r.latency] : []),
+        freshnessSec: r.freshnessSec,
+        input: [
+          'MT5 D1 closes · 28 FX + XAUUSD (Stage 1 history)',
+          'Basket-relative Q63/M21/W5/D1 returns',
+          s2.obsDate ? `Latest closed D1 ${s2.obsDate}` : 'Latest closed D1 —',
+        ],
+        output: [
+          `Strength ${ready.length}/9 assets · macro (Q+M) + current (W+D)`,
+          s2.strongest && s2.weakest
+            ? `Strongest ${s2.strongest} · weakest ${s2.weakest} · spread ${s2.spread?.toFixed(2)}`
+            : 'Strong/weak spread —',
+          `Differentials ${s2.pairs.filter((p) => p.differential != null).length}/${s2.pairs.length} → Historical Regime, Market Scanner`,
+        ],
+        message:
+          status === 'waiting'
+            ? 'Awaiting first strength snapshot from the MT5 bridge'
+            : status === 'warming'
+              ? 'Warming up — collecting closed D1 observations; no strength fabricated'
+              : status === 'stale'
+                ? `Strength output stale — last D1 close ${s2.obsDate ?? '—'}`
+                : status === 'error'
+                  ? r.message || 'Strength engine unavailable'
+                  : 'Strength matrix current',
+        updatedAt: r.updatedAt ?? now,
+        processed: stageProcessed.get(2) ?? ready.length,
+        failed,
+      };
+    }
+
+    if (id === 3 && status !== 'paused') {
+      const r = regimeStageDetail();
+      if (r.latency > 0 && stageLatency.get(3) !== r.latency) pushStageLatency(3, r.latency);
+      const updatedAt = r.updatedAt ?? now;
+      return {
+        id,
+        name: def.name,
+        status,
+        confidence: r.confidence,
+        latencyMs: r.latency,
+        latencyHistory: stageLatencyHistory.get(3) ?? (r.latency > 0 ? [r.latency] : []),
+        freshnessSec: r.freshnessSec,
+        input: [
+          'Stage 2 strength trajectories · 8 currencies + XAU',
+          r.bars != null ? `D1 bars ${r.bars}` : 'D1 bars —',
+          `Closed observations ${r.minObs}/${r.required} required`,
+        ],
+        output: [
+          `Regimes ${r.classified}/${r.total || 9} assets`,
+          `Pair intelligence ${r.pairsReady}/${r.pairsTotal} → Market Scanner`,
+          `Transitions recorded ${r.transitions}`,
+        ],
+        message:
+          status === 'waiting'
+            ? 'Awaiting first regime run from the MT5 bridge'
+            : status === 'warming'
+              ? `Warming up — ${r.minObs}/${r.required} closed observations; no classification fabricated`
+              : status === 'stale'
+                ? `Regime output stale (${r.freshnessSec}s since last run)`
+                : r.message || 'Regime classification current',
+        updatedAt,
+        processed: r.classified,
+        failed,
+      };
+    }
+
+    if (id === 5 && status !== 'paused') {
+      const snap = getVisionSnapshot();
+      const s5 = stage5Output();
+      const run = snap.state?.run;
+      const ready = s5.instruments.filter((v) => v.status === 'READY');
+      const scored = ready.filter((v) => v.d1?.confirmed);
+      const conf = scored.length ? Math.round(scored.reduce((a, v) => a + v.confidence, 0) / scored.length) : 0;
+      const lat = run?.durationMs ?? 0;
+      if (lat > 0 && stageLatency.get(5) !== lat) pushStageLatency(5, lat);
+      const age = visionRunAgeMs(snap);
+      const breaks = s5.instruments.filter((v) => v.d1?.breakout || v.h8?.breakout).length;
+      return {
+        id,
+        name: def.name,
+        status,
+        confidence: conf,
+        latencyMs: lat,
+        latencyHistory: stageLatencyHistory.get(5) ?? (lat > 0 ? [lat] : []),
+        freshnessSec: age == null ? 0 : Math.round(age / 1000),
+        input: [
+          `Market Scanner qualified ${s5.qualified}/${s5.instruments.length || allPairs.length}`,
+          'Stage 1 validated D1/H8 closed candles',
+          run?.triggers?.length ? `Triggers ${run.triggers.slice(0, 3).join(', ')}` : 'Triggers —',
+        ],
+        output: [
+          `Confirmed D1 channels ${s5.confirmedD1} · READY ${ready.length}/${s5.instruments.length}`,
+          `D1/H8 agree ${s5.agree} · conflict ${s5.conflict} · breakouts ${breaks}`,
+          'Channel, phase, position, confidence → Structural Direction',
+        ],
+        message:
+          status === 'waiting'
+            ? 'Awaiting first HTF Market Vision run from the MT5 bridge'
+            : status === 'stale'
+              ? `Vision output stale (${age == null ? '—' : Math.round(age / 60000)}m since last run)`
+              : status === 'error'
+                ? snap.error || 'Vision engine unavailable'
+                : run?.message || 'Channel structure current',
+        updatedAt: run?.runAt ?? now,
+        processed: stageProcessed.get(5) ?? s5.instruments.length,
+        failed: failed + (run?.failedNow ?? 0),
+      };
+    }
 
     return {
       id,
@@ -361,12 +597,15 @@ function toWorkflowEvents(): WorkflowEvent[] {
 
   return eventBus.recent(45).map((e) => {
     const stage = typeof e.payload.stage === 'number' ? e.payload.stage : 1;
+    const histSeverity = e.payload.source === 'history' ? e.payload.severity : undefined;
     const severity: WorkflowEvent['severity'] =
-      e.type === 'SPREAD_SPIKE' || e.type === 'RISK_EVENT'
-        ? 'warning'
-        : e.type === 'CHANNEL_BREAK' || e.type === 'POSITION_EVENT'
-          ? 'success'
-          : 'info';
+      histSeverity === 'ERROR'
+        ? 'error'
+        : histSeverity === 'WARNING' || e.type === 'SPREAD_SPIKE' || e.type === 'RISK_EVENT'
+          ? 'warning'
+          : e.type === 'CHANNEL_BREAK' || e.type === 'POSITION_EVENT'
+            ? 'success'
+            : 'info';
     const latencyMs = typeof e.payload.latencyMs === 'number' ? e.payload.latencyMs : undefined;
     return {
       id: e.id,

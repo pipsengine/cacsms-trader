@@ -1,4 +1,6 @@
 import type { Instrument } from '../../../types';
+import type { HistorySeries, HistoryStatusCode } from './historyClient';
+import { getInstrumentHistoryGate } from './historyStore';
 import { isFxMarketOpen } from './sessions';
 
 export type QualityIssue = {
@@ -16,7 +18,8 @@ export type Stage1Gate = {
   pass: boolean;
   reason: string;
   freshnessSec: number | null;
-  quality: 'GOOD' | 'STALE' | 'INVALID' | 'CLOSED';
+  quality: 'GOOD' | 'STALE' | 'INVALID' | 'CLOSED' | 'HISTORY';
+  history: HistoryStatusCode;
 };
 
 const STALE_SEC_OPEN = 120;
@@ -33,29 +36,33 @@ export function assessInstrument(i: Instrument & { lastTickAt?: string }, now = 
   const marketOpen = isFxMarketOpen(now);
   const fresh = freshnessSec(i.lastTickAt, now.getTime());
   const limit = marketOpen ? STALE_SEC_OPEN : STALE_SEC_CLOSED;
+  const hist = getInstrumentHistoryGate(i.symbol);
+  const base = { symbol: i.symbol, freshnessSec: fresh, history: hist.code };
 
   if (!i.bid || !i.ask) {
-    return { symbol: i.symbol, pass: false, reason: 'Missing bid/ask', freshnessSec: fresh, quality: 'INVALID' };
+    return { ...base, pass: false, reason: 'Missing bid/ask', quality: 'INVALID' };
   }
   if (i.ask < i.bid) {
-    return { symbol: i.symbol, pass: false, reason: 'Invalid OHLC/tick (ask < bid)', freshnessSec: fresh, quality: 'INVALID' };
+    return { ...base, pass: false, reason: 'Invalid OHLC/tick (ask < bid)', quality: 'INVALID' };
+  }
+  if (!hist.pass) {
+    return { ...base, pass: false, reason: `History ${hist.code}: ${hist.reason}`, quality: 'HISTORY' };
   }
   if (fresh != null && fresh > limit) {
     return {
-      symbol: i.symbol,
+      ...base,
       pass: false,
       reason: marketOpen ? `Stale feed (${fresh}s)` : `No weekend ticks (${fresh}s since last)`,
-      freshnessSec: fresh,
       quality: marketOpen ? 'STALE' : 'CLOSED',
     };
   }
   if (i.state === 'BLOCKED') {
-    return { symbol: i.symbol, pass: false, reason: 'Instrument state BLOCKED', freshnessSec: fresh, quality: 'INVALID' };
+    return { ...base, pass: false, reason: 'Instrument state BLOCKED', quality: 'INVALID' };
   }
   if (!marketOpen) {
-    return { symbol: i.symbol, pass: false, reason: 'FX market closed (weekend)', freshnessSec: fresh, quality: 'CLOSED' };
+    return { ...base, pass: false, reason: 'FX market closed (weekend)', quality: 'CLOSED' };
   }
-  return { symbol: i.symbol, pass: true, reason: 'Valid + fresh', freshnessSec: fresh, quality: 'GOOD' };
+  return { ...base, pass: true, reason: 'Valid + fresh · history READY', quality: 'GOOD' };
 }
 
 export function buildQualityIssues(
@@ -70,7 +77,7 @@ export function buildQualityIssues(
       id: `${i.symbol}-${gate.quality}`,
       symbol: i.symbol,
       timeframe: 'TICK',
-      severity: gate.quality === 'INVALID' ? 'ERROR' : gate.quality === 'STALE' ? 'WARNING' : 'INFO',
+      severity: gate.quality === 'INVALID' ? 'ERROR' : gate.quality === 'STALE' || gate.quality === 'HISTORY' ? 'WARNING' : 'INFO',
       reason: gate.reason,
       lastValid: i.lastTickAt,
       blocksTrading: !gate.pass && gate.quality !== 'CLOSED',
@@ -88,6 +95,44 @@ export function buildQualityIssues(
     }
   }
   return issues.sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
+/** Historical series issues produced by the bridge validation engine (the single source for candle quality). */
+export function historyQualityIssues(series: HistorySeries[]): QualityIssue[] {
+  const out: QualityIssue[] = [];
+  for (const s of series) {
+    const blocks = s.status !== 'READY';
+    const last = s.latestTs != null ? new Date(s.latestTs * 1000).toISOString() : undefined;
+    for (const [n, i] of (s.issues || []).entries()) {
+      if (i.severity === 'INFO' && !blocks) continue;
+      out.push({
+        id: `${s.symbol}-${s.timeframe}-${i.code}-${n}`,
+        symbol: s.symbol,
+        timeframe: s.timeframe,
+        severity: i.severity,
+        reason: `${i.code}: ${i.message}`,
+        lastValid: last,
+        blocksTrading: blocks && i.severity !== 'INFO',
+      });
+    }
+    if (blocks && !(s.issues || []).some((i) => i.severity !== 'INFO')) {
+      out.push({
+        id: `${s.symbol}-${s.timeframe}-${s.status}`,
+        symbol: s.symbol,
+        timeframe: s.timeframe,
+        severity: s.status === 'VALIDATION_FAILED' || s.status === 'PROVIDER_OFFLINE' ? 'ERROR' : 'WARNING',
+        reason: `${s.status}: ${s.reason || 'not ready'}`,
+        lastValid: last,
+        blocksTrading: true,
+      });
+    }
+  }
+  return out;
+}
+
+/** Instrument state after Stage 1 fail-closed: anything without valid+fresh data cannot be READY. */
+export function gatedState(i: Instrument & { lastTickAt?: string }, now = new Date()): Instrument['state'] {
+  return assessInstrument(i, now).pass ? i.state : 'BLOCKED';
 }
 
 export function stage1Summary(instruments: Array<Instrument & { lastTickAt?: string }>, now = new Date()) {

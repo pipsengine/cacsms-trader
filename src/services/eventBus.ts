@@ -1,4 +1,4 @@
-export type TradingEventType = 'TICK'|'H1_CLOSE'|'H8_CLOSE'|'D1_CLOSE'|'MN_CLOSE'|'CHANNEL_APPROACH'|'CHANNEL_BREAK'|'STRENGTH_CHANGE'|'SPREAD_SPIKE'|'POSITION_EVENT'|'RISK_EVENT';
+export type TradingEventType = 'TICK'|'H1_CLOSE'|'H8_CLOSE'|'D1_CLOSE'|'W1_CLOSE'|'MN_CLOSE'|'M15_CLOSE'|'M5_CLOSE'|'DATA_EVENT'|'CHANNEL_APPROACH'|'CHANNEL_BREAK'|'STRENGTH_CHANGE'|'STRUCTURE_CHANGE'|'SPREAD_SPIKE'|'POSITION_EVENT'|'RISK_EVENT';
 export interface TradingEvent { id:string; type:TradingEventType; symbol?:string; at:string; payload:Record<string,unknown>; }
 type Handler=(event:TradingEvent)=>void;
 export class EventBus { private handlers=new Map<TradingEventType,Set<Handler>>(); private history:TradingEvent[]=[];

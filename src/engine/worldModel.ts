@@ -1,4 +1,7 @@
 import { Instrument } from '../types';
+import { getVisionInstrument } from '../features/htf-vision/services/visionStore';
+import { tfDirection, visionPosition } from '../features/htf-vision/services/visionStage';
+import type { VisionInstrument } from '../features/htf-vision/types';
 
 export type ChannelStatus =
   | 'FORMING'
@@ -21,10 +24,24 @@ export interface WorldState {
   risk: { approved: boolean; score: number; reason: string };
 }
 
+/** D1/H8 structure from Stage 5; unconfirmed or unavailable structure is FORMING/NEUTRAL with zero confidence. */
+function htf(v: VisionInstrument | undefined, tf: 'd1' | 'h8'): WorldState['d1'] {
+  const s = v?.[tf];
+  const usable = !!v && (v.status === 'READY' || v.status === 'STALE') && s?.dataStatus === 'READY';
+  const status: ChannelStatus = usable && s?.status && s.status !== 'NONE' ? s.status : 'FORMING';
+  return {
+    status,
+    direction: tfDirection(v, tf),
+    position: usable ? visionPosition(v, tf) ?? 0 : 0,
+    confidence: usable ? s?.confidence ?? 0 : 0,
+  };
+}
+
 /** Derive world-model row from live instrument state — never invent quote quality. */
 export function createWorldState(i: Instrument): WorldState {
   const validQuote = i.bid > 0 && i.ask >= i.bid;
   const conf = Number.isFinite(i.confidence) ? i.confidence : 0;
+  const v = getVisionInstrument(i.symbol);
   const dataQuality = validQuote ? Math.min(100, Math.max(conf, i.score > 0 ? 50 : 25)) : 0;
 
   return {
@@ -41,18 +58,8 @@ export function createWorldState(i: Instrument): WorldState {
       state: Math.abs(i.strengthDiff) > 8 ? 'EXPANDING' : 'STABLE',
       persistence: Math.min(95, 55 + Math.abs(i.strengthDiff) * 2),
     },
-    d1: {
-      status: validQuote ? 'ACTIVE' : 'FORMING',
-      direction: i.d1,
-      position: i.channelPos,
-      confidence: conf,
-    },
-    h8: {
-      status: validQuote ? 'ACTIVE' : 'FORMING',
-      direction: i.h8,
-      position: Math.max(0, i.channelPos - 5),
-      confidence: Math.max(0, conf - 4),
-    },
+    d1: htf(v, 'd1'),
+    h8: htf(v, 'h8'),
     h1: {
       phase: i.h1,
       choch: i.h1 === 'Confirmed',

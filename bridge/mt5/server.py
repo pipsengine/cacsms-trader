@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import os
+import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,25 +23,46 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 try:
+    import history
+    import history_store
+    import regime
+    import vision
+    import vision_service
+    import vision_store
     from db import (
         delete_account,
+        ensure_regime_schema,
         health as db_health,
         list_accounts,
         list_positions,
         load_app_state,
+        load_regime_state,
+        regime_history,
+        regime_load_states,
+        regime_persist,
         replace_positions,
         save_app_state,
+        save_regime_meta,
         upsert_account,
     )
 except ImportError:
+    from bridge.mt5 import history, history_store  # type: ignore
+    from bridge.mt5 import regime  # type: ignore
+    from bridge.mt5 import vision, vision_service, vision_store  # type: ignore
     from bridge.mt5.db import (  # type: ignore
         delete_account,
+        ensure_regime_schema,
         health as db_health,
         list_accounts,
         list_positions,
         load_app_state,
+        load_regime_state,
+        regime_history,
+        regime_load_states,
+        regime_persist,
         replace_positions,
         save_app_state,
+        save_regime_meta,
         upsert_account,
     )
 
@@ -51,6 +74,21 @@ SECRETS_PATH = DATA / "secrets.json"
 MT5_PATH = os.environ.get("MT5_TERMINAL_PATH", "").strip() or None
 
 DATA.mkdir(parents=True, exist_ok=True)
+
+# The MetaTrader5 package is not thread-safe and can block the whole interpreter when
+# called concurrently, so every MT5 command runs under this lock. SQL-only routes do not.
+_MT5_LOCK = threading.RLock()
+_mt5_ready_path: str | None = None
+_mt5_ready = False
+
+
+def _mt5_serialized(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with _MT5_LOCK:
+            return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def _load_secrets() -> dict[str, Any]:
@@ -127,13 +165,20 @@ def _mt5_time(ts: int) -> str:
 
 
 def _ensure_terminal(path: str | None = None) -> tuple[bool, str]:
-    kwargs: dict[str, Any] = {}
+    global _mt5_ready, _mt5_ready_path
     terminal = path or MT5_PATH
+    same_terminal = not terminal or terminal == _mt5_ready_path
+    if _mt5_ready and same_terminal and mt5.terminal_info() is not None:
+        return True, "ok"
+    kwargs: dict[str, Any] = {}
     if terminal:
         kwargs["path"] = terminal
     if not mt5.initialize(**kwargs):
+        _mt5_ready = False
         err = mt5.last_error()
         return False, f"MT5 initialize failed: {err}"
+    _mt5_ready = True
+    _mt5_ready_path = terminal
     return True, "ok"
 
 
@@ -153,6 +198,7 @@ def _login_if_needed(login: int, password: str | None, server: str | None) -> tu
     return True, "logged_in"
 
 
+@_mt5_serialized
 def cmd_health() -> dict[str, Any]:
     ok, msg = _ensure_terminal()
     if not ok:
@@ -179,6 +225,7 @@ def cmd_health() -> dict[str, Any]:
     }
 
 
+@_mt5_serialized
 def cmd_pulse(body: dict[str, Any]) -> dict[str, Any]:
     """Fast 1Hz account + positions + ticks. Does not write SQL (caller may throttle persist)."""
     login_raw = body.get("login")
@@ -335,11 +382,12 @@ def _symbol_enrich(symbol: str) -> dict[str, Any]:
     score += min(25, abs(change) * 8)
     score = round(min(99, score), 1)
 
+    # Stale quotes fail closed before any setup scoring can qualify the symbol.
     state = "WAIT"
-    if score >= 75 and h1_phase == "Confirmed":
-        state = "READY"
-    elif tick.time and (time.time() - int(tick.time)) > 3600:
+    if tick.time and (time.time() - int(tick.time)) > 3600:
         state = "BLOCKED"
+    elif score >= 75 and h1_phase == "Confirmed":
+        state = "READY"
 
     bars = {
         "D1": int(len(d1)) if d1 is not None else 0,
@@ -364,7 +412,6 @@ def _symbol_enrich(symbol: str) -> dict[str, Any]:
             "state": state,
             "confidence": round(min(99, score + 5), 1),
             "channelPos": 50,
-            "strengthDiff": round(change, 1),
             "bars": bars,
             "tradeMode": int(info.trade_mode) if info else None,
             "digits": int(info.digits) if info else None,
@@ -373,6 +420,7 @@ def _symbol_enrich(symbol: str) -> dict[str, Any]:
     return out
 
 
+@_mt5_serialized
 def cmd_enrich(body: dict[str, Any]) -> dict[str, Any]:
     ok, msg = _ensure_terminal(body.get("path"))
     if not ok:
@@ -390,6 +438,7 @@ def cmd_enrich(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@_mt5_serialized
 def cmd_bars(body: dict[str, Any]) -> dict[str, Any]:
     symbol = str(body.get("symbol") or "").strip()
     timeframe = str(body.get("timeframe") or "H1").upper()
@@ -403,26 +452,17 @@ def cmd_bars(body: dict[str, Any]) -> dict[str, Any]:
 
     mt5.symbol_select(symbol, True)
     if timeframe == "H8":
-        # Build H8 from H1 (8 bars)
-        raw = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, count * 8)
+        # Canonical H8 on server-day 00/08/16 boundaries, same derivation as the historical store.
+        raw = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, count * 8 + 8)
         if raw is None:
             return {"ok": False, "message": f"No H1 rates for H8: {mt5.last_error()}", "bars": []}
-        bars = []
-        chunk: list[Any] = []
-        for r in raw:
-            chunk.append(r)
-            if len(chunk) == 8:
-                bars.append(
-                    {
-                        "time": _mt5_time(int(chunk[0]["time"])),
-                        "open": float(chunk[0]["open"]),
-                        "high": float(max(x["high"] for x in chunk)),
-                        "low": float(min(x["low"] for x in chunk)),
-                        "close": float(chunk[-1]["close"]),
-                        "volume": int(sum(x["tick_volume"] for x in chunk)),
-                    }
-                )
-                chunk = []
+        h1 = [(int(r["time"]), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
+               int(r["tick_volume"]), int(r["spread"])) for r in raw]
+        derived = history.derive_h8(h1, 2**40)
+        bars = [
+            {"time": _mt5_time(r[0]), "open": r[1], "high": r[2], "low": r[3], "close": r[4], "volume": r[5]}
+            for r in derived
+        ]
         return {"ok": True, "symbol": symbol, "timeframe": "H8", "bars": bars[-count:], "count": len(bars[-count:])}
 
     tf = _tf_const(timeframe)
@@ -445,6 +485,192 @@ def cmd_bars(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "symbol": symbol, "timeframe": timeframe, "bars": bars, "count": len(bars)}
 
 
+@_mt5_serialized
+def _regime_terminal_ready() -> tuple[bool, str]:
+    ok, msg = _ensure_terminal()
+    if not ok:
+        return False, msg
+    term = mt5.terminal_info()
+    if not term or not term.connected:
+        return False, "MT5 terminal not connected to broker"
+    return True, "ok"
+
+
+@_mt5_serialized
+def _regime_fetch_symbol(sym: str, count: int) -> dict[str, Any] | None:
+    mt5.symbol_select(sym, True)
+    rates = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_D1, 0, count)
+    if rates is None or len(rates) == 0:
+        return None
+    tick = mt5.symbol_info_tick(sym)
+    return {
+        "times": [int(r["time"]) for r in rates],
+        "closes": [float(r["close"]) for r in rates],
+        "tickTime": int(tick.time) if tick else 0,
+        "nowTs": int(time.time()),
+    }
+
+
+def _regime_fetch(count: int) -> tuple[bool, str, dict[str, dict[str, Any]]]:
+    # Lock per symbol so a first-time history download never stalls the 1Hz pulse for the whole run.
+    ok, msg = _regime_terminal_ready()
+    if not ok:
+        return False, msg, {}
+    out: dict[str, dict[str, Any]] = {}
+    for sym in regime.SYMBOLS:
+        payload = _regime_fetch_symbol(sym, count)
+        if payload:
+            out[sym] = payload
+    return True, "ok", out
+
+
+_REGIME_RUN_LOCK = threading.Lock()
+
+
+def _regime_config() -> dict[str, Any]:
+    return {k: v for k, v in regime.CONFIG.items()}
+
+
+def cmd_regime_run(_body: dict[str, Any]) -> dict[str, Any]:
+    """Stage 3: fetch D1 closes, continue regime hysteresis incrementally, persist, return DB state."""
+    with _REGIME_RUN_LOCK:
+        started = time.time()
+        ensure_regime_schema()
+        ok, msg, data = _regime_fetch(int(regime.CONFIG["barsToFetch"]))
+        run_at = datetime.now(timezone.utc).isoformat()
+        if not ok or not data:
+            meta = {
+                "status": "BLOCKED",
+                "message": msg if not ok else "MT5 returned no D1 history",
+                "runAt": run_at,
+                "durationMs": int((time.time() - started) * 1000),
+                "config": _regime_config(),
+                "assets": {},
+            }
+            save_regime_meta(meta)
+            state = load_regime_state()
+            state.update({"ok": False, "message": meta["message"]})
+            return state
+
+        result = regime.run(data, regime_load_states())
+        statuses = {m["status"] for m in result["assets"].values()}
+        status = "HEALTHY" if statuses == {"CLASSIFIED"} else "WARMING_UP"
+        message = (
+            f"{sum(1 for m in result['assets'].values() if m['status'] == 'CLASSIFIED')}/{len(regime.ASSETS)} assets classified"
+            f" from {result['bars']} D1 bars"
+        )
+        if result["missing"]:
+            message += f"; missing symbols: {', '.join(result['missing'])}"
+        meta = {
+            "status": status,
+            "message": message,
+            "runAt": run_at,
+            "durationMs": 0,
+            "latestObsDate": result["latestDate"],
+            "forming": result["forming"],
+            "missing": result["missing"],
+            "config": _regime_config(),
+            "assets": result["assets"],
+        }
+        written = regime_persist(result, meta)
+        meta["durationMs"] = int((time.time() - started) * 1000)
+        meta["written"] = written
+        save_regime_meta(meta)
+        state = load_regime_state()
+        state.update({"ok": True, "message": message})
+        return state
+
+
+_REGIME_TRIGGER_TFS = {"D1", "W1", "MN1"}
+_regime_trigger_pending = threading.Event()
+
+
+def _regime_trigger_loop() -> None:
+    while True:
+        _regime_trigger_pending.wait()
+        time.sleep(10)  # coalesce the burst of closes across all 29 symbols
+        _regime_trigger_pending.clear()
+        try:
+            state = cmd_regime_run({})
+            history_store.event_add("DOWNSTREAM", "INFO", f"Stage 3 regime re-run after candle close: {state.get('message')}")
+        except Exception as exc:
+            history_store.event_add("DOWNSTREAM", "ERROR", f"Stage 3 regime re-run failed: {exc}")
+
+
+@_mt5_serialized
+def _vision_ticks(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Live bid/ask for Stage 5 boundary monitoring; never initializes the terminal itself."""
+    if not _mt5_ready:
+        return {}
+    offset = HISTORY.server_offset
+    out: dict[str, dict[str, Any]] = {}
+    for sym in symbols:
+        t = mt5.symbol_info_tick(sym)
+        if t is not None and t.bid:
+            utc = int(t.time) - offset if offset is not None else None
+            out[sym] = {"bid": float(t.bid), "ask": float(t.ask), "time": utc}
+    return out
+
+
+VISION = vision_service.VisionService(_vision_ticks)
+
+
+def _on_candles(timeframe: str, symbols: list[str], kind: str = "INCREMENTAL") -> None:
+    if timeframe in _REGIME_TRIGGER_TFS and kind == "INCREMENTAL":
+        _regime_trigger_pending.set()
+    VISION.on_candles(timeframe, symbols, kind)
+
+
+HISTORY = history.HistoryService(history.MT5Provider(mt5, _MT5_LOCK, _ensure_terminal), on_candles=_on_candles)
+
+
+def cmd_vision_chart(symbol: str, timeframe: str, bars: int) -> dict[str, Any]:
+    """Chart payload: stored closed candles from the Stage 1 store + the persisted Stage 5 channel projected onto them."""
+    cfg = vision.TF_CFG[timeframe]
+    bars = max(60, min(int(bars), 1500))
+    rows = history_store.candle_tail(symbol, timeframe, max(bars, cfg["lookback"]) + vision_service.CONFIG["extraBars"])
+    if not rows:
+        return {"ok": True, "symbol": symbol, "timeframe": timeframe, "candles": [], "swings": [], "lines": [], "channel": None}
+    view = rows[-bars:]
+    first = view[0][0]
+    ch = vision_store.channel_analysis(symbol, timeframe)
+    a = (ch or {}).get("analysis")
+    lines = vision.channel_lines((a or {}).get("def"), [r[0] for r in rows], 12, timeframe)
+    return {
+        "ok": True, "symbol": symbol, "timeframe": timeframe,
+        "candles": [{"ts": r[0], "open": r[1], "high": r[2], "low": r[3], "close": r[4]} for r in view],
+        "swings": [s for s in vision.swing_points(timeframe, rows) if s["ts"] >= first],
+        "lines": [x for x in lines if x["ts"] >= first],
+        "channel": ch,
+    }
+
+
+def _q(qs: dict[str, list[str]], key: str) -> str | None:
+    v = (qs.get(key) or [""])[0].strip()
+    return v or None
+
+
+def _history_target(body: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    symbol = (str(body.get("symbol") or "").strip().upper()) or None
+    timeframe = (str(body.get("timeframe") or "").strip().upper()) or None
+    if symbol and symbol not in history.SYMBOLS:
+        return None, None, f"Unknown instrument {symbol}"
+    if timeframe and timeframe not in history.TF_SPEC:
+        return None, None, f"Unknown timeframe {timeframe}"
+    return symbol, timeframe, None
+
+
+def cmd_history_series(symbol: str, timeframe: str) -> dict[str, Any]:
+    row = history_store.series_all().get((symbol, timeframe))
+    return {
+        "ok": True,
+        "series": history_store.series_dict(row) if row else None,
+        "jobs": history_store.jobs_recent(40, symbol, timeframe),
+        "candles": history_store.candle_page(symbol, timeframe, 300),
+    }
+
+
+@_mt5_serialized
 def cmd_sync(body: dict[str, Any]) -> dict[str, Any]:
     login_raw = body.get("login")
     if login_raw is None:
@@ -548,6 +774,7 @@ def cmd_sync(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@_mt5_serialized
 def cmd_test(body: dict[str, Any]) -> dict[str, Any]:
     login_raw = body.get("login")
     password = body.get("password")
@@ -685,12 +912,71 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/app/state":
                 self._json(200, load_app_state())
                 return
+            if parsed.path == "/regime/state":
+                self._json(200, load_regime_state())
+                return
+            if parsed.path == "/regime/history":
+                qs = parse_qs(parsed.query)
+                asset = (qs.get("asset") or [""])[0].upper()
+                if asset not in regime.ASSETS:
+                    self._json(400, {"ok": False, "message": f"Unknown asset {asset}"})
+                    return
+                limit = int((qs.get("limit") or ["260"])[0])
+                self._json(200, {"ok": True, "asset": asset, "history": regime_history(asset, limit)})
+                return
+            if parsed.path.startswith("/vision/"):
+                qs = parse_qs(parsed.query)
+                if parsed.path == "/vision/state":
+                    state = vision_store.load_state()
+                    state["service"] = {k: VISION.meta.get(k) for k in ("status", "message", "runAt", "runs", "errors", "lastError")}
+                    self._json(200, state)
+                    return
+                symbol = (_q(qs, "symbol") or "").upper()
+                if symbol not in regime.SYMBOLS:
+                    self._json(400, {"ok": False, "message": f"Unknown symbol {symbol}"})
+                    return
+                if parsed.path == "/vision/detail":
+                    self._json(200, vision_store.load_detail(symbol))
+                    return
+                if parsed.path == "/vision/chart":
+                    tf = (_q(qs, "timeframe") or "D1").upper()
+                    if tf not in vision.TF_CFG:
+                        self._json(400, {"ok": False, "message": f"Unsupported timeframe {tf}"})
+                        return
+                    self._json(200, cmd_vision_chart(symbol, tf, int(_q(qs, "bars") or 240)))
+                    return
             if parsed.path == "/sync":
                 qs = parse_qs(parsed.query)
                 body = {k: v[0] for k, v in qs.items()}
                 result = cmd_sync(body)
                 self._json(200 if result.get("ok") else 400, result)
                 return
+            if parsed.path.startswith("/history/"):
+                qs = parse_qs(parsed.query)
+                if parsed.path == "/history/status":
+                    self._json(200, HISTORY.status())
+                    return
+                if parsed.path in ("/history/series", "/history/candles"):
+                    symbol, timeframe, err = _history_target({"symbol": _q(qs, "symbol"), "timeframe": _q(qs, "timeframe")})
+                    if err or not symbol or not timeframe:
+                        self._json(400, {"ok": False, "message": err or "symbol and timeframe required"})
+                        return
+                    if parsed.path == "/history/series":
+                        self._json(200, cmd_history_series(symbol, timeframe))
+                    else:
+                        before = _q(qs, "before")
+                        limit = max(1, min(int(_q(qs, "limit") or 300), 5000))
+                        self._json(200, {"ok": True, "candles": history_store.candle_page(
+                            symbol, timeframe, limit, int(before) if before else None)})
+                    return
+                if parsed.path == "/history/events":
+                    after = int(_q(qs, "after") or 0)
+                    self._json(200, {"ok": True, "events": history_store.events_after(after, int(_q(qs, "limit") or 200))})
+                    return
+                if parsed.path == "/history/jobs":
+                    self._json(200, {"ok": True, "jobs": history_store.jobs_recent(
+                        int(_q(qs, "limit") or 100), _q(qs, "symbol"), _q(qs, "timeframe"))})
+                    return
             self._json(404, {"ok": False, "message": f"Unknown path {parsed.path}"})
         except Exception as exc:  # pragma: no cover
             self._json(500, {"ok": False, "message": str(exc), "trace": traceback.format_exc()})
@@ -711,6 +997,16 @@ class Handler(BaseHTTPRequestHandler):
                 result = cmd_enrich(body)
                 self._json(200 if result.get("ok") else 400, result)
                 return
+            if parsed.path == "/regime/run":
+                result = cmd_regime_run(body)
+                self._json(200, result)
+                return
+            if parsed.path == "/vision/run":
+                symbol = str(body.get("symbol") or "").upper()
+                targets = [symbol] if symbol in regime.SYMBOLS else list(regime.SYMBOLS)
+                result = VISION.run({s: "MANUAL" for s in targets})
+                self._json(200, {"ok": True, **result, "state": vision_store.load_state()})
+                return
             if parsed.path == "/bars":
                 result = cmd_bars(body)
                 self._json(200 if result.get("ok") else 400, result)
@@ -730,6 +1026,21 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/app/state":
                 result = save_app_state(body)
                 self._json(200 if result.get("ok") else 400, result)
+                return
+            if parsed.path in ("/history/sync", "/history/repair", "/history/validate"):
+                symbol, timeframe, err = _history_target(body)
+                if err:
+                    self._json(400, {"ok": False, "message": err})
+                    return
+                if parsed.path == "/history/validate":
+                    self._json(200, HISTORY.validate_all(symbol, timeframe))
+                else:
+                    self._json(200, HISTORY.enqueue_manual("sync" if parsed.path == "/history/sync" else "repair", symbol, timeframe))
+                return
+            if parsed.path == "/history/config":
+                if "executionTimeframes" in body:
+                    HISTORY.set_exec_enabled(bool(body["executionTimeframes"]))
+                self._json(200, {"ok": True, "executionEnabled": HISTORY.exec_enabled()})
                 return
             self._json(404, {"ok": False, "message": f"Unknown path {parsed.path}"})
         except Exception as exc:  # pragma: no cover
@@ -773,10 +1084,26 @@ def main() -> None:
     try:
         db = db_health()
         print(f"[mt5-bridge] database: {db}")
+        ensure_regime_schema()
+        print("[mt5-bridge] regime schema ready")
+        history_store.ensure_history_schema()
+        vision_store.ensure_vision_schema()
+        print("[mt5-bridge] vision schema ready")
+        history_ready = True
     except Exception as exc:
+        history_ready = False
         print(f"[mt5-bridge] database warning: {exc}")
+    ThreadingHTTPServer.request_queue_size = 64
+    ThreadingHTTPServer.daemon_threads = True
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"[mt5-bridge] listening on http://{HOST}:{PORT}")
+    # Bound before touching MT5: a terminal busy downloading history can block initialize() for minutes.
+    if history_ready:
+        HISTORY.start()
+        threading.Thread(target=_regime_trigger_loop, name="regime-trigger", daemon=True).start()
+        print("[mt5-bridge] autonomous historical synchronizer started")
+        VISION.start()
+        print("[mt5-bridge] Stage 5 HTF Market Vision engine started")
     print("[mt5-bridge] keep MetaTrader 5 running; Ctrl+C to stop")
     try:
         server.serve_forever()
