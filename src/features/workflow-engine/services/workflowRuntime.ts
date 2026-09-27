@@ -1,14 +1,15 @@
-import { allPairs, instruments, positions, strengths } from '../../../data/market';
+import { allPairs, instruments, positions } from '../../../data/market';
 import type { Instrument } from '../../../types';
 import { createWorldState, type WorldState } from '../../../engine/worldModel';
 import { executionGate, routeEvent, type GateResult, type MarketEvent } from '../../../engine/orchestrator';
 import { qualifyRisk } from '../../../engine/risk';
 import { eventBus, type TradingEvent } from '../../../services/eventBus';
 import { decisionAudit } from '../../../services/decisionAudit';
-import { brokerGateway } from '../../../services/brokerGateway';
+import { brokerGateway, type GatewayMode } from '../../../services/brokerGateway';
 import { SYSTEM } from '../../../config/system';
 import { assertExecutionSafe } from '../../mt5-connection/services/mt5ConnectionAdapter';
 import { getMT5Snapshot, getStage9ExecutionSummary } from '../../mt5-connection/services/cacsmsMT5Runtime';
+import { assessInstrument } from '../../market-data/services/stage1Gate';
 import { STAGE_DEFINITIONS } from '../data/stageDefinitions';
 import type {
   InstrumentTrace,
@@ -27,67 +28,28 @@ type RuntimeDeps = {
 };
 
 const iso = () => new Date().toISOString();
-const strengthOf = (code: string) => strengths.find((s) => s.code === code)?.score ?? 0;
 
-function hash(symbol: string) {
-  return [...symbol].reduce((a, c) => a + c.charCodeAt(0), 0);
-}
-
-/** Expand the 12 detailed fixtures to the full 29-instrument universe using strength differentials. */
+/** Resolve instrument from persisted market state — never invent mock quotes. */
 export function resolveInstrument(symbol: string): Instrument {
   const existing = instruments.find((i) => i.symbol === symbol);
   if (existing) return existing;
 
   const gold = symbol === 'XAUUSD';
-  const base = gold ? 'XAU' : symbol.slice(0, 3);
-  const quote = gold ? 'USD' : symbol.slice(3, 6);
-  const diff = +(strengthOf(base) - strengthOf(quote)).toFixed(1);
-  const h = hash(symbol);
-  const score = Math.max(55, Math.min(95, Math.round(62 + Math.abs(diff) * 2.2 + (h % 9))));
-  const confidence = Math.max(60, Math.min(96, score - 2 + (h % 5)));
-  const d1 = diff > 2 ? 'BULLISH' : diff < -2 ? 'BEARISH' : 'NEUTRAL';
-  const h8 = Math.abs(diff) > 1.5 ? d1 : 'NEUTRAL';
-  const h1 =
-    score >= 86 && Math.abs(diff) > 8
-      ? 'Confirmed'
-      : score >= 78
-        ? 'Pullback'
-        : Math.abs(diff) < 2
-          ? 'Range'
-          : 'Waiting';
-  const state =
-    h1 === 'Confirmed' && score >= 80
-      ? 'READY'
-      : score < 68
-        ? 'BLOCKED'
-        : 'WAIT';
-
-  const mid = gold
-    ? 2030 + (h % 40) + Math.abs(diff)
-    : base === 'JPY' || quote === 'JPY'
-      ? 90 + (h % 100) + Math.abs(diff)
-      : 0.65 + (h % 80) / 100 + Math.abs(diff) / 100;
-
-  const digits = gold || quote === 'JPY' || base === 'JPY' ? 2 : 5;
-  const spread = gold ? 1.9 : quote === 'JPY' ? 1.8 : 1.0;
-  const bid = +mid.toFixed(digits);
-  const ask = +(mid + (gold ? 0.19 : quote === 'JPY' ? 0.018 : 0.00008)).toFixed(digits);
-
   return {
     symbol,
     kind: gold ? 'GOLD' : 'FX',
-    bid,
-    ask,
-    spread,
-    change: +(((h % 17) - 8) / 20).toFixed(2),
-    d1,
-    h8,
-    h1,
-    score,
-    state,
-    strengthDiff: diff,
-    channelPos: Math.max(8, Math.min(88, 20 + (h % 55))),
-    confidence,
+    bid: 0,
+    ask: 0,
+    spread: 0,
+    change: 0,
+    d1: 'NEUTRAL',
+    h8: 'NEUTRAL',
+    h1: 'Waiting',
+    score: 0,
+    state: 'WAIT',
+    strengthDiff: 0,
+    channelPos: 50,
+    confidence: 0,
   };
 }
 
@@ -101,9 +63,46 @@ function mapH1(phase: string) {
 
 function mapDecision(i: Instrument, riskApproved: boolean, open: boolean): InstrumentTrace['decision'] {
   if (open) return 'OPEN';
-  if (i.state === 'BLOCKED' || !riskApproved) return 'BLOCKED';
+  const stage1 = assessInstrument(i);
+  if (!stage1.pass || i.state === 'BLOCKED') return 'BLOCKED';
   if (i.state === 'READY' && riskApproved) return 'READY';
   return 'WAIT';
+}
+
+function resolveEngineMode(): GatewayMode {
+  const mt5 = getMT5Snapshot();
+  const connected = mt5.accounts.filter((a) => a.state === 'HEALTHY' || a.state === 'DEGRADED');
+  if (!connected.length) {
+    brokerGateway.mode = 'SIMULATION';
+    return 'SIMULATION';
+  }
+  if (connected.some((a) => a.accountClass === 'LIVE')) {
+    brokerGateway.mode = 'LIVE';
+    return 'LIVE';
+  }
+  brokerGateway.mode = 'PAPER';
+  return 'PAPER';
+}
+
+function feedLatencyMs(): number {
+  const ms = getMT5Snapshot().health.feedLatencyMs;
+  return typeof ms === 'number' && Number.isFinite(ms) ? Math.max(0, Math.round(ms)) : 0;
+}
+
+function eventsPerMinute(): number {
+  const cutoff = Date.now() - 60_000;
+  return eventBus.recent(1000).filter((e) => {
+    const t = Date.parse(e.at);
+    return Number.isFinite(t) && t >= cutoff;
+  }).length;
+}
+
+function pushStageLatency(id: number, ms: number) {
+  if (!Number.isFinite(ms) || ms < 0) return;
+  stageLatency.set(id, Math.round(ms));
+  const hist = stageLatencyHistory.get(id) ?? [];
+  hist.push(Math.round(ms));
+  stageLatencyHistory.set(id, hist.slice(-12));
 }
 
 function currentStage(i: Instrument, riskApproved: boolean, open: boolean) {
@@ -120,11 +119,11 @@ let cycle = 1;
 let monitoringPaused = false;
 let executionEnabled = false;
 let lastHeartbeat = iso();
-let queueDepth = 0;
 let errors = 0;
 const stageFailures = new Map<number, number>();
 const stageProcessed = new Map<number, number>();
 const stageLatency = new Map<number, number>();
+const stageLatencyHistory = new Map<number, number[]>();
 const stageUpdated = new Map<number, string>();
 const worldCache = new Map<string, WorldState>();
 let deps: RuntimeDeps = {
@@ -143,7 +142,6 @@ function emit(type: TradingEvent['type'], symbol: string | undefined, payload: R
     payload: { ...payload, stage },
   };
   eventBus.emit(event);
-  queueDepth = Math.max(0, eventBus.recent(50).length % 9);
   lastHeartbeat = iso();
 }
 
@@ -181,6 +179,14 @@ function buildTrace(symbol: string): { trace: InstrumentTrace; world: WorldModel
   const stage = currentStage(instrument, approved, open);
   const confidence = Math.round((instrument.confidence + world.d1.confidence + world.h8.confidence) / 3);
 
+  const stage1 = assessInstrument(instrument);
+  const riskLabel = !stage1.pass
+    ? `S1 ${stage1.quality}`
+    : approved
+      ? 'PASS'
+      : risk.reasons[0]
+        ? 'BLOCK'
+        : 'WATCH';
   const trace: InstrumentTrace = {
     symbol,
     assetClass: instrument.kind === 'GOLD' ? 'METAL' : 'FX',
@@ -192,11 +198,11 @@ function buildTrace(symbol: string): { trace: InstrumentTrace; world: WorldModel
     d1: world.d1.direction === 'BULLISH' ? 'ASCENDING' : world.d1.direction === 'BEARISH' ? 'DESCENDING' : 'RANGE',
     h8: world.h8.direction === 'BULLISH' ? 'ASCENDING' : world.h8.direction === 'BEARISH' ? 'DESCENDING' : 'RANGE',
     h1: mapH1(world.h1.phase),
-    risk: approved ? 'PASS' : risk.reasons[0] ? 'BLOCK' : 'WATCH',
+    risk: riskLabel,
     decision,
     confidence,
     updatedAt: new Date(world.updatedAt).toISOString(),
-    stage,
+    stage: !stage1.pass ? 1 : stage,
   };
 
   const heat = deps.getPositions().filter((p) => p.status === 'ACTIVE').reduce((a, p) => a + p.risk, 0);
@@ -226,36 +232,59 @@ function buildTrace(symbol: string): { trace: InstrumentTrace; world: WorldModel
 function stageStatus(id: number, traces: InstrumentTrace[]): StageStatus {
   if (monitoringPaused) return 'paused';
   if ((stageFailures.get(id) ?? 0) > 4) return 'error';
+
+  if (id === 1) {
+    if (!instruments.length) return 'waiting';
+    const liveQuotes = instruments.filter((i) => i.bid > 0 && i.ask > 0).length;
+    if (!liveQuotes) return 'waiting';
+    const pass = instruments.filter((i) => assessInstrument(i).pass).length;
+    if (pass === 0) return 'blocked';
+    return 'running';
+  }
+
   if (id === 9 && !executionEnabled) return 'blocked';
   if (id === 9 && !deps.getAuto()) return 'waiting';
   if (id >= 8 && traces.every((t) => t.decision === 'WAIT' || t.decision === 'BLOCKED')) return 'waiting';
   const active = traces.filter((t) => t.stage >= id).length;
   if (active === 0 && id > 4) return 'waiting';
+  // Downstream stages wait while Stage 1 has no pass-through instruments.
+  if (id > 1 && traces.every((t) => t.decision === 'BLOCKED' && t.stage <= 1)) return 'waiting';
   return 'running';
 }
 
 function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
   const now = iso();
+  const feedMs = feedLatencyMs();
+  const mode = resolveEngineMode();
+  const liveCount = instruments.filter((i) => i.bid > 0 && i.ask > 0).length;
+  const stage1Pass = instruments.filter((i) => assessInstrument(i).pass).length;
+
+  if (feedMs > 0) pushStageLatency(1, feedMs);
+
   return STAGE_DEFINITIONS.map((def) => {
     const id = def.id;
-    const related = traces.filter((t) => t.stage >= id || id <= 2);
+    const related = traces.filter((t) => (id === 1 ? true : t.stage >= id));
     const confidence = related.length
       ? Math.round(related.reduce((a, t) => a + t.confidence, 0) / related.length)
-      : 70;
-    const latency =
-      stageLatency.get(id) ??
-      Math.max(12, Math.min(def.slaMs, Math.round(def.slaMs * (0.35 + (cycle % 7) * 0.05))));
+      : 0;
+    const latency = stageLatency.get(id) ?? (id === 1 ? feedMs : 0);
     const freshness = Math.max(
       0,
       Math.round((Date.now() - new Date(stageUpdated.get(id) ?? now).getTime()) / 1000),
     );
-    const processed = stageProcessed.get(id) ?? cycle * allPairs.length + id * 11;
+    const processed =
+      stageProcessed.get(id) ??
+      (id === 1 ? liveCount : related.filter((t) => t.decision !== 'BLOCKED' || t.stage >= id).length);
     const failed = stageFailures.get(id) ?? 0;
     const status = stageStatus(id, traces);
 
     const input =
       id === 1
-        ? ['Broker/feed adapter', `Universe ${SYSTEM.universe.total} instruments`, `Mode ${SYSTEM.mode}`]
+        ? [
+            'Broker/MT5 feed adapter',
+            `Live quotes ${liveCount}/${allPairs.length}`,
+            `Mode ${mode}`,
+          ]
         : [
             `Stage ${id - 1} committed output`,
             `Market World Model v${cycle}`,
@@ -264,13 +293,16 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
 
     const output =
       id === 1
-        ? ['Validated bid/ask/spread snapshot', 'Session & quality flags']
+        ? [
+            `Validated snapshots ${liveCount}`,
+            `Stage 1 pass ${stage1Pass}/${allPairs.length}`,
+          ]
         : id === 2
           ? ['Currency & XAU strength matrix']
           : id === 3
             ? ['Regime classification & persistence']
             : id === 4
-              ? ['Ranked 29-instrument candidate list']
+              ? [`Ranked ${allPairs.length}-instrument candidate list`]
               : id === 5
                 ? ['D1/H8 channel vision state']
                 : id === 6
@@ -289,12 +321,18 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
       status === 'paused'
         ? 'Monitoring paused — observation queues held'
         : status === 'blocked'
-          ? 'Execution permission disabled — fail-closed'
+          ? id === 1
+            ? stage1Pass === 0 && liveCount > 0
+              ? 'Stage 1 fail-closed — no valid+fresh instrument'
+              : 'Execution permission disabled — fail-closed'
+            : 'Execution permission disabled — fail-closed'
           : status === 'waiting'
             ? 'Awaiting qualifying upstream event'
             : status === 'error'
               ? 'Stage degraded — retries in progress'
               : 'Processing current market state';
+
+    stageUpdated.set(id, stageUpdated.get(id) ?? now);
 
     return {
       id,
@@ -302,6 +340,7 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
       status,
       confidence,
       latencyMs: latency,
+      latencyHistory: stageLatencyHistory.get(id) ?? (latency > 0 ? [latency] : []),
       freshnessSec: freshness,
       input,
       output,
@@ -317,19 +356,18 @@ let seeded = false;
 function toWorkflowEvents(): WorkflowEvent[] {
   if (!seeded) {
     seeded = true;
-    emit('TICK', undefined, { detail: 'Workflow engine attached to Market World Model' }, 1);
-    emit('STRENGTH_CHANGE', undefined, { detail: 'Currency & XAU strength matrix loaded' }, 2);
-    emit('H8_CLOSE', allPairs[0], { detail: 'HTF vision refresh for primary instruments' }, 5);
+    emit('TICK', undefined, { detail: 'Workflow engine attached — awaiting DB/MT5 market state' }, 1);
   }
 
-  return eventBus.recent(45).map((e, i) => {
-    const stage = typeof e.payload.stage === 'number' ? e.payload.stage : 1 + (i % 10);
+  return eventBus.recent(45).map((e) => {
+    const stage = typeof e.payload.stage === 'number' ? e.payload.stage : 1;
     const severity: WorkflowEvent['severity'] =
       e.type === 'SPREAD_SPIKE' || e.type === 'RISK_EVENT'
         ? 'warning'
         : e.type === 'CHANNEL_BREAK' || e.type === 'POSITION_EVENT'
           ? 'success'
           : 'info';
+    const latencyMs = typeof e.payload.latencyMs === 'number' ? e.payload.latencyMs : undefined;
     return {
       id: e.id,
       time: e.at,
@@ -343,7 +381,7 @@ function toWorkflowEvents(): WorkflowEvent[] {
           : typeof e.payload.reason === 'string'
             ? e.payload.reason
             : 'World model / stage state updated',
-      latencyMs: typeof e.payload.latencyMs === 'number' ? e.payload.latencyMs : 20 + ((i * 11) % 180),
+      ...(latencyMs != null ? { latencyMs } : {}),
     };
   });
 }
@@ -366,14 +404,25 @@ function evaluateExecutionPermission(): { permitted: boolean; reason: string } {
     return { permitted: false, reason: 'Live broker bridge not configured — fail-closed' };
   }
 
-  const gates: GateResult[] = allPairs.slice(0, 8).map((symbol, idx) => {
+  // Stage 1: at least one instrument must pass market-data freshness/validity (instrument-scoped).
+  const stage1Pass = instruments.some((i) => assessInstrument(i).pass);
+  if (instruments.length && !stage1Pass) {
+    return { permitted: false, reason: 'Stage 1 BLOCKED — no instrument has valid+fresh market data' };
+  }
+
+  const gates: GateResult[] = allPairs.map((symbol) => {
     const { instrument, world } = ensureWorld(symbol);
     const risk = riskFor(instrument);
-    const pass = world.dataQuality > 99 && (risk.approved || instrument.score >= 80) && world.updatedAt > Date.now() - 60_000;
+    const s1 = assessInstrument(instrument);
+    const pass =
+      s1.pass &&
+      world.dataQuality > 0 &&
+      (risk.approved || instrument.score >= 80) &&
+      world.updatedAt > Date.now() - 60_000;
     return {
-      pass: idx === 0 ? world.dataQuality > 99 : pass || instrument.state !== 'BLOCKED',
-      stage: risk.approved ? 8 : 7,
-      reason: risk.approved ? 'Risk approved' : risk.reasons[0] ?? 'Awaiting confirmation',
+      pass: s1.pass && world.dataQuality > 0 && (pass || instrument.state !== 'BLOCKED'),
+      stage: !s1.pass ? 1 : risk.approved ? 8 : 7,
+      reason: !s1.pass ? s1.reason : risk.approved ? 'Risk approved' : risk.reasons[0] ?? 'Awaiting confirmation',
       confidence: instrument.confidence,
     };
   });
@@ -389,7 +438,7 @@ function evaluateExecutionPermission(): { permitted: boolean; reason: string } {
     reason: `MT5 account ${eligible.name} ready (${eligible.currency})`,
     confidence: 94,
   };
-  const result = executionGate([freshnessGate, ...gates.slice(0, 3), mt5Gate]);
+  const result = executionGate([freshnessGate, ...gates.filter((g) => g.pass).slice(0, 3), mt5Gate]);
   return { permitted: result.permitted, reason: result.reason };
 }
 
@@ -405,19 +454,16 @@ export function getWorkflowSnapshot(): WorkflowSnapshot {
   const built = allPairs.map((symbol) => buildTrace(symbol));
   const instrumentRows = built.map((b) => b.trace);
   const worldRows = built.map((b) => b.world);
+
+  const liveCount = instruments.filter((i) => i.bid > 0 && i.ask > 0).length;
+  stageProcessed.set(1, liveCount);
+  stageUpdated.set(1, iso());
+  const feedMs = feedLatencyMs();
+  if (feedMs > 0) pushStageLatency(1, feedMs);
+
   const stages = buildStages(instrumentRows);
-
-  // Light autonomous tick while monitoring is active — keeps telemetry alive without mutating trading logic.
-  if (!monitoringPaused && cycle % 4 === 0) {
-    const routed = routeEvent('TICK' as MarketEvent);
-    emit('TICK', instrumentRows[cycle % instrumentRows.length]?.symbol, {
-      detail: `Orchestrator routed ${routed.event} → stages ${routed.stages.join(',')}`,
-      latencyMs: 18 + (cycle % 40),
-      stages: routed.stages,
-    }, routed.stages[0] ?? 1);
-  }
-
-  const throughput = Math.round(90 + instrumentRows.filter((t) => t.stage >= 5).length * 3 + (deps.getAuto() ? 20 : 0));
+  const recent = eventBus.recent(50);
+  const queueDepth = recent.filter((e) => Date.now() - Date.parse(e.at) < 5_000).length;
 
   return {
     stages,
@@ -427,11 +473,11 @@ export function getWorkflowSnapshot(): WorkflowSnapshot {
     engine: {
       running: !monitoringPaused,
       executionEnabled,
-      mode: SYSTEM.mode,
+      mode: resolveEngineMode(),
       cycle,
       lastHeartbeat,
       queueDepth,
-      throughput,
+      throughput: eventsPerMinute(),
       errors,
     },
   };
@@ -465,16 +511,18 @@ export const workflowActions = {
     }
   },
   reevaluate(symbol?: string) {
-    const targets = symbol ? [symbol] : allPairs.slice(0, 8);
+    const targets = symbol ? [symbol] : [...allPairs];
+    const started = performance.now();
     for (const s of targets) {
       worldCache.delete(s);
       const { instrument, world } = ensureWorld(s);
       const risk = riskFor(instrument);
       const routed = routeEvent('H1_CLOSE');
+      const elapsed = Math.max(0, Math.round(performance.now() - started));
       for (const stage of routed.stages) {
         stageProcessed.set(stage, (stageProcessed.get(stage) ?? 0) + 1);
         stageUpdated.set(stage, iso());
-        stageLatency.set(stage, 20 + (hash(s + stage) % 90));
+        pushStageLatency(stage, elapsed || feedLatencyMs());
       }
       decisionAudit.append({
         id: `audit-${s}-${Date.now()}`,
@@ -496,10 +544,11 @@ export const workflowActions = {
     cycle += 2;
   },
   retry(stage: number) {
+    const started = performance.now();
     stageFailures.set(stage, Math.max(0, (stageFailures.get(stage) ?? 1) - 1));
     stageProcessed.set(stage, (stageProcessed.get(stage) ?? 0) + allPairs.length);
     stageUpdated.set(stage, iso());
-    stageLatency.set(stage, 15 + (stage * 9) % 60);
+    pushStageLatency(stage, Math.max(0, Math.round(performance.now() - started)) || feedLatencyMs());
     const event: MarketEvent =
       stage <= 1 ? 'TICK' : stage <= 4 ? 'MONTH_CLOSE' : stage <= 6 ? 'H8_CLOSE' : stage <= 8 ? 'H1_CLOSE' : 'POSITION_EVENT';
     const routed = routeEvent(event);

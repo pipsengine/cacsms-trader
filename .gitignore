@@ -18,3 +18,7 @@ database/cacsms-trader.db-wal
 database/cacsms-trader.db-shm
 database/backups/*
 !database/backups/.gitkeep
+
+# MT5 bridge local secrets (never commit)
+bridge/mt5/data/
+bridge/mt5/**/__pycache__/

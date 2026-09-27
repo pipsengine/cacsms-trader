@@ -1,17 +1,17 @@
-/** Cacsms Trader — Market Data
- * Production integration contract. UI currently runs against deterministic simulation fixtures.
+/** Cacsms Trader — Market Data (Stage 1)
+ * Live implementation: MT5 bridge → enrich/validate → TradingContext → Workflow Stage 1 gates.
  */
 export const marketDataSpec = {
   id: 'marketData',
   stage: 1,
   title: 'Market Data',
   responsibilities: [
-    'Validate required upstream state before processing',
+    'Ingest MT5 ticks/bars via local bridge',
+    'Validate freshness and quote integrity per instrument',
     'Publish timestamped outputs to the shared Market World Model',
-    'Attach confidence, provenance, freshness and invalidation metadata',
-    'Emit events only when state materially changes',
-    'Preserve a complete decision audit record for every instrument',
+    'Fail-closed Stage 1 gates (instrument-scoped, not global)',
+    'Preserve audit-ready quality issues for the Feed Status / Data Quality tabs',
   ],
-  lifecycle: ['IDLE','QUEUED','PROCESSING','CURRENT','STALE','DEGRADED','FAILED'],
+  lifecycle: ['IDLE', 'QUEUED', 'PROCESSING', 'CURRENT', 'STALE', 'DEGRADED', 'FAILED'],
   controls: { enabled: true, failClosed: true, audit: true },
 } as const;

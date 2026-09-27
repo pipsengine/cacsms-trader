@@ -60,7 +60,7 @@ export default function Sidebar({
   collapsed: boolean;
   onCollapsedChange: (v: boolean) => void;
 }) {
-  const { auto, setAuto, positions } = useTrading();
+  const { auto, setAuto, positions, riskUsed } = useTrading();
   const openCount = useMemo(() => positions.filter((x) => x.status === 'ACTIVE').length, [positions]);
 
   return (
@@ -134,13 +134,13 @@ export default function Sidebar({
               <span className={auto ? 'dot on' : 'dot'} />
               <b>{auto ? 'AUTONOMOUS ON' : 'PAUSED'}</b>
             </div>
-            <small>Broker connected · Feed healthy</small>
+            <small>{openCount ? 'MT5 positions synced' : 'No open positions'}</small>
             <div className="engine-stats">
               <span>
                 Open <b>{openCount}</b>
               </span>
               <span>
-                Risk <b>0.80%</b>
+                Risk <b>{riskUsed.toFixed(2)}%</b>
               </span>
             </div>
             <button type="button" className={auto ? 'danger' : 'primary'} onClick={() => setAuto(!auto)}>

@@ -47,3 +47,6 @@
   .sidebar.collapsed{width:72px}
   .app.nav-collapsed .main{margin-left:72px;width:calc(100% - 72px)}
 }
+
+.empty-block{display:flex;flex-direction:column;gap:6px;padding:20px 12px;text-align:center;color:var(--muted,#8395ad)}.empty-block b{color:inherit;opacity:.95;font-size:14px}.empty-block span{font-size:13px;line-height:1.45;max-width:420px;margin:0 auto}.alert{color:#f06b78;padding:8px 0}
+

@@ -14,7 +14,10 @@
     "db:restore": "node database/scripts/restore.mjs",
     "db:health": "node database/scripts/health.mjs",
     "db:test": "node database/scripts/test-crud.mjs",
-    "postinstall": "node database/scripts/postinstall.mjs"
+    "postinstall": "node database/scripts/postinstall.mjs",
+    "mt5:bridge": "py -u bridge/mt5/server.py",
+    "mt5:bridge:install": "py -m pip install -r bridge/mt5/requirements.txt",
+    "db:mssql:init": "sqlcmd -S localhost -U cascms -P \"%MSSQL_PASSWORD%\" -C -d db_Cacsms-Trader -i database/mssql/001_mt5_persistence.sql"
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",

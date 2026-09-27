@@ -1,1 +1,39 @@
-import {useMemo,useState} from 'react';import type {WorkflowEvent} from '../types/workflow';export function EventStream({events}:{events:WorkflowEvent[]}){const [sev,setSev]=useState('ALL');const rows=useMemo(()=>events.filter(e=>sev==='ALL'||e.severity===sev),[events,sev]);return <section className="panel events"><div className="panel-title"><div><span className="eyebrow">EVENT BUS</span><h2>Live Event & Audit Stream</h2></div><select value={sev} onChange={e=>setSev(e.target.value)}><option>ALL</option><option>info</option><option>success</option><option>warning</option><option>error</option></select></div><div className="event-list">{rows.map(e=><div className={'event '+e.severity} key={e.id}><time>{new Date(e.time).toLocaleTimeString()}</time><span className="stage-tag">S{e.stage}</span><b>{e.event}</b><span>{e.symbol||'SYSTEM'}</span><p>{e.detail}</p><em>{e.latencyMs}ms</em></div>)}</div></section>}
+import { useMemo, useState } from 'react';
+import type { WorkflowEvent } from '../types/workflow';
+
+export function EventStream({ events }: { events: WorkflowEvent[] }) {
+  const [sev, setSev] = useState('ALL');
+  const rows = useMemo(
+    () => events.filter((e) => sev === 'ALL' || e.severity === sev),
+    [events, sev],
+  );
+  return (
+    <section className="panel events">
+      <div className="panel-title">
+        <div>
+          <span className="eyebrow">EVENT BUS</span>
+          <h2>Live Event & Audit Stream</h2>
+        </div>
+        <select value={sev} onChange={(e) => setSev(e.target.value)}>
+          <option>ALL</option>
+          <option>info</option>
+          <option>success</option>
+          <option>warning</option>
+          <option>error</option>
+        </select>
+      </div>
+      <div className="event-list">
+        {rows.map((e) => (
+          <div className={'event ' + e.severity} key={e.id}>
+            <time>{new Date(e.time).toLocaleTimeString()}</time>
+            <span className="stage-tag">S{e.stage}</span>
+            <b>{e.event}</b>
+            <span>{e.symbol || 'SYSTEM'}</span>
+            <p>{e.detail}</p>
+            {e.latencyMs != null && <em>{e.latencyMs}ms</em>}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}

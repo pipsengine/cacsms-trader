@@ -47,31 +47,45 @@ export function AccountsTab({ s, onOpen, onAdd }: { s: MT5Snapshot; onOpen: (id:
             </tr>
           </thead>
           <tbody>
-            {rows.map((a) => (
-              <tr key={a.id} onClick={() => onOpen(a.id)}>
-                <td>
-                  <b>{a.name}</b>
-                  <small>
-                    {a.login} • {a.server}
-                  </small>
-                </td>
-                <td>
-                  {a.accountClass}
-                  {a.propRules && <small>{a.propRules.phase}</small>}
-                </td>
-                <td>{a.firm || a.broker}</td>
-                <td>
-                  <span className="mt5-currency">{a.currency}</span>
-                </td>
-                <td>{money(a.equity, a.currency)}</td>
-                <td>{money(a.freeMargin, a.currency)}</td>
-                <td>{a.tradingMode.replaceAll('_', ' ')}</td>
-                <td>{ago(a.lastHeartbeat)}</td>
-                <td>
-                  <StatusBadge value={a.state} />
+            {rows.length === 0 ? (
+              <tr className="mt5-empty-row">
+                <td colSpan={9}>
+                  <div className="mt5-empty">
+                    <b>No MT5 accounts yet</b>
+                    <span>Add a Demo, Live, or Prop account to connect your MT5 terminal.</span>
+                    <button type="button" className="mt5-btn mt5-primary" onClick={onAdd}>
+                      + Add Account
+                    </button>
+                  </div>
                 </td>
               </tr>
-            ))}
+            ) : (
+              rows.map((a) => (
+                <tr key={a.id} onClick={() => onOpen(a.id)}>
+                  <td>
+                    <b>{a.name}</b>
+                    <small>
+                      {a.login} • {a.server}
+                    </small>
+                  </td>
+                  <td>
+                    {a.accountClass}
+                    {a.propRules && <small>{a.propRules.phase}</small>}
+                  </td>
+                  <td>{a.firm || a.broker}</td>
+                  <td>
+                    <span className="mt5-currency">{a.currency}</span>
+                  </td>
+                  <td>{money(a.equity, a.currency)}</td>
+                  <td>{money(a.freeMargin, a.currency)}</td>
+                  <td>{a.tradingMode.replaceAll('_', ' ')}</td>
+                  <td>{ago(a.lastHeartbeat)}</td>
+                  <td>
+                    <StatusBadge value={a.state} />
+                  </td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>

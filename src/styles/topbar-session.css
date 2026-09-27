@@ -1,0 +1,37 @@
+.top-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 360px;
+}
+.top-session-copy {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.15;
+}
+.top-session-copy b {
+  font-size: 12px;
+  font-weight: 700;
+  color: #e8f0fb;
+}
+.top-session-copy b em {
+  font-style: normal;
+  font-weight: 800;
+}
+.top-session-copy b em.open {
+  color: #4bd39b;
+}
+.top-session-copy b em.closed {
+  color: #f06b78;
+}
+.top-session-copy small {
+  font-size: 11px;
+  color: #8395ad;
+  white-space: nowrap;
+}
+.top-latency.ok {
+  color: #4bd39b;
+}
+.top-actions {
+  align-items: center;
+}

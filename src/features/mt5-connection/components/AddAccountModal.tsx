@@ -109,6 +109,7 @@ export function AddAccountModal({
         terminalInstance,
         accountClass: kind,
         currency,
+        password: form.password,
       });
       setResult(r?.message || 'Test capability is not connected');
     } finally {

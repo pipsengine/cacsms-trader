@@ -5,3 +5,5 @@
 .mt5-shell input.mt5-readonly,.mt5-modal input.mt5-readonly{opacity:.85;cursor:default;background:#0a1626;color:#9ec3e0;border-style:dashed}
 
 .mt5-readonly-field{border:1px dashed #2a4b6b;background:#0a1626;color:#9ec3e0;border-radius:8px;padding:9px 11px;font-weight:700;letter-spacing:.04em;user-select:all;cursor:default}
+
+.mt5-empty-row td{padding:28px 16px!important;border-bottom:none}.mt5-empty{display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center;color:var(--muted)}.mt5-empty b{color:var(--text);font-size:15px}.mt5-empty span{max-width:420px;line-height:1.45}.mt5-empty .mt5-btn{margin-top:8px}

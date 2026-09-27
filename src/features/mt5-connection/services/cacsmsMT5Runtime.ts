@@ -1,4 +1,4 @@
-import { allPairs, instruments, positions as seedPositions } from '../../../data/market';
+import { allPairs, instruments } from '../../../data/market';
 import { eventBus } from '../../../services/eventBus';
 import { decisionAudit } from '../../../services/decisionAudit';
 import { SYSTEM } from '../../../config/system';
@@ -9,10 +9,15 @@ import { qualifyExecution } from './executionQualification';
 import { reconcile } from './reconciliation';
 import { calculateRiskSize } from './currencyRisk';
 import { assertExecutionSafe } from './mt5ConnectionAdapter';
+import { bridgeHealth, bridgeListAccounts, bridgePulse, bridgeStoreSecret, bridgeSync, bridgeTest, bridgeUpsertAccount, type BridgePosition, type BridgeSyncResult } from './mt5BridgeClient';
+import { loadAppState, saveAppState } from '../../../services/appDb';
+import { publishLiveFeed } from '../../../services/liveFeed';
+import type { Position as AppPosition } from '../../../types';
 import type {
   AccountClass,
   ConnectionState,
   MT5Account,
+  MT5AccountDraft,
   MT5CommandResult,
   MT5Event,
   MT5Snapshot,
@@ -26,7 +31,7 @@ const now = () => new Date().toISOString();
 const universe = (INSTRUMENTS as readonly string[]).length === allPairs.length ? [...INSTRUMENTS] : [...allPairs];
 
 let seq = 100;
-let globalTradingEnabled = true;
+let globalTradingEnabled = false;
 let reconnectAttempts = 0;
 
 const listeners = new Set<(s: MT5Snapshot) => void>();
@@ -71,7 +76,7 @@ function buildMaps(accounts: MT5Account[]): SymbolMap[] {
     universe.map((s, i) => ({
       canonical: s,
       accountId: a.id,
-      brokerSymbol: a.id.includes('ngn') && s === 'XAUUSD' ? 'GOLD' : a.accountClass === 'PROP' ? `${s}.pro` : s,
+      brokerSymbol: a.currency === 'NGN' && s === 'XAUUSD' ? 'GOLD' : a.accountClass === 'PROP' ? `${s}.pro` : s,
       enabled: true,
       digits: s.includes('JPY') || s === 'XAUUSD' ? 3 : 5,
       minLot: 0.01,
@@ -80,24 +85,24 @@ function buildMaps(accounts: MT5Account[]): SymbolMap[] {
       tickSize: s === 'XAUUSD' ? 0.01 : 0.00001,
       tickValue: a.currency === 'NGN' ? 1600 : 1,
       spread: Number((0.4 + (i % 7) * 0.15).toFixed(2)),
-      status: 'MAPPED' as const,
+      status: 'UNMAPPED' as const,
     })),
   );
 }
 
 function buildCoverage(accounts: MT5Account[]) {
   return accounts.flatMap((a) =>
-    universe.map((symbol, si) => ({
+    universe.map((symbol) => ({
       accountId: a.id,
       symbol,
       timeframes: Object.fromEntries(
-        TIMEFRAMES.map((tf, ti) => [
+        TIMEFRAMES.map((tf) => [
           tf,
           {
-            available: true,
-            bars: Math.max(400, 62000 - Math.floor(ti * 5900) - si * 31),
-            lastBar: now(),
-            stale: false,
+            available: false,
+            bars: 0,
+            lastBar: undefined as string | undefined,
+            stale: true,
           },
         ]),
       ),
@@ -106,203 +111,219 @@ function buildCoverage(accounts: MT5Account[]) {
   );
 }
 
-const seedAccounts: MT5Account[] = [
-  {
-    id: 'demo-usd',
-    name: 'Strategy Validation',
-    accountClass: 'DEMO',
-    currency: 'USD',
-    broker: 'Demo Broker',
-    server: 'Demo-MT5',
-    login: '100001',
-    terminalInstance: 'CACSMS-MT5-0001',
-    state: 'HEALTHY',
-    tradingMode: 'AUTONOMOUS',
-    tradingEnabled: true,
-    balance: 50000,
-    equity: 50384,
-    margin: 620,
-    freeMargin: 49764,
-    leverage: 100,
-    profit: 384,
-    lastHeartbeat: now(),
-    latencyMs: 38,
-    riskProfile: 'BALANCED',
-    maxConcurrentTrades: 3,
-    assignedSymbols: [...universe],
-  },
-  {
-    id: 'live-ngn',
-    name: 'Nigeria Live',
-    accountClass: 'LIVE',
-    currency: 'NGN',
-    broker: 'Nigeria Broker',
-    server: 'Live-NGN',
-    login: '200002',
-    terminalInstance: 'CACSMS-MT5-0002',
-    state: 'HEALTHY',
-    tradingMode: 'APPROVAL_REQUIRED',
-    tradingEnabled: true,
-    balance: 30_000_000,
-    equity: 30_435_000,
-    margin: 850_000,
-    freeMargin: 29_585_000,
-    leverage: 100,
-    profit: 435_000,
-    lastHeartbeat: now(),
-    latencyMs: 51,
-    riskProfile: 'CONSERVATIVE',
-    maxConcurrentTrades: 2,
-    assignedSymbols: [...universe],
-  },
-  {
-    id: 'live-usd',
-    name: 'Personal Live USD',
-    accountClass: 'LIVE',
-    currency: 'USD',
-    broker: 'Global Broker',
-    server: 'Live-01',
-    login: '300003',
-    terminalInstance: 'CACSMS-MT5-0003',
-    state: 'HEALTHY',
-    tradingMode: 'AUTONOMOUS',
-    tradingEnabled: true,
-    balance: 25000,
-    equity: 25242,
-    margin: 410,
-    freeMargin: 24832,
-    leverage: 200,
-    profit: 242,
-    lastHeartbeat: now(),
-    latencyMs: 44,
-    riskProfile: 'BALANCED',
-    maxConcurrentTrades: 3,
-    assignedSymbols: [...universe],
-  },
-  {
-    id: 'prop-usd',
-    name: 'Prop 100K',
-    accountClass: 'PROP',
-    currency: 'USD',
-    broker: 'Prop Broker',
-    firm: 'Example Prop Firm',
-    server: 'Funded-01',
-    login: '400004',
-    terminalInstance: 'CACSMS-MT5-0004',
-    state: 'HEALTHY',
-    tradingMode: 'AUTONOMOUS',
-    tradingEnabled: true,
-    balance: 100000,
-    equity: 102430,
-    margin: 1350,
-    freeMargin: 101080,
-    leverage: 100,
-    profit: 2430,
-    lastHeartbeat: now(),
-    latencyMs: 62,
-    riskProfile: 'CONSERVATIVE',
-    maxConcurrentTrades: 2,
-    assignedSymbols: [...universe],
-    propRules: {
-      phase: 'FUNDED',
-      accountSize: 100000,
-      dailyLossLimitPct: 5,
-      maxLossLimitPct: 10,
-      profitTargetPct: 8,
-      minTradingDays: 5,
-      newsTrading: false,
-      weekendHolding: false,
-      overnightHolding: true,
-      maxExposurePct: 1,
-      consistencyRulePct: 30,
-    },
-  },
-];
-
-function seedMt5Positions(): MT5Position[] {
-  const open = seedPositions.filter((p) => p.status === 'ACTIVE');
-  return open.map((p, i) => ({
-    id: `mt5-p-${p.id}`,
-    accountId: i === 0 ? 'demo-usd' : 'live-ngn',
-    cacsmsTradeId: p.id,
-    mt5OrderId: `92${p.id.replace(/\D/g, '') || '1000'}`,
-    mt5DealId: `93${p.id.replace(/\D/g, '') || '1000'}`,
-    mt5PositionId: `94${p.id.replace(/\D/g, '') || '1000'}`,
-    symbol: p.symbol,
-    side: p.side,
-    volume: p.size,
-    entry: p.entry,
-    current: p.current,
-    sl: p.sl,
-    tp: p.tp,
-    pnl: i === 1 ? p.pnl * 1600 : p.pnl,
-    currency: i === 1 ? 'NGN' : 'USD',
-    status: 'OPEN',
-    openedAt: now(),
-  }));
-}
-
+/** Empty estate — accounts appear only after Add Account / MT5 connect. */
 let snapshot: MT5Snapshot = {
-  accounts: seedAccounts,
-  symbolMaps: buildMaps(seedAccounts),
-  coverage: buildCoverage(seedAccounts),
+  accounts: [],
+  symbolMaps: [],
+  coverage: [],
   gateway: {
     pending: 0,
-    ordersToday: 7,
-    successful: 7,
+    ordersToday: 0,
+    successful: 0,
     rejected: 0,
-    avgExecutionMs: 138,
-    avgSlippagePips: 0.24,
+    avgExecutionMs: 0,
+    avgSlippagePips: 0,
   },
   health: {
-    bridge: 'HEALTHY',
-    marketData: 'STREAMING',
-    orderGateway: 'READY',
-    heartbeat: 'HEALTHY',
-    reconciliation: 'CURRENT',
-    queueDepth: 2,
+    bridge: 'DISCONNECTED',
+    marketData: 'OFFLINE',
+    orderGateway: 'BLOCKED',
+    heartbeat: 'LOST',
+    reconciliation: 'PENDING',
+    queueDepth: 0,
     reconnectAttempts: 0,
     lastHeartbeat: now(),
-    feedLatencyMs: 43,
+    feedLatencyMs: 0,
   },
   events: [],
-  positions: seedMt5Positions(),
-  globalTradingEnabled: true,
+  positions: [],
+  globalTradingEnabled: false,
   updatedAt: now(),
 };
 
-pushEvent('MT5 gateway attached to Cacsms Trader runtime', 'INFO', 'SYSTEM');
-pushEvent('29-instrument universe synchronized', 'INFO', 'MARKET_DATA');
+pushEvent('MT5 Connection Centre ready — add an account to connect a terminal', 'INFO', 'SYSTEM');
+
+let syncInFlight = false;
+let lastBridgePoll = 0;
+let lastDbPersist = 0;
+
+function persistPositionsThrottled(accountId: string, mapped: MT5Position[]) {
+  const t = Date.now();
+  if (t - lastDbPersist < 5000) return;
+  lastDbPersist = t;
+  void loadAppState().then((state: Awaited<ReturnType<typeof loadAppState>>) => {
+    const others = (state.positions || []).filter(
+      (p: unknown) => (p as { accountId?: string }).accountId !== accountId,
+    );
+    return saveAppState({
+      positions: [
+        ...others,
+        ...mapped.map((p) => ({
+          id: p.id,
+          symbol: p.symbol,
+          side: p.side,
+          entry: p.entry,
+          current: p.current,
+          sl: p.sl || 0,
+          tp: p.tp || 0,
+          size: p.volume,
+          risk: 0,
+          pnl: p.pnl,
+          status: p.status,
+          opened: p.openedAt,
+          accountId: p.accountId,
+        })),
+      ],
+    });
+  });
+}
+
+function applyBridgeSync(accountId: string, result: BridgeSyncResult, persist = true): void {
+  if (!result.ok || !result.account) return;
+  const a = result.account;
+  setAccountState(accountId, {
+    balance: a.balance,
+    equity: a.equity,
+    margin: a.margin,
+    freeMargin: a.freeMargin,
+    leverage: a.leverage,
+    profit: a.profit,
+    currency: a.currency || snapshot.accounts.find((x) => x.id === accountId)?.currency || 'USD',
+    server: a.server || snapshot.accounts.find((x) => x.id === accountId)?.server,
+    lastHeartbeat: now(),
+    latencyMs: result.latencyMs ?? 0,
+    connectedAt: snapshot.accounts.find((x) => x.id === accountId)?.connectedAt || now(),
+  });
+
+  const mapped: MT5Position[] = (result.positions || []).map((p) => ({
+    id: p.id,
+    accountId,
+    cacsmsTradeId: p.cacsmsTradeId,
+    mt5OrderId: p.mt5OrderId,
+    mt5DealId: p.mt5DealId,
+    mt5PositionId: p.mt5PositionId,
+    symbol: p.symbol,
+    side: p.side,
+    volume: p.volume,
+    entry: p.entry,
+    current: p.current,
+    sl: p.sl ?? undefined,
+    tp: p.tp ?? undefined,
+    pnl: p.pnl,
+    currency: p.currency,
+    status: 'OPEN',
+    openedAt: p.openedAt,
+  }));
+
+  snapshot = {
+    ...snapshot,
+    positions: [...mapped, ...snapshot.positions.filter((p) => p.accountId !== accountId)],
+    health: {
+      ...snapshot.health,
+      bridge: result.bridge === 'HEALTHY' ? 'HEALTHY' : snapshot.health.bridge,
+      marketData: 'STREAMING',
+      heartbeat: 'HEALTHY',
+      feedLatencyMs: result.latencyMs ?? snapshot.health.feedLatencyMs,
+      lastHeartbeat: now(),
+      reconciliation: 'CURRENT',
+    },
+  };
+
+  const appPositions: AppPosition[] = mapped.map((p) => ({
+    id: p.id,
+    symbol: p.symbol,
+    side: p.side,
+    entry: p.entry,
+    current: p.current,
+    sl: p.sl || 0,
+    tp: p.tp || 0,
+    size: p.volume,
+    risk: 0,
+    pnl: p.pnl,
+    status: 'ACTIVE',
+    opened: p.openedAt,
+  }));
+
+  publishLiveFeed({
+    ticks: result.ticks,
+    positions: appPositions,
+    latencyMs: result.latencyMs,
+  });
+
+  if (persist) persistPositionsThrottled(accountId, mapped);
+}
+
+async function pollHealthyAccounts() {
+  const healthy = snapshot.accounts.filter((a) => a.state === 'HEALTHY');
+  if (!healthy.length || syncInFlight) return;
+  const t = Date.now();
+  if (t - lastBridgePoll < 1000) return;
+  lastBridgePoll = t;
+  syncInFlight = true;
+  try {
+    for (const account of healthy) {
+      // Rotate symbol batches so each pulse stays fast (fixes multi-second latency flicker).
+      const universe = account.assignedSymbols?.length ? account.assignedSymbols : [...allPairs];
+      const batchSize = 10;
+      const offset = Math.floor(Date.now() / 1000) % Math.max(1, Math.ceil(universe.length / batchSize));
+      const start = offset * batchSize;
+      const symbols = universe.slice(start, start + batchSize);
+      const result = await bridgePulse({
+        accountId: account.id,
+        login: account.login,
+        server: account.server,
+        symbols,
+      });
+      if (result.ok) {
+        applyBridgeSync(account.id, result, true);
+      }
+    }
+  } finally {
+    syncInFlight = false;
+  }
+}
 
 function emit() {
-  const healthy = snapshot.accounts.some((a) => a.state === 'HEALTHY');
+  const hasAccounts = snapshot.accounts.length > 0;
+  const healthyAccounts = snapshot.accounts.filter((a) => a.state === 'HEALTHY');
+  const healthy = healthyAccounts.length > 0;
+  const feedLatencyMs = healthy
+    ? Math.min(...healthyAccounts.map((a) => a.latencyMs ?? 0))
+    : 0;
   snapshot = {
     ...snapshot,
     updatedAt: now(),
     globalTradingEnabled,
     health: {
       ...snapshot.health,
-      lastHeartbeat: now(),
-      feedLatencyMs: 30 + Math.floor(Math.random() * 35),
+      lastHeartbeat: healthy ? now() : snapshot.health.lastHeartbeat,
+      feedLatencyMs,
       reconnectAttempts,
-      bridge: healthy ? snapshot.health.bridge === 'ERROR' ? 'DEGRADED' : snapshot.health.bridge : 'DEGRADED',
-      marketData: healthy ? 'STREAMING' : 'STALE',
-      orderGateway: !globalTradingEnabled ? 'BLOCKED' : healthy ? 'READY' : 'DEGRADED',
-      heartbeat: healthy ? 'HEALTHY' : 'STALE',
-      queueDepth: Math.max(0, eventBus.recent(20).length % 8),
+      bridge: !hasAccounts
+        ? 'DISCONNECTED'
+        : healthy
+          ? snapshot.health.bridge === 'ERROR'
+            ? 'DEGRADED'
+            : 'HEALTHY'
+          : 'DISCONNECTED',
+      marketData: healthy ? 'STREAMING' : 'OFFLINE',
+      orderGateway: !globalTradingEnabled || !healthy ? 'BLOCKED' : 'READY',
+      heartbeat: healthy ? 'HEALTHY' : 'LOST',
+      queueDepth: healthy ? Math.max(0, eventBus.recent(20).length % 8) : 0,
     },
     accounts: snapshot.accounts.map((a) =>
-      a.state === 'HEALTHY' || a.state === 'DEGRADED'
-        ? { ...a, lastHeartbeat: now(), latencyMs: 30 + Math.floor(Math.random() * 40) }
-        : a,
+      a.state === 'HEALTHY' || a.state === 'DEGRADED' ? { ...a, lastHeartbeat: now() } : a,
     ),
   };
   listeners.forEach((l) => l(snapshot));
+  void pollHealthyAccounts().then(() => {
+    if (healthy) listeners.forEach((l) => l(snapshot));
+  });
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
 function ensureTick() {
-  if (!timer) timer = setInterval(emit, 2000);
+  if (!timer) timer = setInterval(emit, 1000);
 }
 function maybeStopTick() {
   if (!listeners.size && timer) {
@@ -325,10 +346,123 @@ function refreshGatewayHealth() {
     ...snapshot,
     health: {
       ...snapshot.health,
-      orderGateway: !globalTradingEnabled ? 'BLOCKED' : anyHealthy && anyTrading ? 'READY' : 'DEGRADED',
-      reconciliation: 'CURRENT',
+      bridge: anyHealthy ? 'HEALTHY' : snapshot.accounts.length ? 'DISCONNECTED' : 'DISCONNECTED',
+      orderGateway: !globalTradingEnabled || !anyHealthy || !anyTrading ? 'BLOCKED' : 'READY',
+      marketData: anyHealthy ? snapshot.health.marketData : 'OFFLINE',
+      heartbeat: anyHealthy ? 'HEALTHY' : 'LOST',
     },
   };
+}
+
+function accountToPersist(account: MT5Account) {
+  return {
+    id: account.id,
+    name: account.name,
+    accountClass: account.accountClass,
+    currency: account.currency,
+    broker: account.broker,
+    firm: account.firm,
+    server: account.server,
+    login: account.login,
+    secretRef: account.secretRef,
+    terminalInstance: account.terminalInstance,
+    state: account.state,
+    tradingMode: account.tradingMode,
+    tradingEnabled: account.tradingEnabled,
+    leverage: account.leverage,
+    riskProfile: account.riskProfile,
+    maxConcurrentTrades: account.maxConcurrentTrades,
+    balance: account.balance,
+    equity: account.equity,
+    margin: account.margin,
+    freeMargin: account.freeMargin,
+    profit: account.profit,
+    latencyMs: account.latencyMs,
+    lastHeartbeat: account.lastHeartbeat,
+    connectedAt: account.connectedAt,
+    assignedSymbols: account.assignedSymbols,
+    propRules: account.propRules,
+  };
+}
+
+async function persistAccount(account: MT5Account) {
+  const result = await bridgeUpsertAccount(accountToPersist(account));
+  if (!result.ok) {
+    pushEvent(`DB persist warning: ${result.message}`, 'WARNING', 'SYSTEM', account.id);
+  }
+  return result;
+}
+
+async function hydrateFromDb() {
+  const data = await bridgeListAccounts();
+  if (!data.ok) {
+    pushEvent(data.message || 'Unable to hydrate accounts from SQL Server', 'WARNING', 'SYSTEM');
+    return;
+  }
+  if (!data.accounts.length) return;
+
+  const accounts: MT5Account[] = data.accounts.map((raw) => {
+    const a = raw as Partial<MT5Account> & { accountClass?: AccountClass };
+    return {
+      id: String(a.id),
+      name: String(a.name || 'MT5 Account'),
+      accountClass: (a.accountClass || 'DEMO') as AccountClass,
+      currency: String(a.currency || 'USD'),
+      broker: String(a.broker || 'Broker'),
+      firm: a.firm,
+      server: String(a.server || ''),
+      login: String(a.login || ''),
+      terminalInstance: String(a.terminalInstance || nextTerminalInstanceId([])),
+      state: (a.state as ConnectionState) || 'DISCONNECTED',
+      tradingMode: (a.tradingMode as TradingMode) || 'ANALYSIS_ONLY',
+      tradingEnabled: Boolean(a.tradingEnabled),
+      balance: Number(a.balance || 0),
+      equity: Number(a.equity || 0),
+      margin: Number(a.margin || 0),
+      freeMargin: Number(a.freeMargin || 0),
+      leverage: Number(a.leverage || 100),
+      profit: Number(a.profit || 0),
+      lastHeartbeat: a.lastHeartbeat || now(),
+      latencyMs: Number(a.latencyMs || 0),
+      connectedAt: a.connectedAt,
+      secretRef: a.secretRef,
+      riskProfile: (a.riskProfile as MT5Account['riskProfile']) || 'BALANCED',
+      maxConcurrentTrades: Number(a.maxConcurrentTrades || 2),
+      assignedSymbols: (a.assignedSymbols as string[])?.length ? (a.assignedSymbols as string[]) : [...universe],
+      propRules: a.propRules as PropRules | undefined,
+    };
+  });
+
+  const positions: MT5Position[] = (data.positions || []).map((p) => ({
+    id: p.id,
+    accountId: String((p as BridgePosition & { accountId?: string }).accountId || ''),
+    cacsmsTradeId: p.cacsmsTradeId,
+    mt5OrderId: p.mt5OrderId,
+    mt5DealId: p.mt5DealId,
+    mt5PositionId: p.mt5PositionId,
+    symbol: p.symbol,
+    side: p.side,
+    volume: p.volume,
+    entry: p.entry,
+    current: p.current,
+    sl: p.sl ?? undefined,
+    tp: p.tp ?? undefined,
+    pnl: p.pnl,
+    currency: p.currency,
+    status: 'OPEN',
+    openedAt: p.openedAt || now(),
+  }));
+
+  snapshot = {
+    ...snapshot,
+    accounts,
+    symbolMaps: buildMaps(accounts),
+    coverage: buildCoverage(accounts),
+    positions: positions.filter((p) => p.accountId),
+    updatedAt: now(),
+  };
+  refreshGatewayHealth();
+  pushEvent(`Loaded ${accounts.length} account(s) from db_Cacsms-Trader`, 'INFO', 'SYSTEM');
 }
 
 export function getMT5Snapshot(): MT5Snapshot {
@@ -339,6 +473,10 @@ export function subscribeMT5(cb: (s: MT5Snapshot) => void) {
   listeners.add(cb);
   cb(snapshot);
   ensureTick();
+  void hydrateFromDb().then(() => {
+    cb(snapshot);
+    listeners.forEach((l) => l(snapshot));
+  });
   return () => {
     listeners.delete(cb);
     maybeStopTick();
@@ -346,20 +484,75 @@ export function subscribeMT5(cb: (s: MT5Snapshot) => void) {
 }
 
 export async function mt5Connect(id: string): Promise<MT5CommandResult> {
+  const account = snapshot.accounts.find((a) => a.id === id);
+  if (!account) return { ok: false, message: 'Account not found' };
+
   setAccountState(id, { state: 'CONNECTING' });
   emit();
-  await new Promise((r) => setTimeout(r, 250));
+
+  const health = await bridgeHealth();
+  if (!health.ok) {
+    setAccountState(id, { state: 'ERROR' });
+    pushEvent(health.message || 'MT5 bridge offline', 'ERROR', 'CONNECTION', id);
+    emit();
+    return {
+      ok: false,
+      message: health.message || 'MT5 bridge offline — run npm run mt5:bridge with MetaTrader 5 open',
+    };
+  }
+
   setAccountState(id, { state: 'AUTHENTICATING' });
   emit();
-  await new Promise((r) => setTimeout(r, 250));
+
   setAccountState(id, { state: 'SYNCHRONIZING' });
   emit();
-  await new Promise((r) => setTimeout(r, 250));
-  setAccountState(id, { state: 'HEALTHY', lastHeartbeat: now(), tradingEnabled: true });
+
+  const result = await bridgeSync({
+    accountId: account.id,
+    login: account.login,
+    server: account.server,
+    name: account.name,
+    broker: account.broker,
+    firm: account.firm,
+    secretRef: account.secretRef,
+    terminalInstance: account.terminalInstance,
+    tradingMode: account.tradingMode,
+    accountClass: account.accountClass,
+    riskProfile: account.riskProfile,
+    maxConcurrentTrades: account.maxConcurrentTrades,
+    assignedSymbols: account.assignedSymbols,
+    propRules: account.propRules,
+  });
+
+  if (!result.ok || !result.account) {
+    setAccountState(id, { state: 'ERROR' });
+    pushEvent(result.message, 'ERROR', 'CONNECTION', id);
+    emit();
+    return { ok: false, message: result.message };
+  }
+
+  applyBridgeSync(id, result);
+  setAccountState(id, {
+    state: 'HEALTHY',
+    tradingEnabled: false,
+    lastHeartbeat: now(),
+    latencyMs: result.latencyMs ?? 0,
+    connectedAt: now(),
+  });
   refreshGatewayHealth();
-  pushEvent('Account connected and synchronized', 'INFO', 'CONNECTION', id);
+  const synced = snapshot.accounts.find((a) => a.id === id);
+  if (synced) await persistAccount(synced);
+  pushEvent(
+    `Synced from MT5 • equity ${result.account.equity} ${result.account.currency}`,
+    'INFO',
+    'CONNECTION',
+    id,
+  );
   emit();
-  return { ok: true, message: 'Connected • synchronized • reconciliation current' };
+  return {
+    ok: true,
+    message: result.message,
+  };
 }
 
 export async function mt5Disconnect(id: string): Promise<MT5CommandResult> {
@@ -420,23 +613,44 @@ export async function mt5Reconnect(id: string): Promise<MT5CommandResult> {
   return { ok: !mismatch, message: mismatch ? 'Reconnected with mismatches' : 'Reconnected and reconciled' };
 }
 
-export async function mt5TestConnection(draft: Partial<MT5Account>): Promise<MT5CommandResult> {
-  await new Promise((r) => setTimeout(r, 500));
+export async function mt5TestConnection(draft: MT5AccountDraft): Promise<MT5CommandResult> {
   if (!draft.server || !draft.login) {
     return { ok: false, message: 'Server and login are required' };
   }
-  return {
-    ok: true,
-    message: `Terminal reachable • auth valid • market data available • trade permission detected (${draft.accountClass || 'DEMO'})`,
-  };
+  if (!draft.broker) {
+    return { ok: false, message: 'Broker is required' };
+  }
+  const result = await bridgeTest({
+    login: String(draft.login),
+    server: draft.server,
+    password: draft.password,
+    broker: draft.broker,
+  });
+  return { ok: result.ok, message: result.message };
 }
 
-export async function mt5SaveAccount(draft: Partial<MT5Account> & { password?: string }): Promise<MT5CommandResult> {
-  const { password: _password, ...safe } = draft as Partial<MT5Account> & { password?: string };
-  void _password; // never persist credentials in browser state
+export async function mt5SaveAccount(draft: MT5AccountDraft): Promise<MT5CommandResult> {
+  const { password, ...safe } = draft;
   const id = safe.id || `acct-${Date.now()}`;
   const existing = snapshot.accounts.find((a) => a.id === id);
   const currency = safe.currency || (safe.server?.toUpperCase().includes('NGN') ? 'NGN' : 'USD');
+
+  let secretRef = existing?.secretRef;
+  let secretNote = '';
+  if (password) {
+    const stored = await bridgeStoreSecret({
+      accountId: id,
+      login: String(safe.login || existing?.login || ''),
+      server: safe.server || existing?.server || '',
+      password,
+    });
+    if (stored.ok) {
+      secretRef = stored.secretRef;
+    } else {
+      secretNote = ` Credentials not stored (${stored.message}). Connect still works if MT5 is already logged into this account.`;
+    }
+  }
+
   const account: MT5Account = {
     id,
     name: safe.name || 'New MT5 Account',
@@ -450,12 +664,15 @@ export async function mt5SaveAccount(draft: Partial<MT5Account> & { password?: s
     state: 'DISCONNECTED',
     tradingMode: (safe.tradingMode || 'ANALYSIS_ONLY') as TradingMode,
     tradingEnabled: false,
-    balance: currency === 'NGN' ? 10_000_000 : 10000,
-    equity: currency === 'NGN' ? 10_000_000 : 10000,
+    balance: 0,
+    equity: 0,
     margin: 0,
-    freeMargin: currency === 'NGN' ? 10_000_000 : 10000,
+    freeMargin: 0,
     leverage: safe.leverage || 100,
     profit: 0,
+    lastHeartbeat: now(),
+    latencyMs: 0,
+    secretRef,
     riskProfile: safe.riskProfile || 'BALANCED',
     maxConcurrentTrades: safe.maxConcurrentTrades || 2,
     assignedSymbols: [...universe],
@@ -463,7 +680,24 @@ export async function mt5SaveAccount(draft: Partial<MT5Account> & { password?: s
   };
 
   if (existing) {
-    setAccountState(id, { ...existing, ...account, id });
+    setAccountState(id, {
+      ...existing,
+      name: account.name,
+      accountClass: account.accountClass,
+      currency: account.currency,
+      broker: account.broker,
+      firm: account.firm,
+      server: account.server,
+      login: account.login,
+      terminalInstance: account.terminalInstance,
+      tradingMode: account.tradingMode,
+      riskProfile: account.riskProfile,
+      maxConcurrentTrades: account.maxConcurrentTrades,
+      assignedSymbols: account.assignedSymbols,
+      propRules: account.propRules,
+      leverage: account.leverage,
+      secretRef: secretRef || existing.secretRef,
+    });
   } else {
     const accounts = [...snapshot.accounts, account];
     snapshot = {
@@ -474,8 +708,19 @@ export async function mt5SaveAccount(draft: Partial<MT5Account> & { password?: s
     };
   }
   pushEvent(`Account profile saved (${account.name}) — credentials referenced securely`, 'SECURITY', 'CONNECTION', id);
+  const saved = snapshot.accounts.find((a) => a.id === id) || account;
+  const persisted = await persistAccount(saved);
   emit();
-  return { ok: true, message: 'Account saved. Connect to authenticate and detect deposit currency from MT5.' };
+  if (!persisted.ok) {
+    return {
+      ok: true,
+      message: `Account saved in session only. DB write failed: ${persisted.message}.${secretNote}`,
+    };
+  }
+  return {
+    ok: true,
+    message: `Account saved to db_Cacsms-Trader. Connect to sync equity from MT5.${secretNote}`,
+  };
 }
 
 function defaultPropRules(accountSize: number): PropRules {
@@ -527,14 +772,31 @@ export async function mt5SaveSymbolMap(map: SymbolMap): Promise<MT5CommandResult
 }
 
 export async function mt5Reconcile(id: string): Promise<MT5CommandResult> {
+  const account = snapshot.accounts.find((a) => a.id === id);
+  if (!account) return { ok: false, message: 'Account not found' };
   snapshot = { ...snapshot, health: { ...snapshot.health, reconciliation: 'PENDING', orderGateway: 'BLOCKED' } };
   emit();
-  await new Promise((r) => setTimeout(r, 300));
-  snapshot = { ...snapshot, health: { ...snapshot.health, reconciliation: 'CURRENT' } };
+  const result = await bridgeSync({
+    accountId: account.id,
+    login: account.login,
+    server: account.server,
+  });
+  if (!result.ok || !result.account) {
+    snapshot = { ...snapshot, health: { ...snapshot.health, reconciliation: 'MISMATCH' } };
+    pushEvent(result.message, 'ERROR', 'POSITION', id);
+    emit();
+    return { ok: false, message: result.message };
+  }
+  applyBridgeSync(id, result);
   refreshGatewayHealth();
-  pushEvent('Broker positions reconciled with Cacsms world model', 'INFO', 'POSITION', id);
+  pushEvent(
+    `Broker positions reconciled • equity ${result.account.equity} ${result.account.currency}`,
+    'INFO',
+    'POSITION',
+    id,
+  );
   emit();
-  return { ok: true, message: 'Reconciliation complete' };
+  return { ok: true, message: result.message };
 }
 
 export async function mt5EmergencyStop(scope: { accountId?: string; symbol?: string }): Promise<MT5CommandResult> {
