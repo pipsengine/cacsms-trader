@@ -78,7 +78,7 @@ export function AuthorizationTable({ rows, now }: { rows: Authorization[]; now: 
               </td>
               <td>{a.status === 'PENDING' ? until(a.expiresAt, now) : new Date(a.expiresAt).toLocaleTimeString()}</td>
               <td className="hv-wrap">
-                <Badge tone={a.status === 'PENDING' ? 'green' : a.status === 'CONSUMED' ? 'blue' : a.status === 'REVOKED' ? 'red' : 'gray'}>{a.status}</Badge>
+                <Badge tone={a.status === 'PENDING' ? 'green' : a.status === 'CONSUMED' ? 'blue' : a.status === 'REVOKED' || a.status === 'DECLINED' ? 'red' : 'gray'}>{a.status}</Badge>
                 {a.statusReason ? <small className="muted"> {a.statusReason}</small> : null}
               </td>
             </tr>

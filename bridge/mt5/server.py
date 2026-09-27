@@ -28,6 +28,9 @@ try:
     import confirm_store
     import direction_service
     import direction_store
+    import execution_mt5
+    import execution_service
+    import execution_store
     import history
     import history_store
     import regime
@@ -59,6 +62,7 @@ try:
 except ImportError:
     from bridge.mt5 import confirm, confirm_service, confirm_store  # type: ignore
     from bridge.mt5 import direction_service, direction_store  # type: ignore
+    from bridge.mt5 import execution_mt5, execution_service, execution_store  # type: ignore
     from bridge.mt5 import history, history_store  # type: ignore
     from bridge.mt5 import regime  # type: ignore
     from bridge.mt5 import risk_mt5, risk_service, risk_store  # type: ignore
@@ -618,6 +622,11 @@ RISK = risk_service.RiskService(
     risk_mt5.RiskMT5(mt5, _MT5_LOCK, lambda: _mt5_ready, lambda: HISTORY.server_offset),
     lambda: HISTORY.server_offset,
 )
+EXECUTION = execution_service.ExecutionService(
+    execution_mt5.ExecutionMT5(mt5, _MT5_LOCK, lambda: _mt5_ready, lambda: HISTORY.server_offset, fx_factory=RISK.provider.fx_resolver),
+    node=os.environ.get("MT5_NODE_ID", "CACSMS-MT5-0001"),
+    on_change=lambda what: RISK.mark("STAGE9_" + what),
+)
 CONFIRM = confirm_service.ConfirmService(_vision_ticks, on_confirm_change=RISK.on_stage7_change)
 DIRECTION = direction_service.DirectionService(on_ready_change=CONFIRM.on_stage6_change)
 VISION = vision_service.VisionService(_vision_ticks, on_run=DIRECTION.on_stage5_run)
@@ -1040,6 +1049,23 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/h1/handoff":
                 self._json(200, {"ok": True, "candidates": confirm_store.handoffs()})
                 return
+            if parsed.path.startswith("/execution/"):
+                qs = parse_qs(parsed.query)
+                if parsed.path == "/execution/state":
+                    self._json(200, EXECUTION.state())
+                    return
+                if parsed.path == "/execution/detail":
+                    eid = _q(qs, "executionId") or ""
+                    if not eid:
+                        self._json(400, {"ok": False, "message": "executionId required"})
+                        return
+                    self._json(200, EXECUTION.detail(eid))
+                    return
+                if parsed.path == "/execution/trades":
+                    days = _q(qs, "days")
+                    self._json(200, {"ok": True, "trades": execution_store.trades(int(_q(qs, "limit") or 200), _q(qs, "accountId"), _q(qs, "symbol"),
+                                                                                   _q(qs, "q"), int(days) if days else None)})
+                    return
             if parsed.path.startswith("/risk/"):
                 qs = parse_qs(parsed.query)
                 if parsed.path == "/risk/state":
@@ -1190,6 +1216,40 @@ class Handler(BaseHTTPRequestHandler):
                     RISK.run(["OPERATOR_APPROVAL"])
                 self._json(200 if result.get("ok") else 400, {**result, "state": _risk_state()})
                 return
+            if parsed.path.startswith("/execution/"):
+                actor = str(body.get("actor") or "operator")
+                if parsed.path == "/execution/control":
+                    patch = {k: body[k] for k in ("tradingEnabled", "executionEnabled", "emergencyStop") if k in body}
+                    if not patch:
+                        self._json(400, {"ok": False, "message": "tradingEnabled, executionEnabled or emergencyStop required"})
+                        return
+                    self._json(200, {**EXECUTION.set_control(patch, actor, body.get("reason")), "state": EXECUTION.state()})
+                    return
+                if parsed.path == "/execution/close":
+                    result = EXECUTION.request_exit(str(body.get("executionId") or ""), actor, body.get("reason"))
+                    self._json(200 if result.get("ok") else 400, result)
+                    return
+                if parsed.path == "/execution/resolve":
+                    try:
+                        rid = int(body.get("id"))
+                    except (TypeError, ValueError):
+                        self._json(400, {"ok": False, "message": "finding id required"})
+                        return
+                    result = EXECUTION.resolve_finding(rid, str(body.get("resolution") or ""), actor, body.get("note"))
+                    self._json(200 if result.get("ok") else 400, result)
+                    return
+                if parsed.path == "/execution/config":
+                    result = execution_store.save_config(body.get("changes") or {}, actor, body.get("reason"))
+                    if not result.get("ok"):
+                        self._json(400, {"ok": False, "message": "; ".join(result.get("errors") or []), "errors": result.get("errors")})
+                        return
+                    if result.get("changed"):
+                        EXECUTION.mark("CONFIG_CHANGE")
+                    self._json(200, result)
+                    return
+                if parsed.path == "/execution/reconcile":
+                    self._json(200, EXECUTION.request_reconcile(actor))
+                    return
             if parsed.path == "/vision/run":
                 symbol = str(body.get("symbol") or "").upper()
                 targets = [symbol] if symbol in regime.SYMBOLS else list(regime.SYMBOLS)
@@ -1281,7 +1341,8 @@ def main() -> None:
         direction_store.ensure_direction_schema()
         confirm_store.ensure_confirm_schema()
         risk_store.ensure_risk_schema()
-        print("[mt5-bridge] scanner + vision + direction + H1 confirmation + opportunities & risk schema ready")
+        execution_store.ensure_schema()
+        print("[mt5-bridge] scanner + vision + direction + H1 confirmation + opportunities & risk + execution schema ready")
         history_ready = True
     except Exception as exc:
         history_ready = False
@@ -1305,6 +1366,8 @@ def main() -> None:
         print("[mt5-bridge] Stage 7 H1 Confirmation engine started")
         RISK.start()
         print("[mt5-bridge] Stage 8 Opportunities & Risk engine started")
+        EXECUTION.start()
+        print("[mt5-bridge] Stage 9 Execution & Positions engine started")
     print("[mt5-bridge] keep MetaTrader 5 running; Ctrl+C to stop")
     try:
         server.serve_forever()

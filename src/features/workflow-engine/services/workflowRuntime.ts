@@ -1,13 +1,13 @@
 import { allPairs, instruments, positions } from '../../../data/market';
 import type { Instrument } from '../../../types';
 import { createWorldState, type WorldState } from '../../../engine/worldModel';
-import { executionGate, routeEvent, type GateResult, type MarketEvent } from '../../../engine/orchestrator';
+import { routeEvent, type MarketEvent } from '../../../engine/orchestrator';
 import { eventBus, type TradingEvent } from '../../../services/eventBus';
 import { decisionAudit } from '../../../services/decisionAudit';
-import { brokerGateway, type GatewayMode } from '../../../services/brokerGateway';
 import { SYSTEM } from '../../../config/system';
-import { assertExecutionSafe } from '../../mt5-connection/services/mt5ConnectionAdapter';
-import { getMT5Snapshot, getStage9ExecutionSummary } from '../../mt5-connection/services/cacsmsMT5Runtime';
+import { getMT5Snapshot } from '../../mt5-connection/services/cacsmsMT5Runtime';
+import { executionRunAgeMs, executionStageStatus, getExecutionSnapshot, setControlNow, type ExecutionStageStatus } from '../../execution/services/executionStore';
+import { stage9Output } from '../../execution/services/executionStage';
 import { assessInstrument } from '../../market-data/services/stage1Gate';
 import { getHistorySnapshot, historyReadyCount } from '../../market-data/services/historyStore';
 import { STAGE_DEFINITIONS } from '../data/stageDefinitions';
@@ -90,19 +90,12 @@ function mapDecision(i: Instrument, riskApproved: boolean, open: boolean): Instr
   return 'WAIT';
 }
 
-function resolveEngineMode(): GatewayMode {
+/** Display label for the connected account estate; orders are placed only by the Stage 9 engine on the bridge. */
+function resolveEngineMode(): WorkflowSnapshot['engine']['mode'] {
   const mt5 = getMT5Snapshot();
   const connected = mt5.accounts.filter((a) => a.state === 'HEALTHY' || a.state === 'DEGRADED');
-  if (!connected.length) {
-    brokerGateway.mode = 'SIMULATION';
-    return 'SIMULATION';
-  }
-  if (connected.some((a) => a.accountClass === 'LIVE')) {
-    brokerGateway.mode = 'LIVE';
-    return 'LIVE';
-  }
-  brokerGateway.mode = 'PAPER';
-  return 'PAPER';
+  if (!connected.length) return 'SIMULATION';
+  return connected.some((a) => a.accountClass === 'LIVE') ? 'LIVE' : 'PAPER';
 }
 
 function feedLatencyMs(): number {
@@ -186,6 +179,15 @@ const RISK_STAGE_STATUS: Record<RiskStageStatus, StageStatus> = {
   ERROR: 'error',
 };
 
+const EXECUTION_STAGE_STATUS: Record<ExecutionStageStatus, StageStatus> = {
+  WAITING: 'waiting',
+  HEALTHY: 'healthy',
+  DEGRADED: 'running',
+  DISCONNECTED: 'error',
+  STALE: 'stale',
+  ERROR: 'error',
+};
+
 function regimeLabel(symbol: string): string {
   const p = getPairRegime(symbol);
   if (!p) return getRegimeSnapshot().state ? 'NO DATA' : 'WAITING';
@@ -238,7 +240,6 @@ function currentStage(i: Instrument, riskApproved: boolean, open: boolean) {
 
 let cycle = 1;
 let monitoringPaused = false;
-let executionEnabled = false;
 let lastHeartbeat = iso();
 let errors = 0;
 const stageFailures = new Map<number, number>();
@@ -274,13 +275,14 @@ let deps: RuntimeDeps = {
     'DIRECTION_CHANGE',
     'CONFIRMATION_CHANGE',
     'RISK_CHANGE',
+    'POSITION_EVENT',
     'CHANNEL_APPROACH',
     'CHANNEL_BREAK',
   ] as const
 ).forEach((type) =>
   eventBus.on(type, (e) => {
     const src = e.payload.source;
-    const sources = ['history', 'strength', 'scanner', 'vision', 'direction', 'confirmation', 'risk'];
+    const sources = ['history', 'strength', 'scanner', 'vision', 'direction', 'confirmation', 'risk', 'execution'];
     if (!sources.includes(String(src)) || !Array.isArray(e.payload.stages)) return;
     for (const stage of e.payload.stages as number[]) {
       stageProcessed.set(stage, (stageProcessed.get(stage) ?? 0) + 1);
@@ -324,7 +326,7 @@ function riskFor(instrument: Instrument) {
 function buildTrace(symbol: string): { trace: InstrumentTrace; world: WorldModelRecord } {
   const { instrument, world } = ensureWorld(symbol);
   const risk = riskFor(instrument);
-  const open = deps.getPositions().some((p) => p.symbol === symbol && p.status === 'ACTIVE');
+  const open = stage9Output().open.some((x) => x.instrument === symbol) || deps.getPositions().some((p) => p.symbol === symbol && p.status === 'ACTIVE');
   const approved = open || risk.approved;
   const decision = mapDecision(instrument, approved, open);
   const stage = currentStage(instrument, approved, open);
@@ -401,8 +403,12 @@ function stageStatus(id: number, traces: InstrumentTrace[]): StageStatus {
   if (id === 7) return H1_STAGE_STATUS[h1StageStatus()];
   if (id === 8) return RISK_STAGE_STATUS[riskStageStatus()];
 
-  if (id === 9 && !executionEnabled) return 'blocked';
-  if (id === 9 && !deps.getAuto()) return 'waiting';
+  if (id === 9) {
+    const s9 = stage9Output();
+    const mapped = EXECUTION_STAGE_STATUS[s9.status];
+    if (mapped !== 'healthy' && mapped !== 'running') return mapped;
+    return !s9.newEntries && !s9.open.length ? 'blocked' : mapped;
+  }
   if (id >= 8 && traces.every((t) => t.decision === 'WAIT' || t.decision === 'BLOCKED')) return 'waiting';
   const active = traces.filter((t) => t.stage >= id).length;
   if (active === 0 && id > 4) return 'waiting';
@@ -478,9 +484,7 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
                     : id === 8
                       ? ['Qualified / rejected setups', 'Risk budget allocation']
                       : id === 9
-                        ? executionEnabled
-                          ? ['Position/order management state']
-                          : ['Execution gated (fail-closed)']
+                        ? ['Broker-confirmed positions and closed trades']
                         : ['Decision audit & calibration feedback'];
 
     const message =
@@ -788,6 +792,50 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
       };
     }
 
+    if (id === 9 && status !== 'paused') {
+      const snap = getExecutionSnapshot();
+      const s9 = stage9Output();
+      const run = snap.state?.run;
+      const sum = run?.summary;
+      const age = executionRunAgeMs(snap);
+      const s8 = stage8Output();
+      const inFlight = s9.queue.filter((x) => !x.virtual).length;
+      return {
+        id,
+        name: def.name,
+        status,
+        confidence: s9.status === 'HEALTHY' ? 100 : s9.status === 'DEGRADED' ? 60 : 0,
+        latencyMs: 0,
+        latencyHistory: stageLatencyHistory.get(9) ?? [],
+        freshnessSec: age == null ? 0 : Math.round(age / 1000),
+        input: [
+          `Stage 8 AUTHORIZED ${s8.pending.length} · Stage 8 ${s8.status}`,
+          `Control ${s9.control ?? '—'} · execution ${s9.executionEnabled ? 'ENABLED' : 'DISABLED'} · trading ${s9.tradingEnabled ? 'RUNNING' : 'PAUSED'}`,
+          run?.terminal ? `MT5 ${run.terminal.login}@${run.terminal.server} · ${run.reconciled ? 'reconciled' : 'reconciliation pending'}` : 'MT5 terminal not attached',
+        ],
+        output: [
+          `Queue ${s9.queue.length - inFlight} authorized · ${inFlight} in flight`,
+          sum
+            ? `Positions ${sum.stage9Positions} Stage 9 + ${sum.externalPositions} external · open P&L ${sum.openPnl.toFixed(2)} ${sum.currency ?? ''}`
+            : 'Positions —',
+          `Closed ${s9.trades.length} → Stage 10 (${s9.trades.filter((t) => t.stage10Status === 'PUBLISHED').length} published) · findings ${s9.findings.length}`,
+        ],
+        message:
+          status === 'waiting'
+            ? 'Awaiting first Execution & Positions cycle from the central engine'
+            : status === 'stale'
+              ? `Execution & Positions stale (${age == null ? '—' : Math.round(age / 1000)}s since last engine cycle)`
+              : status === 'error'
+                ? snap.error || run?.message || 'Execution & Positions unavailable'
+                : status === 'blocked'
+                  ? `New entries blocked — ${run?.control?.reason ?? 'fail-closed'}`
+                  : run?.message || 'Execution & Positions current',
+        updatedAt: run?.runAt ?? now,
+        processed: stageProcessed.get(9) ?? s9.open.length + s9.trades.length,
+        failed,
+      };
+    }
+
     return {
       id,
       name: def.name,
@@ -843,62 +891,6 @@ function toWorkflowEvents(): WorkflowEvent[] {
   });
 }
 
-function evaluateExecutionPermission(): { permitted: boolean; reason: string } {
-  if (!deps.getAuto()) {
-    return { permitted: false, reason: 'Autonomous trading paused — new executions disabled' };
-  }
-
-  const mt5 = getMT5Snapshot();
-  const stage9 = getStage9ExecutionSummary();
-  if (stage9.orderGateway !== 'READY' || !stage9.globalTradingEnabled) {
-    return { permitted: false, reason: 'MT5 Stage 9 gateway not ready — fail-closed' };
-  }
-  const eligible = mt5.accounts.find((a) => assertExecutionSafe(mt5, a.id).ok);
-  if (!eligible) {
-    return { permitted: false, reason: 'No MT5 account passes Stage 9 execution safety checks' };
-  }
-  if (brokerGateway.mode === 'LIVE' && eligible.accountClass === 'LIVE') {
-    return { permitted: false, reason: 'Live broker bridge not configured — fail-closed' };
-  }
-
-  // Stage 1: at least one instrument must pass market-data freshness/validity (instrument-scoped).
-  const stage1Pass = instruments.some((i) => assessInstrument(i).pass);
-  if (instruments.length && !stage1Pass) {
-    return { permitted: false, reason: 'Stage 1 BLOCKED — no instrument has valid+fresh market data' };
-  }
-
-  const gates: GateResult[] = allPairs.map((symbol) => {
-    const { instrument, world } = ensureWorld(symbol);
-    const risk = riskFor(instrument);
-    const s1 = assessInstrument(instrument);
-    const pass =
-      s1.pass &&
-      world.dataQuality > 0 &&
-      risk.approved &&
-      world.updatedAt > Date.now() - 60_000;
-    return {
-      pass: s1.pass && world.dataQuality > 0 && (pass || instrument.state !== 'BLOCKED'),
-      stage: !s1.pass ? 1 : risk.approved ? 8 : 7,
-      reason: !s1.pass ? s1.reason : risk.approved ? 'Risk approved' : risk.reasons[0] ?? 'Awaiting confirmation',
-      confidence: instrument.confidence,
-    };
-  });
-  const freshnessGate: GateResult = {
-    pass: [...worldCache.values()].every((w) => Date.now() - w.updatedAt < 120_000) || worldCache.size === 0,
-    stage: 1,
-    reason: 'Upstream market data freshness',
-    confidence: 98,
-  };
-  const mt5Gate: GateResult = {
-    pass: true,
-    stage: 9,
-    reason: `MT5 account ${eligible.name} ready (${eligible.currency})`,
-    confidence: 94,
-  };
-  const result = executionGate([freshnessGate, ...gates.filter((g) => g.pass).slice(0, 3), mt5Gate]);
-  return { permitted: result.permitted, reason: result.reason };
-}
-
 export function bindWorkflowDeps(next: RuntimeDeps) {
   deps = next;
 }
@@ -929,7 +921,7 @@ export function getWorkflowSnapshot(): WorkflowSnapshot {
     world: worldRows,
     engine: {
       running: !monitoringPaused,
-      executionEnabled,
+      executionEnabled: stage9Output().executionEnabled,
       mode: resolveEngineMode(),
       cycle,
       lastHeartbeat,
@@ -949,22 +941,21 @@ export const workflowActions = {
     monitoringPaused = false;
     emit('TICK', undefined, { detail: 'Workflow monitoring resumed' }, 1);
   },
-  setExecution(enabled: boolean) {
-    if (enabled) {
-      const gate = evaluateExecutionPermission();
-      if (!gate.permitted) {
-        executionEnabled = false;
-        errors += 1;
-        emit('RISK_EVENT', undefined, { detail: `Execution denied: ${gate.reason}`, reason: gate.reason }, 9);
-        return;
-      }
-      executionEnabled = true;
-      // Align with existing autonomous flag when user explicitly enables execution.
-      if (!deps.getAuto()) deps.setAuto(true);
-      emit('POSITION_EVENT', undefined, { detail: 'Execution permission enabled (simulation fail-closed gates passed)' }, 9);
-    } else {
-      executionEnabled = false;
-      emit('RISK_EVENT', undefined, { detail: 'Execution permission revoked' }, 9);
+  /** Stage 9 execution is switched on the central engine; it still enforces every Stage 9 gate before any order. */
+  async setExecution(enabled: boolean) {
+    try {
+      await setControlNow({ executionEnabled: enabled }, `Stage 9 execution ${enabled ? 'enabled' : 'disabled'} from the Workflow Engine`);
+      const control = getExecutionSnapshot().state?.run?.control;
+      emit(
+        enabled ? 'POSITION_EVENT' : 'RISK_EVENT',
+        undefined,
+        { detail: `Stage 9 execution ${enabled ? 'enabled' : 'disabled'} on the central engine · ${control?.state ?? '—'}: ${control?.reason ?? ''}` },
+        9,
+      );
+    } catch (e) {
+      errors += 1;
+      const reason = e instanceof Error ? e.message : 'Central engine unreachable';
+      emit('RISK_EVENT', undefined, { detail: `Execution change not applied: ${reason}`, reason }, 9);
     }
   },
   reevaluate(symbol?: string) {

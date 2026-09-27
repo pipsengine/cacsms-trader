@@ -17,6 +17,8 @@ import { getH1Snapshot, h1StageStatus, startH1Store, subscribeH1 } from '../feat
 import { publishStage7 } from '../features/h1-confirmation/services/confirmStage';
 import { getRiskSnapshot, riskStageStatus, saveRiskConfigNow, startRiskStore, subscribeRisk } from '../features/opportunity-risk/services/riskStore';
 import { publishStage8 } from '../features/opportunity-risk/services/riskStage';
+import { executionStageStatus, getExecutionSnapshot, setControlNow, startExecutionStore, subscribeExecution } from '../features/execution/services/executionStore';
+import { publishStage9 } from '../features/execution/services/executionStage';
 import { eventBus } from '../services/eventBus';
 import type { CurrencyStrength, Instrument, Position } from '../types';
 
@@ -28,7 +30,6 @@ type Ctx = {
   selected: string;
   setSelected: (v: string) => void;
   positions: Position[];
-  closePosition: (id: string) => void;
   setPositions: (p: Position[]) => void;
   instruments: Instrument[];
   setInstruments: (i: Instrument[]) => void;
@@ -150,7 +151,6 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
 
   const schedulePersist = useCallback(
     (next: {
-      auto?: boolean;
       riskLimit?: number;
       instruments?: Instrument[];
       positions?: Position[];
@@ -162,7 +162,6 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
       persistTimer.current = setTimeout(() => {
         void saveAppState({
           settings: {
-            auto: String(next.auto ?? auto),
             riskLimit: String(next.riskLimit ?? riskLimit),
             selected,
           },
@@ -176,7 +175,7 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
         });
       }, 600);
     },
-    [auto, riskLimit, selected],
+    [riskLimit, selected],
   );
 
   const scheduleInstrumentPersist = useCallback((rows: Instrument[]) => {
@@ -488,9 +487,34 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
     };
   }, [ready]);
 
+  /** Stage 9 Execution & Positions runs on the central engine; mirror its global trading switch and publish its lifecycle events. */
+  useEffect(() => {
+    if (!ready) return;
+    const stop = startExecutionStore();
+    let lastFetch: number | null = null;
+    const apply = () => {
+      const snap = getExecutionSnapshot();
+      if (snap.lastFetchAt === lastFetch) return;
+      lastFetch = snap.lastFetchAt;
+      if (snap.state) setAutoState(snap.state.tradingEnabled);
+      const status = executionStageStatus(snap);
+      if (status !== 'WAITING' && status !== 'ERROR') publishStage9(snap.state);
+    };
+    apply();
+    const unsub = subscribeExecution(apply);
+    return () => {
+      unsub();
+      stop();
+    };
+  }, [ready]);
+
+  /** Global trading pause/resume is an audited command to the central engine; the UI reflects the engine's persisted state. */
   const setAuto = (v: boolean) => {
     setAutoState(v);
-    schedulePersist({ auto: v });
+    void setControlNow({ tradingEnabled: v }, v ? 'Trading resumed from the application' : 'New trades paused from the application').catch((e: unknown) => {
+      setAutoState(Boolean(getExecutionSnapshot().state?.tradingEnabled));
+      setDbError(e instanceof Error ? e.message : 'Central engine unreachable — trading state unchanged');
+    });
   };
 
   /** Risk per trade is a Stage 8 setting: saved (and audited) through the risk configuration, which also syncs app_settings.riskLimit. */
@@ -519,11 +543,6 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
     schedulePersist({ strengths: s });
   };
 
-  const closePosition = (id: string) => {
-    const next = posRef.current.map((x) => (x.id === id ? { ...x, status: 'CLOSED' as const } : x));
-    setPositions(next);
-  };
-
   const pushEvent = (message: string, source = 'UI') => {
     const ev = { message, source, severity: 'INFO' };
     setEvents((e) => [ev, ...e].slice(0, 100));
@@ -544,7 +563,6 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
       selected,
       setSelected,
       positions: pos,
-      closePosition,
       setPositions,
       instruments,
       setInstruments,

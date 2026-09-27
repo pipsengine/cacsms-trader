@@ -181,6 +181,8 @@ class RiskService:
             "config": risk.config_hash(inp["cfg"]),
             "expired": sum(1 for p in inp["pending"] if (risk.parse_ts(p.get("expiresAt")) or 0) <= inp["now"]),
             "approvals": tuple(sorted(inp["approvals"])),
+            "stage9": tuple(sorted((k, a, h["status"], h.get("orderState"), h.get("positionState"))
+                                   for (k, a), h in (inp.get("handedOff") or {}).items())),
         }
 
     def _detect(self, sig: dict[str, Any]) -> list[str]:
@@ -213,6 +215,8 @@ class RiskService:
             out.append("AUTHORIZATION_EXPIRY")
         if sig["approvals"] != prev["approvals"]:
             out.append("OPERATOR_APPROVAL")
+        if sig["stage9"] != prev.get("stage9"):
+            out.append("STAGE9_EXECUTION_CHANGE")
         return out
 
     def tick(self) -> dict[str, Any]:
@@ -253,6 +257,7 @@ class RiskService:
             cfg = inp["cfg"]
             ctx = {"now": inp["now"], "auto": inp["auto"], "corr": inp["corr"], "pending": inp["pending"], "attempts": inp["attempts"],
                    "approvals": inp["approvals"], "brokerMargin": inp["brokerMargin"],
+                   "inflight": inp.get("inflight") or [], "handedOff": inp.get("handedOff") or {},
                    "terminalCurrency": (inp.get("live") or {}).get("currency"), "configHash": risk.config_hash(cfg)}
             result = risk.evaluate(inp["handoffs"], inp["accounts"], inp["market"], inp["fx"], cfg, ctx)
             if self._prev is None:

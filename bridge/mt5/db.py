@@ -456,8 +456,12 @@ def load_app_state() -> dict[str, Any]:
         }
 
 
+ENGINE_OWNED_SETTINGS = ("auto", "execution.")
+
+
 def save_app_state(body: dict[str, Any]) -> dict[str, Any]:
-    settings = body.get("settings") or {}
+    # trading/execution control is owned by the central engine (/execution/control, audited) — a browser snapshot never writes it
+    settings = {k: v for k, v in (body.get("settings") or {}).items() if not any(k == p or (p.endswith(".") and k.startswith(p)) for p in ENGINE_OWNED_SETTINGS)}
     instruments = body.get("instruments") or []
     strengths = body.get("strengths") or []
     positions = body.get("positions") or []

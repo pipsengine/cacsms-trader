@@ -184,7 +184,7 @@ export type Authorization = {
   configHash?: string;
   source: Record<string, unknown>;
   evidence: Record<string, unknown>;
-  status: 'PENDING' | 'CONSUMED' | 'EXPIRED' | 'REVOKED' | string;
+  status: 'PENDING' | 'CONSUMED' | 'DECLINED' | 'EXPIRED' | 'REVOKED' | string;
   statusReason?: string | null;
   statusAt?: string | null;
   executes: false;

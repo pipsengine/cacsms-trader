@@ -209,7 +209,21 @@ def authorization_context() -> dict[str, Any]:
         attempts = {(k, a): int(n) for k, a, n in cur.fetchall()}
         cur.execute("SELECT setup_key, account_id FROM dbo.app_risk_approval")
         approvals = {(k, a) for k, a in cur.fetchall()}
-    return {"pending": pending, "attempts": attempts, "approvals": approvals}
+        handed: dict[tuple[str, str], dict[str, Any]] = {}
+        inflight: list[dict[str, Any]] = []
+        if cur.execute("SELECT OBJECT_ID(N'dbo.app_exec_ledger', N'U')").fetchone()[0] is not None:
+            cur.execute("SELECT a.setup_key, a.account_id, a.status, a.execution_id, a.authorization_json, l.order_state, l.position_state "
+                        "FROM dbo.app_risk_authorization a LEFT JOIN dbo.app_exec_ledger l ON l.execution_id = a.execution_id "
+                        "WHERE a.status IN ('CONSUMED', 'DECLINED')")
+            for k, a, st, eid, js, ost, pst in cur.fetchall():
+                handed[(k, a)] = {"status": st, "executionId": eid, "orderState": ost, "positionState": pst}
+                # consumed but no confirmed broker position yet: its risk is still committed
+                if st == "CONSUMED" and pst is None and ost in ("SUBMITTING", "ACKNOWLEDGED", "UNKNOWN", "RECONCILING"):
+                    try:
+                        inflight.append({**json.loads(js), "status": st, "inFlight": True})
+                    except Exception:
+                        continue
+    return {"pending": pending, "attempts": attempts, "approvals": approvals, "handedOff": handed, "inflight": inflight}
 
 
 def correlations(symbols: list[str], lookback: int) -> dict[tuple[str, str], float]:

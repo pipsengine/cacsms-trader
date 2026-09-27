@@ -389,6 +389,25 @@ class Authorization(unittest.TestCase):
         res = run([gbp], [acct()], pending=[auth], config=cfg(maxCurrencyRiskPct=1.4))
         self.assertEqual(only(res)[1]["reasonCode"], "CURRENCY_CONCENTRATION")
 
+    def test_stage9_handed_off_setup_is_never_reauthorized(self):
+        auth = run([eur_long()], [acct()])["authorizations"][0]
+        key = (auth["setupKey"], "demo")
+        for status, state, code in (("CONSUMED", "AUTHORIZED", "EXECUTED_BY_STAGE9"), ("DECLINED", "ACCOUNT_BLOCKED", "STAGE9_DECLINED")):
+            res = run([eur_long()], [acct()], attempts={key: 1},
+                      handedOff={key: {"status": status, "executionId": auth["executionId"], "orderState": "FILLED", "positionState": "OPEN"}})
+            _, a = only(res)
+            self.assertEqual((a["state"], a["reasonCode"]), (state, code))
+            self.assertEqual(res["authorizations"], [])
+            self.assertEqual(res["revocations"], [])
+
+    def test_stage9_inflight_execution_counts_as_committed_risk(self):
+        auth = run([eur_long()], [acct()])["authorizations"][0]
+        gbp = eur_long(instrument="GBPUSD", invalidationLevel=1.2980, entryContext={**eur_long()["entryContext"], "triggerTs": 1790007200, "lastClose": 1.2998},
+                       boundaries={"H8": {"lower": 1.29, "upper": 1.3070}})
+        res = run([gbp], [acct()], inflight=[{**auth, "status": "CONSUMED", "inFlight": True}], config=cfg(maxCurrencyRiskPct=1.4))
+        self.assertEqual(only(res)[1]["reasonCode"], "CURRENCY_CONCENTRATION")
+        self.assertEqual(res["revocations"], [])   # an in-flight execution is never revoked by Stage 8
+
 
 class Config(unittest.TestCase):
     def test_validation_and_hash(self):

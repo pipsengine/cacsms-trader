@@ -960,10 +960,14 @@ def _authorization(opp: dict[str, Any], acct: dict[str, Any], ps: dict[str, Any]
 def evaluate(handoffs: list[dict[str, Any]], accounts: list[dict[str, Any]], market: dict[str, dict[str, Any]], fx: FxFn,
              cfg: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
     """ctx: now, auto, corr {(a,b): rho}, pending [PENDING authorizations], attempts {(setupKey, accountId): n}, approvals {(setupKey, accountId)},
-    brokerMargin {(symbol, side): per-lot margin in terminal currency}, terminalCurrency, configHash."""
+    brokerMargin {(symbol, side): per-lot margin in terminal currency}, terminalCurrency, configHash,
+    inflight [authorizations Stage 9 consumed whose broker position is not yet confirmed — still committed risk],
+    handedOff {(setupKey, accountId): {status, executionId, orderState, positionState}} — consumed / declined by Stage 9, never re-authorized."""
     now = ctx["now"]
     pending = [a for a in ctx.get("pending") or [] if (parse_ts(a.get("expiresAt")) or 0) > now]
-    states = {a["id"]: account_state(a, market, fx, cfg, now, pending) for a in accounts}
+    inflight = list(ctx.get("inflight") or [])
+    handed = ctx.get("handedOff") or {}
+    states = {a["id"]: account_state(a, market, fx, cfg, now, pending + inflight) for a in accounts}
     opps = [evaluate_setup(h, market, cfg, now) for h in handoffs]
     opps.sort(key=lambda o: (0 if o["setupState"] == "QUALIFIED" else 1, -o["score"], o["symbol"]))
     authorizations: list[dict[str, Any]] = []
@@ -975,6 +979,8 @@ def evaluate(handoffs: list[dict[str, Any]], accounts: list[dict[str, Any]], mar
             existing = pend_keys.get((o["setupKey"], a["id"]))
             if existing:
                 ev = _existing(o, a, ps, existing)
+            elif (o["setupKey"], a["id"]) in handed:
+                ev = _handed_off(a, ps, handed[(o["setupKey"], a["id"])])
             else:
                 ev = evaluate_account(o, a, ps, market, fx, cfg, ctx)
                 if ev["authorization"]:
@@ -1017,6 +1023,20 @@ def _existing(o: dict[str, Any], a: dict[str, Any], ps: dict[str, Any], auth: di
             "failures": [], "gates": {"authorization": _g("PASS", f"Existing PENDING authorization {auth['executionId']}")},
             "sizing": {"volume": auth.get("volume"), "riskMoney": auth.get("riskAmount"), "riskPct": auth.get("riskPct"), "marginRequired": auth.get("marginRequired")},
             "constraints": [], "exposure": {}, "prop": {}, "authorization": None, "existingAuthorization": auth.get("executionId")}
+
+
+def _handed_off(a: dict[str, Any], ps: dict[str, Any], h: dict[str, Any]) -> dict[str, Any]:
+    """Stage 9 already consumed (or declined) this setup's authorization for the account: one execution per setup, never re-authorized."""
+    consumed = h.get("status") == "CONSUMED"
+    where = " / ".join(s for s in (h.get("orderState"), h.get("positionState")) if s) or "recorded"
+    reason = (f"Authorization {h.get('executionId')} consumed by Stage 9 — execution {where}; setup not re-authorized" if consumed else
+              f"Stage 9 declined authorization {h.get('executionId')} at pre-execution revalidation — setup not re-authorized")
+    return {"accountId": a.get("id"), "name": a.get("name"), "accountClass": a.get("accountClass"), "currency": ps["currency"], "live": ps["live"],
+            "login": a.get("login"), "server": a.get("server"), "tradingMode": a.get("tradingMode"), "tradingEnabled": bool(a.get("tradingEnabled")),
+            "state": "AUTHORIZED" if consumed else "ACCOUNT_BLOCKED", "reasonCode": "EXECUTED_BY_STAGE9" if consumed else "STAGE9_DECLINED",
+            "hypothetical": False, "reason": reason, "failures": [],
+            "gates": {"authorization": _g("PASS" if consumed else "FAIL", reason)}, "sizing": {}, "constraints": [], "exposure": {}, "prop": {},
+            "authorization": None, "existingAuthorization": h.get("executionId")}
 
 
 def _account_summary(a: dict[str, Any], ps: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:

@@ -40,7 +40,7 @@ export function createCacsmsWorkflowAdapter(bindings: WorkflowRuntimeBindings): 
       workflowActions.retry(stage);
     },
     async setExecution(enabled) {
-      workflowActions.setExecution(enabled);
+      await workflowActions.setExecution(enabled);
     },
   };
 }

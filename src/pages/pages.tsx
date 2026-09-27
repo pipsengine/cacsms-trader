@@ -37,7 +37,8 @@ import { ageText, HtfVisionPage, useVisionStore, visionStageStatus } from '../fe
 import { MarketScannerPage, scannerStageStatus, useScannerStore } from '../features/market-scanner';
 import { directionStageStatus, StructuralDirectionPage, useDirectionStore } from '../features/structural-direction';
 import { H1ConfirmationPage, h1StageStatus, useH1Store } from '../features/h1-confirmation';
-import { OpportunitiesRiskPage, riskStageStatus, startRiskStore, useRiskStore } from '../features/opportunity-risk';
+import { OpportunitiesRiskPage, riskStageStatus, useRiskStore } from '../features/opportunity-risk';
+import { ExecutionPositionsPage, executionStageStatus, fetchTrades, useExecutionStore, type ExecTrade } from '../features/execution';
 
 const dir = (x: string) => (x === 'BULLISH' ? 'green' : x === 'BEARISH' ? 'red' : 'gray');
 
@@ -137,6 +138,9 @@ export function Overview() {
   const riskStore = useRiskStore();
   const riskStatus = riskStageStatus(riskStore);
   const rc = riskStore.state?.run?.counters;
+  const execStore = useExecutionStore();
+  const execStatus = executionStageStatus(execStore);
+  const execRun = execStore.state?.run;
   const stageOk = (idx: number) =>
     idx === 2
       ? regimeStatus === 'HEALTHY' || regimeStatus === 'RUNNING'
@@ -150,7 +154,9 @@ export function Overview() {
               ? h1Status === 'HEALTHY'
               : idx === 7
                 ? riskStatus === 'HEALTHY'
-                : !!stage1Pass || idx === 8;
+                : idx === 8
+                  ? execStatus === 'HEALTHY'
+                  : !!stage1Pass;
   const stageNote = (idx: number) => {
     if (idx === 2) return `${regimeStatus} · ${regimeClassified}/9 classified`;
     if (idx === 3) return scan ? `${scannerStatus} · ${scan.directional} directional · ${scan.promoted} promoted` : scannerStatus;
@@ -158,9 +164,12 @@ export function Overview() {
     if (idx === 5) return dc ? `${directionStatus} · ${dc.candidates} candidates · ${dc.ready} ready for H1` : directionStatus;
     if (idx === 6) return hc ? `${h1Status} · ${hc.candidates} candidates · ${hc.confirmed} confirmed` : h1Status;
     if (idx === 7) return rc ? `${riskStatus} · ${rc.qualified} qualified · ${rc.authorized} authorized` : riskStatus;
+    if (idx === 8)
+      return execRun?.summary
+        ? `${execStatus} · ${execRun.control?.state ?? '—'} · ${execRun.summary.stage9Positions} managed · ${execRun.summary.queue} queued`
+        : execStatus;
     if (!instruments.length) return 'Idle · No data';
     if (idx === 0) return `${stage1Pass}/${instruments.length} pass Stage 1`;
-    if (idx === 8) return `Managing ${open} positions`;
     return stage1Pass ? `${stage1Pass} instruments in flow` : 'Blocked upstream (Stage 1)';
   };
 
@@ -323,179 +332,72 @@ export function Risk() {
   return <OpportunitiesRiskPage />;
 }
 
+/** Stage 9 executes and manages positions on the central engine on the bridge; the page only monitors and sends audited commands. */
 export function Execution() {
-  const { positions, closePosition, auto, riskUsed } = useTrading();
-  const riskStore = useRiskStore();
-  const active = positions.filter((x) => x.status === 'ACTIVE');
-  const pnl = active.reduce((s, p) => s + p.pnl, 0);
-  const now = Date.now();
-  const riskStatus = riskStageStatus(riskStore);
-  const auths = riskStore.state?.authorizations ?? [];
-  const pending = riskStatus === 'HEALTHY' || riskStatus === 'DEGRADED' ? auths.filter((a) => a.status === 'PENDING' && Date.parse(a.expiresAt) > now) : [];
-  useEffect(() => startRiskStore(), []);
-  return (
-    <>
-      <PageHeader title="Execution & Positions" subtitle="Broker execution, live position management and trade lifecycle control" />
-      <div className="metrics">
-        <Metric label="Engine" value={auto ? 'AUTO' : 'PAUSED'} sub="New trade execution" />
-        <Metric label="Open P&L" value={active.length ? `$${pnl.toFixed(2)}` : '$0.00'} sub="Across active positions" />
-        <Metric label="Open Risk" value={`${riskUsed.toFixed(2)}%`} sub={`${active.length} active positions`} />
-        <Metric label="Authorized" value={pending.length} sub={`Stage 8 → Stage 9 queue · Stage 8 ${riskStatus}`} />
-      </div>
-      <Card>
-        <div className="card-head">
-          <div>
-            <h3>Stage 8 Authorization Queue</h3>
-            <p>Immutable execution authorizations from Opportunities &amp; Risk — Stage 9 may act only on a PENDING, unexpired authorization and its exact terms</p>
-          </div>
-          <Badge tone={pending.length ? 'green' : 'gray'}>{pending.length} pending</Badge>
-        </div>
-        {!auths.length ? (
-          <EmptyState
-            title={riskStore.loading ? 'Loading Stage 8 authorizations…' : 'No execution authorization'}
-            detail={riskStore.error || 'An authorization is issued only when a Stage 7 confirmed setup passes every setup, portfolio, account and permission gate while trading is RUNNING.'}
-          />
-        ) : (
-          <div className="table-wrap">
-            <table className="cs-table">
-              <thead>
-                <tr>
-                  <th>Execution ID</th>
-                  <th>Account</th>
-                  <th>Instrument</th>
-                  <th>Side</th>
-                  <th>Volume</th>
-                  <th>Entry ref.</th>
-                  <th>SL</th>
-                  <th>TP</th>
-                  <th>Risk</th>
-                  <th>Expires</th>
-                  <th>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {auths.slice(0, 12).map((a) => (
-                  <tr key={a.executionId}>
-                    <td>
-                      <code>{a.executionId}</code>
-                    </td>
-                    <td>
-                      {a.accountName ?? a.accountId} <small className="muted">{a.accountClass}</small>
-                    </td>
-                    <td>
-                      <b>{a.instrument}</b>
-                    </td>
-                    <td>
-                      <Badge tone={a.direction === 'BUY' ? 'green' : 'red'}>{a.direction}</Badge>
-                    </td>
-                    <td>{a.volume}</td>
-                    <td>{a.entryPolicy.referencePrice}</td>
-                    <td>{a.stopLoss}</td>
-                    <td>{a.takeProfit ?? '—'}</td>
-                    <td>
-                      {a.riskAmount.toFixed(2)} {a.riskCurrency} <small className="muted">({a.riskPct.toFixed(2)}%)</small>
-                    </td>
-                    <td>{new Date(a.expiresAt).toLocaleTimeString()}</td>
-                    <td>
-                      <Badge tone={a.status === 'PENDING' && Date.parse(a.expiresAt) > now ? 'green' : a.status === 'REVOKED' ? 'red' : 'gray'}>{a.status}</Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-      <Card>
-        <h3>Open Positions</h3>
-        {!active.length ? (
-          <EmptyState title="No open positions" detail="MT5-synced positions are stored in dbo.app_positions / dbo.mt5_positions." />
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Trade</th>
-                  <th>Instrument</th>
-                  <th>Side</th>
-                  <th>Entry</th>
-                  <th>Current</th>
-                  <th>SL</th>
-                  <th>TP</th>
-                  <th>Size</th>
-                  <th>Risk</th>
-                  <th>P&L</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>
-                {active.map((x) => (
-                  <tr key={x.id}>
-                    <td>{x.id}</td>
-                    <td>
-                      <b>{x.symbol}</b>
-                    </td>
-                    <td>
-                      <Badge tone="green">{x.side}</Badge>
-                    </td>
-                    <td>{x.entry}</td>
-                    <td>{x.current}</td>
-                    <td>{x.sl}</td>
-                    <td>{x.tp}</td>
-                    <td>{x.size}</td>
-                    <td>{x.risk}%</td>
-                    <td className={x.pnl >= 0 ? 'positive' : 'negative'}>
-                      {x.pnl >= 0 ? '+' : ''}
-                      ${x.pnl}
-                    </td>
-                    <td>
-                      <button className="mini danger" onClick={() => closePosition(x.id)}>
-                        Close
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-    </>
-  );
+  return <ExecutionPositionsPage />;
 }
 
+/** Closed Stage 9 trades published to Stage 10, read from dbo.app_exec_trade. */
 export function Performance() {
-  const { positions, events } = useTrading();
-  const closed = positions.filter((p) => p.status === 'CLOSED');
-  const wins = closed.filter((p) => p.pnl > 0).length;
+  const { events } = useTrading();
+  const execStore = useExecutionStore();
+  const [trades, setTrades] = useState<ExecTrade[] | null>(null);
+  const [err, setErr] = useState('');
+  const published = execStore.state?.trades.length ?? 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchTrades({ limit: 500 })
+      .then((r) => !cancelled && (setTrades(r.trades), setErr('')))
+      .catch((e) => !cancelled && setErr(e instanceof Error ? e.message : 'Trade history unavailable'));
+    return () => {
+      cancelled = true;
+    };
+  }, [published]);
+
+  const closed = trades ?? [];
+  const wins = closed.filter((t) => t.realizedPnl > 0).length;
   const winRate = closed.length ? Math.round((wins / closed.length) * 100) : 0;
-  const net = positions.reduce((s, p) => s + p.pnl, 0);
+  const net = closed.reduce((s, t) => s + t.realizedPnl, 0);
+  const rs = closed.filter((t) => t.rMultiple != null);
+  const avgR = rs.length ? rs.reduce((s, t) => s + (t.rMultiple ?? 0), 0) / rs.length : null;
+  const currencies = [...new Set(closed.map((t) => t.currency))];
   const curve = useMemo(() => {
     let eq = 0;
     return closed
       .slice()
       .reverse()
-      .map((p, i) => {
-        eq += p.pnl;
-        return { n: i + 1, equity: eq };
+      .map((t, i) => {
+        eq += t.realizedPnl;
+        return { n: i + 1, equity: Number(eq.toFixed(2)) };
       });
   }, [closed]);
+  const slip = closed.filter((t) => t.slippagePoints != null);
 
   return (
     <>
       <PageHeader title="Performance & Learning" subtitle="Decision audit, strategy diagnostics and controlled model calibration" />
+      {err && <p className="alert">{err}</p>}
       <div className="metrics">
-        <Metric label="Net P&L" value={`${net >= 0 ? '+' : ''}${net.toFixed(2)}`} sub="From stored positions" />
+        <Metric
+          label="Net P&L"
+          value={trades ? `${net >= 0 ? '+' : ''}${net.toFixed(2)}${currencies.length === 1 ? ` ${currencies[0]}` : ''}` : '—'}
+          sub={currencies.length > 1 ? `Mixed currencies: ${currencies.join(', ')}` : 'Realized · closed Stage 9 trades'}
+        />
         <Metric label="Win Rate" value={closed.length ? `${winRate}%` : '—'} sub={`${closed.length} closed trades`} />
-        <Metric label="Open" value={positions.filter((p) => p.status === 'ACTIVE').length} sub="Active" />
-        <Metric label="Events" value={events.length} sub="Audit trail" />
+        <Metric label="Average R" value={avgR != null ? `${avgR >= 0 ? '+' : ''}${avgR.toFixed(2)}R` : '—'} sub={`${rs.length} trades with initial risk`} />
+        <Metric
+          label="Avg Slippage"
+          value={slip.length ? `${(slip.reduce((s, t) => s + (t.slippagePoints ?? 0), 0) / slip.length).toFixed(1)} pts` : '—'}
+          sub="Expected vs actual entry"
+        />
       </div>
       <div className="grid-2">
         <Card>
           <h3>Equity Curve</h3>
           <div className="chart-lg">
             {!curve.length ? (
-              <EmptyState title="No closed trades yet" detail="Equity curve builds from dbo.app_positions history." />
+              <EmptyState title="No closed trades yet" detail="The curve builds from closed Stage 9 trades published to Stage 10 (dbo.app_exec_trade)." />
             ) : (
               <ResponsiveContainer>
                 <AreaChart data={curve}>
@@ -514,9 +416,7 @@ export function Performance() {
           <div className="insights">
             <div>
               <Brain />
-              <span>
-                Insights appear after real closed trades and decision events are stored — no synthetic recommendations.
-              </span>
+              <span>Insights appear after real closed trades and decision events are stored — no synthetic recommendations.</span>
             </div>
             <div>
               <Shield />
@@ -527,7 +427,7 @@ export function Performance() {
             <div>
               <Activity />
               <span>
-                <b>{closed.length}</b> closed positions available for diagnostics.
+                <b>{closed.length}</b> closed Stage 9 trades with full lifecycle evidence available for diagnostics.
               </span>
             </div>
             <div>

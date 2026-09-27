@@ -1,14 +1,10 @@
-import { allPairs, instruments } from '../../../data/market';
+import { allPairs } from '../../../data/market';
 import { eventBus } from '../../../services/eventBus';
 import { decisionAudit } from '../../../services/decisionAudit';
-import { SYSTEM } from '../../../config/system';
-import { qualifyRisk } from '../../../engine/risk';
 import { INSTRUMENTS, TIMEFRAMES } from '../data/instruments';
 import { nextTerminalInstanceId } from '../utils/terminalInstance';
-import { qualifyExecution } from './executionQualification';
 import { reconcile } from './reconciliation';
-import { calculateRiskSize } from './currencyRisk';
-import { assertExecutionSafe } from './mt5ConnectionAdapter';
+import { getExecutionSnapshot, setControlNow, subscribeExecution } from '../../execution/services/executionStore';
 import { bridgeHealth, bridgeListAccounts, bridgePulse, bridgeStoreSecret, bridgeSync, bridgeTest, bridgeUpsertAccount, type BridgePosition, type BridgeSyncResult } from './mt5BridgeClient';
 import { loadAppState, saveAppState } from '../../../services/appDb';
 import { publishLiveFeed } from '../../../services/liveFeed';
@@ -31,7 +27,9 @@ const now = () => new Date().toISOString();
 const universe = (INSTRUMENTS as readonly string[]).length === allPairs.length ? [...INSTRUMENTS] : [...allPairs];
 
 let seq = 100;
+/** Mirrors of the central engine's global trading switch and Stage 9 new-entry permission — never set locally. */
 let globalTradingEnabled = false;
+let centralNewEntries = false;
 let reconnectAttempts = 0;
 
 const listeners = new Set<(s: MT5Snapshot) => void>();
@@ -142,6 +140,18 @@ let snapshot: MT5Snapshot = {
 };
 
 pushEvent('MT5 Connection Centre ready — add an account to connect a terminal', 'INFO', 'SYSTEM');
+
+subscribeExecution(() => {
+  const s = getExecutionSnapshot().state;
+  const global = Boolean(s?.tradingEnabled);
+  const entries = Boolean(s?.run?.control?.newEntries);
+  if (global === globalTradingEnabled && entries === centralNewEntries) return;
+  globalTradingEnabled = global;
+  centralNewEntries = entries;
+  refreshGatewayHealth();
+  snapshot = { ...snapshot, globalTradingEnabled };
+  listeners.forEach((l) => l(snapshot));
+});
 
 let syncInFlight = false;
 let lastBridgePoll = 0;
@@ -307,7 +317,7 @@ function emit() {
             : 'HEALTHY'
           : 'DISCONNECTED',
       marketData: healthy ? 'STREAMING' : 'OFFLINE',
-      orderGateway: !globalTradingEnabled || !healthy ? 'BLOCKED' : 'READY',
+      orderGateway: !centralNewEntries || !healthy ? 'BLOCKED' : 'READY',
       heartbeat: healthy ? 'HEALTHY' : 'LOST',
       queueDepth: healthy ? Math.max(0, eventBus.recent(20).length % 8) : 0,
     },
@@ -347,7 +357,7 @@ function refreshGatewayHealth() {
     health: {
       ...snapshot.health,
       bridge: anyHealthy ? 'HEALTHY' : snapshot.accounts.length ? 'DISCONNECTED' : 'DISCONNECTED',
-      orderGateway: !globalTradingEnabled || !anyHealthy || !anyTrading ? 'BLOCKED' : 'READY',
+      orderGateway: !centralNewEntries || !anyHealthy || !anyTrading ? 'BLOCKED' : 'READY',
       marketData: anyHealthy ? snapshot.health.marketData : 'OFFLINE',
       heartbeat: anyHealthy ? 'HEALTHY' : 'LOST',
     },
@@ -616,7 +626,7 @@ export async function mt5Reconnect(id: string): Promise<MT5CommandResult> {
     health: {
       ...snapshot.health,
       reconciliation: mismatch ? 'MISMATCH' : 'CURRENT',
-      orderGateway: mismatch || !globalTradingEnabled ? 'BLOCKED' : 'READY',
+      orderGateway: mismatch || !centralNewEntries ? 'BLOCKED' : 'READY',
     },
   };
   pushEvent(
@@ -768,12 +778,15 @@ export async function mt5SetAccountTrading(id: string, enabled: boolean): Promis
   return { ok: true, message: 'Updated' };
 }
 
+/** The global switch is the central engine's TRADING_PAUSED control (app_settings.auto), applied and audited on the bridge. */
 export async function mt5SetGlobalTrading(enabled: boolean): Promise<MT5CommandResult> {
-  globalTradingEnabled = enabled;
-  refreshGatewayHealth();
-  pushEvent(`Global new-order execution ${enabled ? 'enabled' : 'stopped'}`, enabled ? 'INFO' : 'WARNING', 'SYSTEM');
-  emit();
-  return { ok: true, message: 'Updated' };
+  try {
+    await setControlNow({ tradingEnabled: enabled }, `Global trading ${enabled ? 'resumed' : 'paused'} from MT5 Connection`);
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : 'Central engine unreachable — global trading unchanged' };
+  }
+  pushEvent(`Global new-order execution ${enabled ? 'enabled' : 'stopped'} on the central engine`, enabled ? 'INFO' : 'WARNING', 'SYSTEM');
+  return { ok: true, message: enabled ? 'Trading RUNNING on the central engine' : 'Trading PAUSED — open positions still managed' };
 }
 
 export async function mt5SaveSymbolMap(map: SymbolMap): Promise<MT5CommandResult> {
@@ -818,9 +831,14 @@ export async function mt5Reconcile(id: string): Promise<MT5CommandResult> {
 
 export async function mt5EmergencyStop(scope: { accountId?: string; symbol?: string }): Promise<MT5CommandResult> {
   if (scope.accountId) {
-    setAccountState(scope.accountId, { tradingEnabled: false });
+    const saved = await applyAccountSetting(scope.accountId, { tradingEnabled: false });
+    if (!saved.ok) return saved;
   } else {
-    globalTradingEnabled = false;
+    try {
+      await setControlNow({ emergencyStop: true }, `Emergency stop from MT5 Connection${scope.symbol ? ` (${scope.symbol})` : ''}`);
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : 'Central engine unreachable — emergency stop not applied' };
+    }
   }
   refreshGatewayHealth();
   pushEvent(
@@ -850,173 +868,6 @@ export async function mt5SetTradingMode(accountId: string, mode: TradingMode): P
   pushEvent(`Trading mode set to ${mode}`, 'INFO', 'COMPLIANCE', accountId);
   emit();
   return { ok: true, message: 'Trading mode updated' };
-}
-
-/** Stage 9 fail-closed order path used by BrokerGateway. */
-export function mt5PlaceQualifiedOrder(input: {
-  accountId?: string;
-  symbol: string;
-  side: 'BUY' | 'SELL';
-  size: number;
-  sl: number;
-  tp: number;
-  clientOrderId: string;
-  riskPct?: number;
-  entry?: number;
-}): { accepted: boolean; brokerOrderId?: string; reason?: string; filledPrice?: number } {
-  const accountId =
-    input.accountId ||
-    snapshot.accounts.find((a) => a.state === 'HEALTHY' && a.tradingEnabled && a.tradingMode === 'AUTONOMOUS')?.id ||
-    snapshot.accounts.find((a) => a.state === 'HEALTHY' && a.tradingEnabled)?.id;
-
-  if (!accountId) {
-    return { accepted: false, reason: 'No eligible MT5 account for execution' };
-  }
-
-  const safe = assertExecutionSafe(snapshot, accountId);
-  if (!safe.ok) return { accepted: false, reason: safe.reason };
-
-  const account = snapshot.accounts.find((a) => a.id === accountId)!;
-  const map = snapshot.symbolMaps.find((m) => m.accountId === accountId && m.canonical === input.symbol && m.enabled);
-  if (!map || map.status !== 'MAPPED') {
-    return { accepted: false, reason: `Symbol ${input.symbol} is not mapped for ${account.name}` };
-  }
-
-  const instrument = instruments.find((i) => i.symbol === input.symbol);
-  const risk = instrument
-    ? qualifyRisk({
-        setupScore: instrument.score,
-        spreadOk: map.spread <= 3,
-        volatilityOk: true,
-        rr: 2,
-        portfolioHeat: snapshot.positions.filter((p) => p.accountId === accountId && p.status === 'OPEN').length * 0.35,
-        clusterExposure: input.symbol.includes('USD') ? 0.8 : 0.3,
-        riskPerTrade: input.riskPct ?? SYSTEM.safety.defaultRiskPct,
-      })
-    : { approved: true, reasons: [] as string[], positionRisk: input.riskPct ?? 0.5 };
-
-  const coverage = snapshot.coverage.find((c) => c.accountId === accountId && c.symbol === input.symbol);
-  const h1 = coverage?.timeframes.H1;
-  const tickFresh = !!h1 && !h1.stale;
-
-  const openCount = snapshot.positions.filter((p) => p.accountId === accountId && p.status === 'OPEN').length;
-  const propOk =
-    !account.propRules ||
-    (account.profit > -account.propRules.accountSize * (account.propRules.dailyLossLimitPct / 100) &&
-      openCount < account.maxConcurrentTrades);
-
-  const qualification = qualifyExecution({
-    connectionHealthy: account.state === 'HEALTHY',
-    authenticated: true,
-    synchronized: snapshot.health.reconciliation === 'CURRENT',
-    marketOpen: true,
-    symbolMapped: true,
-    tickFresh,
-    spread: map.spread,
-    maxSpread: 3,
-    accountTradingEnabled: account.tradingEnabled,
-    globalTradingEnabled,
-    instrumentTradingEnabled: map.enabled,
-    riskApproved: risk.approved,
-    propCompliant: !!propOk,
-    newsAllowed: !account.propRules || account.propRules.newsTrading,
-    marginSufficient: account.freeMargin > 0,
-    positionLimitAvailable: openCount < account.maxConcurrentTrades,
-    duplicateOrder: false,
-  });
-
-  if (!qualification.eligible) {
-    snapshot = {
-      ...snapshot,
-      gateway: { ...snapshot.gateway, rejected: snapshot.gateway.rejected + 1, ordersToday: snapshot.gateway.ordersToday + 1 },
-    };
-    pushEvent(`Order rejected: ${qualification.reasons[0]}`, 'ERROR', 'ORDER', accountId, input.symbol);
-    emit();
-    return { accepted: false, reason: qualification.reasons[0] };
-  }
-
-  if (account.tradingMode === 'ANALYSIS_ONLY') {
-    return { accepted: false, reason: 'Account is Analysis Only — execution blocked' };
-  }
-  if (account.tradingMode === 'APPROVAL_REQUIRED') {
-    pushEvent('Order held for approval', 'WARNING', 'ORDER', accountId, input.symbol);
-    emit();
-    return { accepted: false, reason: 'Approval required before MT5 submission' };
-  }
-
-  const entry = input.entry ?? instrument?.bid ?? 1;
-  const sizing = calculateRiskSize({
-    equity: account.equity,
-    accountCurrency: account.currency,
-    riskPct: input.riskPct ?? SYSTEM.safety.defaultRiskPct,
-    entry,
-    stop: input.sl,
-    spec: {
-      symbol: input.symbol,
-      digits: map.digits,
-      point: map.tickSize,
-      tickSize: map.tickSize,
-      tickValue: map.tickValue,
-      contractSize: input.symbol === 'XAUUSD' ? 100 : 100000,
-      volumeMin: map.minLot,
-      volumeMax: map.maxLot,
-      volumeStep: map.lotStep,
-      profitCurrency: account.currency,
-      marginCurrency: account.currency,
-    },
-  });
-
-  if (!sizing.valid) {
-    return { accepted: false, reason: sizing.reason || 'Position sizing failed' };
-  }
-
-  const volume = input.size > 0 ? Math.min(input.size, sizing.volume || input.size) : sizing.volume;
-  const orderId = `MT5-${Date.now()}`;
-  const position: MT5Position = {
-    id: `pos-${orderId}`,
-    accountId,
-    cacsmsTradeId: input.clientOrderId,
-    mt5OrderId: orderId,
-    mt5DealId: `D-${orderId}`,
-    mt5PositionId: `P-${orderId}`,
-    symbol: input.symbol,
-    side: input.side,
-    volume,
-    entry,
-    current: entry,
-    sl: input.sl,
-    tp: input.tp,
-    pnl: 0,
-    currency: account.currency,
-    status: 'OPEN',
-    openedAt: now(),
-  };
-
-  snapshot = {
-    ...snapshot,
-    positions: [position, ...snapshot.positions],
-    gateway: {
-      ...snapshot.gateway,
-      ordersToday: snapshot.gateway.ordersToday + 1,
-      successful: snapshot.gateway.successful + 1,
-      avgExecutionMs: Math.round((snapshot.gateway.avgExecutionMs + 120) / 2),
-    },
-  };
-  pushEvent(`Order filled ${input.side} ${volume} ${map.brokerSymbol}`, 'TRADE', 'ORDER', accountId, input.symbol);
-  emit();
-  return { accepted: true, brokerOrderId: orderId, filledPrice: entry };
-}
-
-export function getStage9ExecutionSummary() {
-  const ready = snapshot.accounts.filter((a) => assertExecutionSafe(snapshot, a.id).ok);
-  return {
-    globalTradingEnabled,
-    readyAccounts: ready.length,
-    orderGateway: snapshot.health.orderGateway,
-    heartbeat: snapshot.health.heartbeat,
-    reconciliation: snapshot.health.reconciliation,
-    mode: SYSTEM.mode,
-  };
 }
 
 export function setAccountConnectionState(id: string, state: ConnectionState) {
