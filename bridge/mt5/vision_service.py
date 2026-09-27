@@ -31,7 +31,7 @@ TFS = ("D1", "H8")
 CONFIG: dict[str, Any] = {
     "loopSec": 20,
     "fullEverySec": 900,
-    "scannerGate": "DIRECTIONAL",   # DIRECTIONAL: published + non-neutral bias · PUBLISHED: published pair · ALL
+    "scannerGate": "STAGE4_PROMOTION",   # STAGE4_PROMOTION: promoted by the Market Scanner · ALL: analyse every instrument
     "volSpikeAtr": 1.5,             # intrabar move from the last close, in ATR
     "liveMaxTickAgeSec": 600,       # ticks older than this (market closed) do not raise live events
     "extraBars": 200,
@@ -46,15 +46,16 @@ def scanner_qualification(rows: dict[str, dict[str, Any]]) -> dict[str, dict[str
         if gate == "ALL":
             q, why = True, "Scanner gate ALL"
         elif not p:
-            q, why = False, "not yet published by the Market Scanner"
-        elif p["status"] != "READY":
-            q, why = False, f"scanner pair {p['status']}"
-        elif gate == "DIRECTIONAL" and p["bias"] == "NEUTRAL":
-            q, why = False, "scanner regime bias NEUTRAL"
+            q, why = False, "not yet ranked by the Market Scanner"
+        elif not p.get("promoted"):
+            q, why = False, f"Stage 4 {p.get('state')}: {p.get('reason')}"
         else:
-            q, why = True, f"scanner {p['bias']} · conviction {p['conviction']:.0f}" if p.get("conviction") is not None else f"scanner {p['bias']}"
-        out[sym] = {"qualified": q, "reason": why, "bias": (p or {}).get("bias"), "conviction": (p or {}).get("conviction"),
-                    "differential": (p or {}).get("differential"), "gate": gate}
+            q, why = True, f"Stage 4 PROMOTED {p['direction']} · conviction {p['conviction']:.0f}" if p.get("conviction") is not None else f"Stage 4 PROMOTED {p['direction']}"
+        p = p or {}
+        out[sym] = {"qualified": q, "reason": why[:300], "bias": p.get("direction"), "conviction": p.get("conviction"),
+                    "differential": p.get("differential"), "relationship": p.get("relationship"), "confidence": p.get("confidence"),
+                    "freshness": p.get("freshness"), "state": p.get("state"), "evidence": p.get("evidence") or [],
+                    "liveEligible": bool(p.get("liveEligible")), "gate": gate}
     return out
 
 

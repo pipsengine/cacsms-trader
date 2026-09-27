@@ -18,6 +18,8 @@ import { stage2Output } from '../../currency-strength/services/strengthStage';
 import type { DataState } from '../../currency-strength/services/strengthModel';
 import { getVisionSnapshot, visionRunAgeMs, visionStageStatus, type VisionStageStatus } from '../../htf-vision/services/visionStore';
 import { stage5Output } from '../../htf-vision/services/visionStage';
+import { getScannerInstrument, getScannerSnapshot, scannerRunAgeMs, scannerStageStatus, type ScannerStageStatus } from '../../market-scanner/services/scannerStore';
+import { stage4Output } from '../../market-scanner/services/scannerStage';
 import type {
   InstrumentTrace,
   StageRuntime,
@@ -132,6 +134,14 @@ const STRENGTH_STAGE_STATUS: Record<DataState, StageStatus> = {
   CURRENT: 'healthy',
 };
 
+const SCANNER_STAGE_STATUS: Record<ScannerStageStatus, StageStatus> = {
+  WAITING: 'waiting',
+  HEALTHY: 'healthy',
+  DEGRADED: 'running',
+  STALE: 'stale',
+  ERROR: 'error',
+};
+
 const VISION_STAGE_STATUS: Record<VisionStageStatus, StageStatus> = {
   WAITING: 'waiting',
   HEALTHY: 'healthy',
@@ -183,8 +193,9 @@ function currentStage(i: Instrument, riskApproved: boolean, open: boolean) {
   if (i.state === 'READY' && riskApproved) return 8;
   if (i.h1 === 'Confirmed') return 7;
   if (i.d1 !== 'NEUTRAL' && i.h8 !== 'NEUTRAL') return 6;
-  if (Math.abs(i.strengthDiff) > 3) return 5;
-  if (Math.abs(i.strengthDiff) > 1) return 4;
+  const s4 = getScannerInstrument(i.symbol);
+  if (s4?.state === 'PROMOTED') return 5;
+  if (s4 && s4.direction !== 'NEUTRAL') return 4;
   return 3;
 }
 
@@ -221,6 +232,7 @@ let deps: RuntimeDeps = {
     'M5_CLOSE',
     'DATA_EVENT',
     'STRENGTH_CHANGE',
+    'SCANNER_CHANGE',
     'STRUCTURE_CHANGE',
     'CHANNEL_APPROACH',
     'CHANNEL_BREAK',
@@ -228,7 +240,7 @@ let deps: RuntimeDeps = {
 ).forEach((type) =>
   eventBus.on(type, (e) => {
     const src = e.payload.source;
-    if ((src !== 'history' && src !== 'strength' && src !== 'vision') || !Array.isArray(e.payload.stages)) return;
+    if ((src !== 'history' && src !== 'strength' && src !== 'scanner' && src !== 'vision') || !Array.isArray(e.payload.stages)) return;
     for (const stage of e.payload.stages as number[]) {
       stageProcessed.set(stage, (stageProcessed.get(stage) ?? 0) + 1);
       stageUpdated.set(stage, e.at);
@@ -347,6 +359,7 @@ function stageStatus(id: number, traces: InstrumentTrace[]): StageStatus {
 
   if (id === 2) return STRENGTH_STAGE_STATUS[stage2Output().state];
   if (id === 3) return REGIME_STAGE_STATUS[regimeStageStatus()];
+  if (id === 4) return SCANNER_STAGE_STATUS[scannerStageStatus()];
   if (id === 5) return VISION_STAGE_STATUS[visionStageStatus()];
 
   if (id === 9 && !executionEnabled) return 'blocked';
@@ -527,6 +540,47 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
       };
     }
 
+    if (id === 4 && status !== 'paused') {
+      const snap = getScannerSnapshot();
+      const s4 = stage4Output();
+      const run = snap.state?.run;
+      const c = s4.counters;
+      const lat = run?.durationMs ?? 0;
+      if (lat > 0 && stageLatency.get(4) !== lat) pushStageLatency(4, lat);
+      const age = scannerRunAgeMs(snap);
+      const promotedConf = s4.promoted.length ? Math.round(s4.promoted.reduce((a, i) => a + (i.conviction ?? 0), 0) / s4.promoted.length) : 0;
+      return {
+        id,
+        name: def.name,
+        status,
+        confidence: promotedConf,
+        latencyMs: lat,
+        latencyHistory: stageLatencyHistory.get(4) ?? (lat > 0 ? [lat] : []),
+        freshnessSec: age == null ? 0 : Math.round(age / 1000),
+        input: [
+          c ? `Stage 1 available ${c.available}/${c.universe}` : 'Stage 1 readiness —',
+          `Stage 2/3 strength & regimes · Stage 3 ${run?.regimeStatus ?? '—'}`,
+          run?.triggers?.length ? `Triggers ${run.triggers.slice(0, 3).join(', ')}` : 'Triggers —',
+        ],
+        output: [
+          c ? `Ranked ${c.universe} · directional ${c.directional} · qualified ${s4.qualified}` : `Ranked ${allPairs.length}-instrument candidate list`,
+          `Promoted ${c?.promoted ?? 0} → HTF Market Vision${s4.promoted.length ? ` (${s4.promoted.slice(0, 4).map((i) => i.symbol).join(', ')})` : ''}`,
+          `Blocked / stale / insufficient ${s4.blocked}`,
+        ],
+        message:
+          status === 'waiting'
+            ? 'Awaiting first Market Scanner ranking from the MT5 bridge'
+            : status === 'stale'
+              ? `Scanner output stale (${age == null ? '—' : Math.round(age / 60000)}m since last re-rank)`
+              : status === 'error'
+                ? snap.error || 'Market Scanner unavailable'
+                : run?.message || 'Ranking current',
+        updatedAt: run?.runAt ?? now,
+        processed: stageProcessed.get(4) ?? s4.instruments.length,
+        failed,
+      };
+    }
+
     if (id === 5 && status !== 'paused') {
       const snap = getVisionSnapshot();
       const s5 = stage5Output();
@@ -547,7 +601,7 @@ function buildStages(traces: InstrumentTrace[]): StageRuntime[] {
         latencyHistory: stageLatencyHistory.get(5) ?? (lat > 0 ? [lat] : []),
         freshnessSec: age == null ? 0 : Math.round(age / 1000),
         input: [
-          `Market Scanner qualified ${s5.qualified}/${s5.instruments.length || allPairs.length}`,
+          `Stage 4 promoted ${s5.qualified}/${s5.instruments.length || allPairs.length}`,
           'Stage 1 validated D1/H8 closed candles',
           run?.triggers?.length ? `Triggers ${run.triggers.slice(0, 3).join(', ')}` : 'Triggers —',
         ],

@@ -26,6 +26,9 @@ try:
     import history
     import history_store
     import regime
+    import scanner
+    import scanner_service
+    import scanner_store
     import vision
     import vision_service
     import vision_store
@@ -48,6 +51,7 @@ try:
 except ImportError:
     from bridge.mt5 import history, history_store  # type: ignore
     from bridge.mt5 import regime  # type: ignore
+    from bridge.mt5 import scanner, scanner_service, scanner_store  # type: ignore
     from bridge.mt5 import vision, vision_service, vision_store  # type: ignore
     from bridge.mt5.db import (  # type: ignore
         delete_account,
@@ -595,6 +599,7 @@ def _regime_trigger_loop() -> None:
             history_store.event_add("DOWNSTREAM", "INFO", f"Stage 3 regime re-run after candle close: {state.get('message')}")
         except Exception as exc:
             history_store.event_add("DOWNSTREAM", "ERROR", f"Stage 3 regime re-run failed: {exc}")
+        SCANNER.mark("REGIME_RUN")
 
 
 @_mt5_serialized
@@ -615,9 +620,17 @@ def _vision_ticks(symbols: list[str]) -> dict[str, dict[str, Any]]:
 VISION = vision_service.VisionService(_vision_ticks)
 
 
+def _scanner_context() -> dict[str, Any]:
+    return {"providerOk": bool(HISTORY.provider_ok), "marketOpen": history.fx_market_open(datetime.now(timezone.utc))}
+
+
+SCANNER = scanner_service.ScannerService(_vision_ticks, _scanner_context, VISION.mark)
+
+
 def _on_candles(timeframe: str, symbols: list[str], kind: str = "INCREMENTAL") -> None:
     if timeframe in _REGIME_TRIGGER_TFS and kind == "INCREMENTAL":
         _regime_trigger_pending.set()
+    SCANNER.on_candles(timeframe, symbols, kind)
     VISION.on_candles(timeframe, symbols, kind)
 
 
@@ -643,6 +656,12 @@ def cmd_vision_chart(symbol: str, timeframe: str, bars: int) -> dict[str, Any]:
         "lines": [x for x in lines if x["ts"] >= first],
         "channel": ch,
     }
+
+
+def _scanner_state() -> dict[str, Any]:
+    state = scanner_store.load_state()
+    state["service"] = {k: SCANNER.meta.get(k) for k in ("status", "message", "runAt", "runs", "errors", "lastError")}
+    return state
 
 
 def _q(qs: dict[str, list[str]], key: str) -> str | None:
@@ -924,6 +943,16 @@ class Handler(BaseHTTPRequestHandler):
                 limit = int((qs.get("limit") or ["260"])[0])
                 self._json(200, {"ok": True, "asset": asset, "history": regime_history(asset, limit)})
                 return
+            if parsed.path == "/scanner/state":
+                self._json(200, _scanner_state())
+                return
+            if parsed.path == "/scanner/detail":
+                symbol = (_q(parse_qs(parsed.query), "symbol") or "").upper()
+                if symbol not in regime.SYMBOLS:
+                    self._json(400, {"ok": False, "message": f"Unknown symbol {symbol}"})
+                    return
+                self._json(200, scanner_store.load_detail(symbol))
+                return
             if parsed.path.startswith("/vision/"):
                 qs = parse_qs(parsed.query)
                 if parsed.path == "/vision/state":
@@ -999,7 +1028,23 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/regime/run":
                 result = cmd_regime_run(body)
+                SCANNER.mark("REGIME_RUN")
                 self._json(200, result)
+                return
+            if parsed.path == "/scanner/run":
+                result = SCANNER.run(["MANUAL"])
+                self._json(200, {"ok": True, **result, "state": _scanner_state()})
+                return
+            if parsed.path == "/scanner/config":
+                overrides = {k: v for k, v in (body.get("overrides") or {}).items() if v is not None and v != ""}
+                try:
+                    scanner.merge_config(overrides)
+                except (ValueError, TypeError) as exc:
+                    self._json(400, {"ok": False, "message": str(exc)})
+                    return
+                scanner_store.save_config(overrides)
+                result = SCANNER.run(["CONFIG_CHANGE"])
+                self._json(200, {"ok": True, **result, "state": _scanner_state()})
                 return
             if parsed.path == "/vision/run":
                 symbol = str(body.get("symbol") or "").upper()
@@ -1087,8 +1132,9 @@ def main() -> None:
         ensure_regime_schema()
         print("[mt5-bridge] regime schema ready")
         history_store.ensure_history_schema()
+        scanner_store.ensure_scanner_schema()
         vision_store.ensure_vision_schema()
-        print("[mt5-bridge] vision schema ready")
+        print("[mt5-bridge] scanner + vision schema ready")
         history_ready = True
     except Exception as exc:
         history_ready = False
@@ -1102,6 +1148,8 @@ def main() -> None:
         HISTORY.start()
         threading.Thread(target=_regime_trigger_loop, name="regime-trigger", daemon=True).start()
         print("[mt5-bridge] autonomous historical synchronizer started")
+        SCANNER.start()
+        print("[mt5-bridge] Stage 4 Market Scanner engine started")
         VISION.start()
         print("[mt5-bridge] Stage 5 HTF Market Vision engine started")
     print("[mt5-bridge] keep MetaTrader 5 running; Ctrl+C to stop")

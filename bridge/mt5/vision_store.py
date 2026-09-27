@@ -6,8 +6,10 @@ import json
 from typing import Any
 
 try:
+    import scanner_store
     from db import ROOT, _iso, connect, set_setting
 except ImportError:  # pragma: no cover
+    from bridge.mt5 import scanner_store  # type: ignore
     from bridge.mt5.db import ROOT, _iso, connect, set_setting  # type: ignore
 
 _schema_ready = False
@@ -33,14 +35,8 @@ def ensure_vision_schema() -> None:
 
 
 def scanner_rows() -> dict[str, dict[str, Any]]:
-    """Market Scanner publication (Stage 3/4 pair intelligence) per instrument."""
-    with connect() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT symbol, status, bias, conviction, differential, obs_date FROM dbo.app_regime_pair")
-        return {
-            s: {"status": st, "bias": b, "conviction": cv, "differential": d, "date": _iso(od)}
-            for s, st, b, cv, d, od in cur.fetchall()
-        }
+    """Stage 4 Market Scanner publication: promotion decision, direction, conviction and evidence per instrument."""
+    return scanner_store.promotions_for_vision()
 
 
 def previous_channels() -> dict[tuple[str, str], dict[str, Any]]:

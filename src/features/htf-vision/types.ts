@@ -117,6 +117,13 @@ export type ScannerQualification = {
   bias: string | null;
   conviction: number | null;
   differential: number | null;
+  /** Stage 4 publication (present when the gate is STAGE4_PROMOTION). */
+  relationship?: string | null;
+  confidence?: number | null;
+  freshness?: string | null;
+  state?: string | null;
+  evidence?: string[];
+  liveEligible?: boolean;
   gate: string;
 };
 

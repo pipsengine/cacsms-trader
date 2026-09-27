@@ -357,9 +357,22 @@ function Interpretation({ v, onInspect, now }: { v: VisionInstrument; onInspect:
         </b>
         <span>Breakout / retest</span>
         <b>{v.d1?.breakout || v.h8?.breakout ? [v.d1?.breakout && `D1 ${breakoutText(v.d1)}`, v.h8?.breakout && `H8 ${breakoutText(v.h8)}`].filter(Boolean).join(' · ') : 'None — price inside both channels'}</b>
-        <span>Scanner qualification</span>
+        <span>Market Scanner (Stage 4)</span>
         <b>
-          <Badge tone={v.scanner?.qualified ? 'green' : 'red'}>{v.scanner?.qualified ? 'QUALIFIED' : 'NOT QUALIFIED'}</Badge> <small className="muted">{v.scanner?.reason}</small>
+          <Badge tone={v.scanner?.qualified ? 'green' : 'red'}>{v.scanner?.qualified ? 'PROMOTED' : 'NOT PROMOTED'}</Badge> <small className="muted">{v.scanner?.reason}</small>
+          {v.scanner?.qualified && (
+            <small className="muted hv-block">
+              {[
+                v.scanner.differential != null ? `differential ${v.scanner.differential > 0 ? '+' : ''}${v.scanner.differential.toFixed(2)}` : null,
+                v.scanner.relationship ? human(v.scanner.relationship) : null,
+                v.scanner.confidence != null ? `regime confidence ${v.scanner.confidence.toFixed(0)}` : null,
+                v.scanner.freshness ? `strength ${v.scanner.freshness.toLowerCase()}` : null,
+                v.scanner.liveEligible === false ? 'structural only (market closed)' : null,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </small>
+          )}
         </b>
         <span>Freshness</span>
         <b>

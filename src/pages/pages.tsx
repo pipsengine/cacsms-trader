@@ -32,8 +32,9 @@ import { bridgeDbHealth } from '../features/mt5-connection/services/mt5BridgeCli
 import { MarketDataPage } from '../features/market-data';
 import { assessInstrument, gatedState } from '../features/market-data/services/stage1Gate';
 import { HistoricalRegimePage, regimeStageStatus, useRegimeStore } from '../features/historical-regime';
-import { CurrencyStrengthPage, stage2Output } from '../features/currency-strength';
+import { CurrencyStrengthPage } from '../features/currency-strength';
 import { ageText, headline, HtfVisionPage, tfDirection, useVisionStore, visionPosition, visionStageStatus } from '../features/htf-vision';
+import { MarketScannerPage, scannerStageStatus, useScannerStore } from '../features/market-scanner';
 
 const dir = (x: string) => (x === 'BULLISH' ? 'green' : x === 'BEARISH' ? 'red' : 'gray');
 
@@ -118,10 +119,18 @@ export function Overview() {
   const regimeStore = useRegimeStore();
   const regimeStatus = regimeStageStatus(regimeStore);
   const regimeClassified = (regimeStore.state?.assets ?? []).filter((a) => a.latest?.regime).length;
+  const scannerStore = useScannerStore();
+  const scannerStatus = scannerStageStatus(scannerStore);
+  const scan = scannerStore.state?.run?.counters;
   const stageOk = (idx: number) =>
-    idx === 2 ? regimeStatus === 'HEALTHY' || regimeStatus === 'RUNNING' : !!stage1Pass || idx === 8;
+    idx === 2
+      ? regimeStatus === 'HEALTHY' || regimeStatus === 'RUNNING'
+      : idx === 3
+        ? scannerStatus === 'HEALTHY'
+        : !!stage1Pass || idx === 8;
   const stageNote = (idx: number) => {
     if (idx === 2) return `${regimeStatus} · ${regimeClassified}/9 classified`;
+    if (idx === 3) return scan ? `${scannerStatus} · ${scan.directional} directional · ${scan.promoted} promoted` : scannerStatus;
     if (!instruments.length) return 'Idle · No data';
     if (idx === 0) return `${stage1Pass}/${instruments.length} pass Stage 1`;
     if (idx === 8) return `Managing ${open} positions`;
@@ -240,138 +249,10 @@ export function Regime() {
   return <HistoricalRegimePage />;
 }
 
-function RegimeConvictionTable() {
-  const { instruments, setSelected, selected } = useTrading();
-  const store = useRegimeStore();
-  const { state, error } = store;
-  const pairs = [...(state?.pairs ?? [])].sort((a, b) => (b.conviction ?? -1) - (a.conviction ?? -1));
-  const s2 = stage2Output(store);
-  const s2Asset = new Map(s2.assets.map((a) => [a.asset, a]));
-  if (!pairs.length) {
-    return (
-      <EmptyState
-        title="No regime intelligence published"
-        detail={error || 'Stage 3 (Historical Regime) publishes pair conviction after both legs are classified.'}
-      />
-    );
-  }
-  const bySymbol = new Map(instruments.map((i) => [i.symbol, i]));
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Instrument</th>
-            <th title="Directional bias from base vs quote regime">Regime bias</th>
-            <th title="Base composite minus quote composite (±20)">Differential</th>
-            <th title="Regime-weighted conviction (0–100)">Conviction</th>
-            <th>Relationship</th>
-            <th>Base · Quote</th>
-            <th title={`Stage 2 composite strength (base · quote) · ${s2.state}${s2.obsDate ? ` · D1 ${s2.obsDate}` : ''}`}>
-              Stage 2 strength
-            </th>
-            <th title="Stage 1 market-data gate">Stage 1</th>
-          </tr>
-        </thead>
-        <tbody>
-          {pairs.map((p, idx) => {
-            const inst = bySymbol.get(p.symbol);
-            const s1 = inst ? gatedState(inst) : 'BLOCKED';
-            return (
-              <tr
-                key={p.symbol}
-                className={selected === p.symbol ? 'row-selected' : ''}
-                onClick={() => setSelected(p.symbol)}
-                title={p.reason ?? ''}
-              >
-                <td>{idx + 1}</td>
-                <td>
-                  <b>{p.symbol}</b>
-                </td>
-                <td>
-                  <Badge tone={p.status !== 'READY' ? 'blue' : dir(p.bias)}>{p.status === 'READY' ? p.bias : 'WARMING UP'}</Badge>
-                </td>
-                <td className={(p.differential ?? 0) >= 0 ? 'positive' : 'negative'}>
-                  {p.differential == null ? '—' : `${p.differential > 0 ? '+' : ''}${p.differential.toFixed(2)}`}
-                </td>
-                <td>
-                  <b>{p.status === 'READY' && p.conviction != null ? p.conviction.toFixed(0) : '—'}</b>
-                </td>
-                <td>
-                  <small>{p.relationship.replace('_', ' ')}</small>
-                </td>
-                <td>
-                  <small>
-                    {p.baseRegime ?? '—'} · {p.quoteRegime ?? '—'}
-                  </small>
-                </td>
-                <td>
-                  <small className={s2.state === 'STALE' ? 'muted' : undefined}>
-                    {[p.base, p.quote]
-                      .map((c) => {
-                        const v = s2Asset.get(c)?.composite;
-                        return `${c} ${v == null ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(1)}`}`;
-                      })
-                      .join(' · ')}
-                  </small>
-                </td>
-                <td>
-                  <Badge tone={s1 === 'READY' ? 'green' : s1 === 'BLOCKED' ? 'red' : 'amber'}>{s1}</Badge>
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 export function Scanner() {
   const { instruments } = useTrading();
-  const { state } = useRegimeStore();
-  const qualified = instruments.filter((x) => x.score >= 75);
-  const regimeReady = (state?.pairs ?? []).filter((p) => p.status === 'READY' && p.bias !== 'NEUTRAL');
   return (
-    <>
-      <PageHeader title="Market Scanner" subtitle="Ranks all 28 FX combinations plus XAUUSD and promotes the best candidates" />
-      <div className="funnel">
-        <div>
-          <b>{allPairs.length}</b>
-          <span>Universe</span>
-        </div>
-        <i>→</i>
-        <div>
-          <b>{instruments.length}</b>
-          <span>In database</span>
-        </div>
-        <i>→</i>
-        <div title="Pairs with a directional Stage 3 regime bias">
-          <b>{state ? regimeReady.length : '—'}</b>
-          <span>Regime directional</span>
-        </div>
-        <i>→</i>
-        <div>
-          <b>{qualified.length}</b>
-          <span>Channel qualified</span>
-        </div>
-        <i>→</i>
-        <div>
-          <b>{instruments.filter((x) => x.state === 'READY').length}</b>
-          <span>H1 ready</span>
-        </div>
-      </div>
-      <Card>
-        <div className="card-head">
-          <div>
-            <h3>Regime Conviction Ranking</h3>
-            <p>Published by Stage 2 strength and Stage 3 Historical Regime · base/quote differential, regime alignment, persistence and momentum</p>
-          </div>
-          <Badge tone={state?.pairs.length ? 'green' : 'gray'}>{state?.pairs.length ?? 0} pairs</Badge>
-        </div>
-        <RegimeConvictionTable />
-      </Card>
+    <MarketScannerPage>
       <Card>
         <div className="card-head">
           <div>
@@ -392,7 +273,7 @@ export function Scanner() {
           ))}
         </div>
       </Card>
-    </>
+    </MarketScannerPage>
   );
 }
 

@@ -212,7 +212,7 @@ class DataReadiness(unittest.TestCase):
         self.assertEqual(vision.data_status("D1", None, 0)[0], "INSUFFICIENT_DATA")
 
 
-QUAL = {"qualified": True, "reason": "scanner BULLISH", "bias": "BULLISH", "conviction": 60, "differential": 5, "gate": "DIRECTIONAL"}
+QUAL = {"qualified": True, "reason": "Stage 4 PROMOTED BULLISH", "bias": "BULLISH", "conviction": 60, "differential": 5, "gate": "STAGE4_PROMOTION"}
 READY = ("READY", "ok")
 
 
@@ -291,13 +291,19 @@ class AutonomousFlow(unittest.TestCase):
         d1 = bars_from_closes(channel_closes(460, 0.02, 7))
         h8 = bars_from_closes(channel_closes(560, -0.02, 7), H8)
         self.tails = {"D1": d1, "H8": h8}
+        def pub(direction, conviction, diff, promoted=True, state=None):
+            return {"state": state or ("PROMOTED" if promoted else "NEUTRAL"), "direction": direction, "conviction": conviction,
+                    "differential": diff, "relationship": "STRONG_VS_WEAK", "confidence": 80, "freshness": "CURRENT",
+                    "promoted": promoted, "reason": "test", "evidence": ["e"], "liveEligible": False}
+
+        self.pub = pub
         self.scanner = {
-            "EURUSD": {"status": "READY", "bias": "BULLISH", "conviction": 70, "differential": 6},
-            "GBPJPY": {"status": "READY", "bias": "BEARISH", "conviction": 40, "differential": -8},
-            "AUDCAD": {"status": "READY", "bias": "NEUTRAL", "conviction": 5, "differential": 0},
-            "USDJPY": {"status": "READY", "bias": "BULLISH", "conviction": 30, "differential": 3},
-            "EURGBP": {"status": "READY", "bias": "BEARISH", "conviction": 20, "differential": -2},
-            "NZDUSD": {"status": "READY", "bias": "BEARISH", "conviction": 25, "differential": -3},
+            "EURUSD": pub("STRONG_BULLISH", 70, 6),
+            "GBPJPY": pub("BEARISH", 58, -8),
+            "AUDCAD": pub("NEUTRAL", 5, 0, promoted=False),
+            "USDJPY": pub("BULLISH", 56, 3),
+            "EURGBP": pub("BEARISH", 57, -2),
+            "NZDUSD": pub("BEARISH", 60, -3),
         }
         self.series = {(s, tf): series_row() for s in vision_service.SYMBOLS for tf in ("D1", "H8")}
         self.series[("USDJPY", "D1")] = series_row("READY", 60)
@@ -349,7 +355,10 @@ class AutonomousFlow(unittest.TestCase):
         self.assertTrue(any(e["type"] == "CHANNEL_VALIDATED" for e in self.events["EURUSD"]))
 
         self.assertEqual(self.persisted["AUDCAD"]["out"]["status"], "BLOCKED")
-        self.assertEqual(self.persisted["XAUUSD"]["out"]["status"], "BLOCKED", "not published by the scanner")
+        self.assertIn("Stage 4 NEUTRAL", self.persisted["AUDCAD"]["out"]["reason"])
+        self.assertEqual(self.persisted["XAUUSD"]["out"]["status"], "BLOCKED", "not ranked by the scanner")
+        self.assertEqual(eur["scanner"]["evidence"], ["e"])
+        self.assertEqual(eur["scanner"]["relationship"], "STRONG_VS_WEAK")
         usd = self.persisted["USDJPY"]["out"]
         self.assertEqual(usd["status"], "INSUFFICIENT_DATA")
         self.assertIn("60/120", usd["reason"])
@@ -370,7 +379,7 @@ class AutonomousFlow(unittest.TestCase):
         with mock.patch.object(self.svc, "run", lambda dirty, *a, **k: captured.append(dict(dirty)) or {}):
             self.svc._last_full = float("inf")
             self.svc.tick()
-            self.scanner["AUDCAD"] = {"status": "READY", "bias": "BULLISH", "conviction": 50, "differential": 4}
+            self.scanner["AUDCAD"] = self.pub("BULLISH", 60, 4)
             self.series[("EURUSD", "D1")] = series_row("READY", 2001, T0 + DAY)
             self.svc.tick()
         self.assertEqual(captured[-1].get("AUDCAD"), "SCANNER_QUALIFICATION_CHANGE")

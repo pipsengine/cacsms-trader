@@ -9,6 +9,8 @@ import { startHistoryStore } from '../features/market-data/services/historyStore
 import { publishStage2 } from '../features/currency-strength/services/strengthStage';
 import { getVisionSnapshot, startVisionStore, subscribeVision, visionStageStatus } from '../features/htf-vision/services/visionStore';
 import { instrumentFields, publishStage5 } from '../features/htf-vision/services/visionStage';
+import { getScannerSnapshot, scannerStageStatus, startScannerStore, subscribeScanner } from '../features/market-scanner/services/scannerStore';
+import { publishStage4 } from '../features/market-scanner/services/scannerStage';
 import { eventBus } from '../services/eventBus';
 import type { CurrencyStrength, Instrument, Position } from '../types';
 
@@ -374,6 +376,26 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
       stop();
     };
   }, [ready, syncModuleExports]);
+
+  /** Stage 4 Market Scanner ranks and promotes on the bridge; publish its re-ranks to the Workflow Engine. */
+  useEffect(() => {
+    if (!ready) return;
+    const stop = startScannerStore();
+    let lastFetch: number | null = null;
+    const apply = () => {
+      const snap = getScannerSnapshot();
+      if (snap.lastFetchAt === lastFetch) return;
+      lastFetch = snap.lastFetchAt;
+      const status = scannerStageStatus(snap);
+      if (status === 'HEALTHY' || status === 'DEGRADED') publishStage4(snap.state);
+    };
+    apply();
+    const unsub = subscribeScanner(apply);
+    return () => {
+      unsub();
+      stop();
+    };
+  }, [ready]);
 
   const setAuto = (v: boolean) => {
     setAutoState(v);
