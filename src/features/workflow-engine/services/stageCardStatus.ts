@@ -9,6 +9,7 @@ import { getHistorySnapshot, getInstrumentHistoryGate, historyReadyCount } from 
 import { stage4Output } from '../../market-scanner/services/scannerStage';
 import { stage8Output } from '../../opportunity-risk/services/riskStage';
 import { stage6Output } from '../../structural-direction/services/directionStage';
+import { getAutonomySnapshot } from './autonomyStore';
 import type { StageRuntime } from '../types/workflow';
 import { human } from '../utils/format';
 
@@ -126,15 +127,16 @@ export function stageCardLines(stage: StageRuntime, focus: string): string[] {
       lines.push(`Open ${s9.open.length} · queue ${s9.queue.length} · findings ${s9.findings.length}`);
       break;
     }
-    default: {
-      const s9 = stage9Output();
-      const published = s9.trades.filter((t) => t.stage10Status === 'PUBLISHED').length;
-      const awaiting = s9.trades.length - published;
-      const mine = s9.trades.filter((t) => t.symbol === pair);
-      lines.push(mine.length ? `${pair} · ${mine.length} closed trade record(s)` : `${pair} · no closed trade`);
-      lines.push(`Published ${published} · awaiting publication ${awaiting}`);
+    case 10: {
+      const learning = getAutonomySnapshot()?.learning;
+      const status = learning?.status || 'WAITING';
+      lines.push(`${status} · ${brief(learning?.summary?.message) || 'Collecting stored evidence'}`);
+      lines.push(`${learning?.tradesEvaluated ?? 0} closed trades this cycle · production unchanged`);
+      lines.push(learning?.runAt ? `Last cycle ${learning.runAt}` : 'Waiting for the learning cycle');
       break;
     }
+    default:
+      break;
   }
   const hold = lines.length >= 3 ? null : holdLine(stage);
   if (hold && !lines.some((l) => l === hold)) lines.push(hold);

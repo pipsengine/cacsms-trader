@@ -46,7 +46,8 @@ const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFi
 const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
 const ageSec = (iso: string | null, now: number) => {
   if (!iso) return null;
-  const t = Date.parse(iso);
+  const stamp = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(iso) ? `${iso.replace(' ', 'T')}Z` : iso;
+  const t = Date.parse(stamp);
   return Number.isFinite(t) ? Math.max(0, Math.round((now - t) / 1000)) : null;
 };
 

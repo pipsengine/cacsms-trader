@@ -22,6 +22,7 @@ import { stage8Output } from '../../opportunity-risk/services/riskStage';
 import type { Opportunity } from '../../opportunity-risk/types';
 import type { Execution } from '../../execution/types';
 import { STAGE_DEFINITIONS } from '../data/stageDefinitions';
+import { getAutonomySnapshot } from './autonomyStore';
 import type {
   AccountView,
   ActionResult,
@@ -286,9 +287,10 @@ function buildStages(sources: Record<number, StageSource>, traces: InstrumentTra
         stateReason = 'No Stage 8 authorization to execute';
       }
     } else if (id === 10) {
-      const pending = s9.trades.filter((t) => t.stage10Status !== 'PUBLISHED').length;
-      state = pending ? 'RUNNING' : s9.trades.length ? 'READY' : 'IDLE';
-      stateReason = pending ? `${pending} trade record(s) awaiting publication` : s9.trades.length ? `${s9.trades.length} trade record(s) published` : 'No closed trades to learn from yet';
+      const learning = getAutonomySnapshot()?.learning;
+      const status = learning?.status || 'WAITING';
+      state = status === 'LEARNING' || status === 'VALIDATING' ? 'RUNNING' : status === 'HEALTHY' ? 'READY' : status === 'DEGRADED' || status === 'BLOCKED' ? 'BLOCKED' : 'WAITING';
+      stateReason = learning?.summary?.message || 'Stage 10 is collecting stored evidence. Production parameters stay unchanged.';
     } else if (blockedBy && counts.passed === 0) {
       state = upBlocked?.state === 'WAITING' || upBlocked?.state === 'WARMING_UP' ? 'WAITING' : 'BLOCKED';
       stateReason = `Live path blocked by Stage ${blockedBy.id} (${blockedBy.name}) — ${blockedBy.detail}. Analysis continues on the last closed candles but nothing is passed on.`;

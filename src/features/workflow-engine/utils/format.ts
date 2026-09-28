@@ -8,10 +8,16 @@ export function age(sec: number | null | undefined): string {
   return `${Math.round(sec / 86400)}d`;
 }
 
+const utcMillis = (iso: string) => {
+  const stamp = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(iso) ? `${iso.replace(' ', 'T')}Z` : iso;
+  const t = Date.parse(stamp);
+  return Number.isFinite(t) ? t : null;
+};
+
 export function ageOf(iso: string | null | undefined, now = Date.now()): number | null {
   if (!iso) return null;
-  const t = Date.parse(iso);
-  return Number.isFinite(t) ? Math.max(0, Math.round((now - t) / 1000)) : null;
+  const t = utcMillis(iso);
+  return t == null ? null : Math.max(0, Math.round((now - t) / 1000));
 }
 
 export const ago = (iso: string | null | undefined) => {
@@ -21,14 +27,14 @@ export const ago = (iso: string | null | undefined) => {
 
 export const clock = (iso: string | null | undefined) => {
   if (!iso) return '—';
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleTimeString();
+  const t = utcMillis(iso);
+  return t == null ? '—' : new Date(t).toLocaleTimeString();
 };
 
 export const stamp = (iso: string | null | undefined) => {
   if (!iso) return '—';
-  const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString();
+  const t = utcMillis(iso);
+  return t == null ? '—' : new Date(t).toLocaleString();
 };
 
 export const human = (s: string | null | undefined) => (s ? s.replace(/_/g, ' ') : '—');
