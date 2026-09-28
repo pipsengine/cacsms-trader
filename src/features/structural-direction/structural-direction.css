@@ -1,3 +1,26 @@
+.sd-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 11px;
+  color: #8eacc4;
+}
+.sd-pager button {
+  border: 1px solid #2b4d6e;
+  background: #0c1d2c;
+  color: #d5e6f5;
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.sd-pager button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 .sd-metrics {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }

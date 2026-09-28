@@ -11,6 +11,8 @@ import type { DirectionDecision, DirectionDetail, DirectionHistoryRow, Processin
 import '../market-scanner/market-scanner.css';
 import './structural-direction.css';
 
+const PAGE_SIZE = 10;
+
 const human = (s?: string | null) => (s ? s.replace(/_/g, ' ') : '—');
 const num = (v: number | null | undefined, d = 2) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(d));
 const signed = (v: number | null | undefined, d = 2) => (v == null || !Number.isFinite(v) ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(d)}`);
@@ -148,10 +150,39 @@ function TfBlock({ tf, t, livePos, source }: { tf: 'D1' | 'H8'; t: TfEvidence; l
   );
 }
 
+function Pager({ page, pages, total, onPage }: { page: number; pages: number; total: number; onPage: (n: number) => void }) {
+  if (total <= PAGE_SIZE) return null;
+  const from = page * PAGE_SIZE + 1;
+  const to = Math.min(total, (page + 1) * PAGE_SIZE);
+  return (
+    <div className="sd-pager">
+      <span>
+        {from}–{to} of {total}
+      </span>
+      <button type="button" disabled={page <= 0} onClick={() => onPage(page - 1)}>
+        Previous
+      </button>
+      <span>
+        Page {page + 1} / {pages}
+      </span>
+      <button type="button" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>
+        Next
+      </button>
+    </div>
+  );
+}
+
 function HistoryTable({ rows, onSymbol }: { rows: DirectionHistoryRow[]; onSymbol?: (s: string) => void }) {
+  const [page, setPage] = useState(0);
+  const resetKey = `${rows.length}:${rows[0]?.id ?? ''}`;
+  useEffect(() => setPage(0), [resetKey]);
   if (!rows.length) return <p className="hr-reason">No decision changes recorded yet.</p>;
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const safe = Math.min(page, pages - 1);
+  const slice = rows.slice(safe * PAGE_SIZE, safe * PAGE_SIZE + PAGE_SIZE);
   return (
     <div className="table-wrap">
+      <Pager page={safe} pages={pages} total={rows.length} onPage={setPage} />
       <table className="cs-table">
         <thead>
           <tr>
@@ -167,7 +198,7 @@ function HistoryTable({ rows, onSymbol }: { rows: DirectionHistoryRow[]; onSymbo
           </tr>
         </thead>
         <tbody>
-          {rows.map((h) => (
+          {slice.map((h) => (
             <tr key={h.id}>
               <td>{new Date(h.createdAt).toLocaleString()}</td>
               {onSymbol && (
@@ -479,6 +510,7 @@ export function StructuralDirectionPage() {
   const [confF, setConfF] = useState(0);
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'status', desc: false });
   const [drawer, setDrawer] = useState<string | null>(null);
+  const [boardPage, setBoardPage] = useState(0);
 
   useEffect(() => startDirectionStore(), []);
   useEffect(() => {
@@ -521,6 +553,12 @@ export function StructuralDirectionPage() {
       return sort.desc ? -r : r;
     });
   }, [list, query, stateF, dirF, alignF, confF, sort]);
+
+  const boardReset = `${query}|${stateF}|${dirF}|${alignF}|${confF}|${sort.key}|${sort.desc}`;
+  useEffect(() => setBoardPage(0), [boardReset]);
+  const boardPages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  const boardSafe = Math.min(boardPage, boardPages - 1);
+  const boardRows = shown.slice(boardSafe * PAGE_SIZE, boardSafe * PAGE_SIZE + PAGE_SIZE);
 
   const th = (key: SortKey, label: string, title?: string) => (
     <span role="columnheader" title={title} aria-sort={sort.key === key ? (sort.desc ? 'descending' : 'ascending') : 'none'}>
@@ -672,7 +710,7 @@ export function StructuralDirectionPage() {
                 <span role="columnheader">Freshness</span>
                 {th('status', 'Status')}
               </div>
-              {shown.map((d) => {
+              {boardRows.map((d) => {
                 const sc = d.upstream.scanner;
                 return (
                   <div
@@ -737,6 +775,7 @@ export function StructuralDirectionPage() {
               })}
             </div>
             {!shown.length && <p className="hr-reason">No instrument matches these filters.</p>}
+            <Pager page={boardSafe} pages={boardPages} total={shown.length} onPage={setBoardPage} />
           </div>
         )}
       </Card>

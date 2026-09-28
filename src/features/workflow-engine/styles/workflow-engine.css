@@ -207,38 +207,49 @@
 .wf-shell .stage b,
 .wf-shell .stage small { display: inline; }
 /* Pipeline status uses the same colors as the state chips. */
-.wf-shell .stage.s-running,
-.wf-shell .stage.s-ready {
+.wf-shell button.stage.s-running,
+.wf-shell button.stage.s-ready,
+.wf-shell button.stage.s-running:hover:not(:disabled),
+.wf-shell button.stage.s-ready:hover:not(:disabled) {
   --h: var(--wf-green);
   background: linear-gradient(180deg, #143f2e, #0c261b);
   border-color: #17603f;
 }
-.wf-shell .stage.s-waiting,
-.wf-shell .stage.s-warming_up,
-.wf-shell .stage.s-idle {
+.wf-shell button.stage.s-waiting,
+.wf-shell button.stage.s-warming_up,
+.wf-shell button.stage.s-idle,
+.wf-shell button.stage.s-waiting:hover:not(:disabled),
+.wf-shell button.stage.s-warming_up:hover:not(:disabled),
+.wf-shell button.stage.s-idle:hover:not(:disabled) {
   --h: var(--wf-blue);
   background: linear-gradient(180deg, #123552, #0c2236);
   border-color: #1c4e77;
 }
-.wf-shell .stage.s-paused,
-.wf-shell .stage.s-stale {
+.wf-shell button.stage.s-paused,
+.wf-shell button.stage.s-stale,
+.wf-shell button.stage.s-paused:hover:not(:disabled),
+.wf-shell button.stage.s-stale:hover:not(:disabled) {
   --h: var(--wf-amber);
   background: linear-gradient(180deg, #3d2d10, #241a09);
   border-color: #6d5114;
 }
-.wf-shell .stage.s-blocked,
-.wf-shell .stage.s-invalidated {
+.wf-shell button.stage.s-blocked,
+.wf-shell button.stage.s-invalidated,
+.wf-shell button.stage.s-blocked:hover:not(:disabled),
+.wf-shell button.stage.s-invalidated:hover:not(:disabled) {
   --h: var(--wf-red);
   background: linear-gradient(180deg, #4a1e22, #2a1215);
   border-color: #7a2c31;
 }
 .wf-shell .stage.h-degraded { --h: var(--wf-amber); }
-.wf-shell .stage.h-error {
+.wf-shell button.stage.h-error,
+.wf-shell button.stage.h-error:hover:not(:disabled) {
   --h: var(--wf-red);
   background: linear-gradient(180deg, #4a1e22, #2a1215);
   border-color: #7a2c31;
 }
-.wf-shell .stage.h-offline {
+.wf-shell button.stage.h-offline,
+.wf-shell button.stage.h-offline:hover:not(:disabled) {
   --h: var(--wf-grey);
   background: linear-gradient(180deg, #1c2834, #121a22);
   border-color: #3d5164;
