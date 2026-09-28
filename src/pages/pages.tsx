@@ -54,11 +54,27 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
 
 function InstrumentTable({ limit }: { limit?: number }) {
   const { selected, setSelected, instruments } = useTrading();
+  const scanner = useScannerStore();
+  const bySymbol = useMemo(() => {
+    const m = new Map<string, { rank: number; state: string; conviction: number | null; threshold: number | null; reason: string }>();
+    for (const row of scanner.state?.instruments ?? []) {
+      m.set(row.symbol, {
+        rank: row.rank,
+        state: row.state,
+        conviction: row.conviction,
+        threshold: row.promotion.threshold ?? null,
+        reason: row.reason,
+      });
+    }
+    return m;
+  }, [scanner.state]);
   const gated = instruments.map((i) => ({ ...i, state: gatedState(i) }));
   const rank = (s: string) => (s === 'READY' ? 0 : s === 'WAIT' ? 1 : 2);
-  const rows = limit
-    ? [...gated].sort((a, b) => rank(a.state) - rank(b.state) || b.score - a.score).slice(0, limit)
-    : gated;
+  const ordered = [...gated].sort((a, b) => {
+    if (bySymbol.size) return (bySymbol.get(a.symbol)?.rank ?? 999) - (bySymbol.get(b.symbol)?.rank ?? 999);
+    return rank(a.state) - rank(b.state) || b.score - a.score;
+  });
+  const rows = limit ? ordered.slice(0, limit) : ordered;
   if (!rows.length) {
     return <EmptyState title="No instrument data" detail="Connect MT5 and sync market state into db_Cacsms-Trader." />;
   }
@@ -74,7 +90,8 @@ function InstrumentTable({ limit }: { limit?: number }) {
             <th>D1</th>
             <th>H8</th>
             <th>H1</th>
-            <th>Score</th>
+            <th title="Quote snapshot: daily and 8-hour candle agreement plus today's move. This is not the promotion score.">Score</th>
+            <th title="Stage 4 promotion conviction. A pair is promoted at 55.">Conviction</th>
             <th>State</th>
           </tr>
         </thead>
@@ -98,6 +115,19 @@ function InstrumentTable({ limit }: { limit?: number }) {
               <td>{x.h1}</td>
               <td>
                 <b>{x.score > 0 ? x.score : '—'}</b>
+              </td>
+              <td>
+                {(() => {
+                  const scan = bySymbol.get(x.symbol);
+                  const bar = scan?.threshold ?? 55;
+                  const title = scan ? `${scan.state}: ${scan.reason}` : 'Stage 4 has not ranked this pair';
+                  return (
+                    <b title={title} className={scan?.conviction != null && scan.conviction >= bar ? 'positive' : undefined}>
+                      {scan?.conviction != null ? scan.conviction.toFixed(1) : '—'}
+                      {scan ? <small className="muted"> {scan.state}</small> : null}
+                    </b>
+                  );
+                })()}
               </td>
               <td>
                 <Badge tone={x.state === 'READY' ? 'green' : x.state === 'BLOCKED' ? 'red' : 'amber'}>{x.state}</Badge>
