@@ -363,6 +363,7 @@
 .wf-shell .wf-table th.sortable:hover { color: #bfe2ff; }
 .wf-shell .wf-table td { padding: 7px; border-bottom: 1px solid #102d44; vertical-align: middle; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wf-shell .wf-table td small { display: block; color: #5f7c93; font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; }
+.wf-shell .wf-table td .leg-line { display: block; color: #c5d7e6; font-size: 10px; line-height: 1.35; white-space: normal; margin-top: 2px; }
 .wf-shell .wf-table tbody tr { cursor: pointer; }
 .wf-shell .wf-table tbody tr:hover > td { background: rgba(29, 161, 255, 0.06); }
 .wf-shell .wf-table tr.open > td { background: rgba(29, 161, 255, 0.1); }

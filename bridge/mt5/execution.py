@@ -18,6 +18,8 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+import leg_model
+
 ORDER_STATES = ("AUTHORIZED", "QUEUED", "REVALIDATING", "SUBMITTING", "ACKNOWLEDGED", "PARTIALLY_FILLED", "FILLED", "REJECTED",
                 "CANCELLED", "EXPIRED", "UNKNOWN", "RECONCILING")
 POSITION_STATES = ("OPEN", "PROTECTED", "MANAGING", "PARTIAL_EXIT", "BREAKEVEN", "TRAILING", "EXIT_PENDING", "CLOSED", "ERROR")
@@ -771,7 +773,14 @@ def risk_exits(x: dict[str, Any], acct: dict[str, Any] | None, risk_acct: dict[s
             out.append({"code": "PROP_WEEKEND_EXIT", "reason": f"Prop profile forbids weekend holding — {to_close / 60:.0f} min to the weekly close"})
     if cfg.get("structuralExit"):
         d = dsign(x["direction"])
-        if stage7 and stage7.get("state") == "CONFIRMED" and dsign(stage7.get("direction")) == -d:
+        trade_type = ((x.get("authorization") or {}).get("source") or {}).get("tradeType")
+        transition = leg_model.management_transition(trade_type, (stage7 or {}).get("marketLeg"))
+        if transition and transition["action"] == "EXIT":
+            out.append({"code": transition["code"], "reason": transition["reason"]})
+            (x.setdefault("mgmt", {}))["marketTransition"] = transition["transition"]
+        elif transition and transition["action"] == "RECORD":
+            (x.setdefault("mgmt", {}))["marketTransition"] = transition["transition"]
+        if stage7 and stage7.get("state") == "CONFIRMED" and dsign(stage7.get("direction")) == -d and not str(trade_type or "").startswith("COUNTER_TREND"):
             out.append({"code": "STRUCTURAL_INVALIDATION", "reason": f"Stage 7 now confirms {stage7.get('direction')} on {x['instrument']} — opposite structure"})
         inv = ((x.get("authorization") or {}).get("source") or {}).get("invalidationLevel")
         if inv is not None and last_h1_close is not None and (float(last_h1_close) - float(inv)) * d < 0:

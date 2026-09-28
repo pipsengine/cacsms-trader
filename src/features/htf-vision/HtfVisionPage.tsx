@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Eye, RefreshCw, Search, X } from 'lucide-react';
 import { useTrading } from '../../context/TradingContext';
 import { Badge, Card, Metric, PageHeader, Tabs } from '../../components/UI';
-import { barLabel, priceDigits, VisionChart, type ChartChannel, type ChartMarker, type ChartTouch } from './components/VisionChart';
+import { barLabel, priceDigits, VisionChart, type ChartChannel, type ChartLevel, type ChartMarker, type ChartTouch } from './components/VisionChart';
 import { explainBridgeError } from '../../services/bridgeError';
 import { fetchVisionChart, fetchVisionDetail } from './services/visionClient';
 import { runVisionNow, startVisionStore, useVisionStore, visionRunAgeMs, visionStageStatus } from './services/visionStore';
@@ -24,10 +24,10 @@ import type {
 } from './types';
 import './htf-vision.css';
 
-const VIEWS = ['D1', 'H8', 'Combined'] as const;
+const VIEWS = ['D1', 'H8', 'H1', 'Combined'] as const;
 type View = (typeof VIEWS)[number];
-const CHART_BARS: Record<VisionTf, number> = { D1: 320, H8: 420 };
-const TF_SEC: Record<VisionTf, number> = { D1: 86400, H8: 28800 };
+const CHART_BARS: Record<VisionTf, number> = { D1: 320, H8: 420, H1: 280 };
+const TF_SEC: Record<VisionTf, number> = { D1: 86400, H8: 28800, H1: 3600 };
 const FILTERS = ['All', 'Qualified', 'Confirmed D1', 'Breakout / retest', 'Conflict', 'Data issues'] as const;
 type Filter = (typeof FILTERS)[number];
 
@@ -112,17 +112,21 @@ function projectAt(lines: VisionChartData['lines'], ts: number) {
   return null;
 }
 
-type Charts = { D1: VisionChartData | null; H8: VisionChartData | null; loading: boolean; error: string };
+type Charts = { D1: VisionChartData | null; H8: VisionChartData | null; H1: VisionChartData | null; loading: boolean; error: string };
 
 function useCharts(symbol: string | null, version: string): Charts {
-  const [charts, setCharts] = useState<Charts>({ D1: null, H8: null, loading: false, error: '' });
+  const [charts, setCharts] = useState<Charts>({ D1: null, H8: null, H1: null, loading: false, error: '' });
   useEffect(() => {
     if (!symbol) return;
     let cancelled = false;
-    setCharts((c) => ({ ...c, loading: true, error: '', ...(c.D1?.symbol !== symbol ? { D1: null, H8: null } : {}) }));
-    Promise.all([fetchVisionChart(symbol, 'D1', CHART_BARS.D1), fetchVisionChart(symbol, 'H8', CHART_BARS.H8)])
-      .then(([d1, h8]) => {
-        if (!cancelled) setCharts({ D1: d1, H8: h8, loading: false, error: '' });
+    setCharts((c) => ({ ...c, loading: true, error: '', ...(c.D1?.symbol !== symbol ? { D1: null, H8: null, H1: null } : {}) }));
+    Promise.all([
+      fetchVisionChart(symbol, 'D1', CHART_BARS.D1),
+      fetchVisionChart(symbol, 'H8', CHART_BARS.H8),
+      fetchVisionChart(symbol, 'H1', CHART_BARS.H1).catch(() => null),
+    ])
+      .then(([d1, h8, h1]) => {
+        if (!cancelled) setCharts({ D1: d1, H8: h8, H1: h1, loading: false, error: '' });
       })
       .catch((e: unknown) => {
         if (!cancelled) setCharts((c) => ({ ...c, loading: false, error: explainBridgeError(e, 'Chart unavailable') }));
@@ -170,36 +174,74 @@ function DataNotice({ tf, rec, summary }: { tf: VisionTf; rec: ChannelRecord | n
   return null;
 }
 
+function channelLabel(tf: VisionTf, summary?: TfSummary): string {
+  const rel = summary?.relationship ?? (tf === 'D1' ? 'PRIMARY' : 'UNRESOLVED');
+  return `${tf} · ${human(summary?.direction ?? 'NEUTRAL')} · ${human(rel)}`;
+}
+
+const LAYER_TOGGLES = [
+  ['parent', 'Parent Channel'],
+  ['nested', 'Nested Channels'],
+  ['touches', 'Touches'],
+  ['swings', 'Swings'],
+  ['structure', 'BOS/CHoCH'],
+  ['sr', 'Support/Resistance'],
+  ['destination', 'Destination'],
+  ['invalidation', 'Invalidation'],
+] as const;
+
 function ChartCard({ v, charts, view, setView, livePrice, offline }: { v: VisionInstrument; charts: Charts; view: View; setView: (x: View) => void; livePrice: number | null; offline?: boolean }) {
-  const tf: VisionTf = view === 'H8' ? 'H8' : 'D1';
+  const [layers, setLayers] = useState({ parent: true, nested: true, touches: true, swings: true, structure: true, sr: true, destination: true, invalidation: true });
+  const tf: VisionTf = view === 'Combined' ? 'H1' : view;
   const d1 = charts.D1;
   const h8 = charts.H8;
-  const base = view === 'D1' ? d1 : h8;
+  const h1 = charts.H1;
+  const base = view === 'Combined' ? h1 ?? h8 ?? d1 : view === 'H1' ? h1 : view === 'H8' ? h8 : d1;
   const aD1 = d1?.channel?.analysis ?? null;
   const aH8 = h8?.channel?.analysis ?? null;
+  const aH1 = h1?.channel?.analysis ?? null;
 
   const props = useMemo(() => {
     if (!base) return null;
-    const ch = (c: VisionChartData | null, tone: ChartChannel['tone']): ChartChannel[] =>
-      c && c.lines.length ? [{ key: c.timeframe, label: `${c.timeframe} channel`, tf: c.timeframe, lines: c.lines, tone }] : [];
+    const ch = (c: VisionChartData | null, tone: ChartChannel['tone'], summary?: TfSummary): ChartChannel[] =>
+      c && c.lines.length && (tone === 'primary' || summary?.confirmed) ? [{ key: c.timeframe, label: channelLabel(c.timeframe, summary), tf: c.timeframe, lines: c.lines, tone }] : [];
     const tl = (c: VisionChartData | null): ChartTouch[] => (c?.channel?.analysis?.touchList ?? []).map((t) => ({ ...t, tf: c!.timeframe }));
-    if (view === 'Combined') {
-      return {
-        channels: [...ch(d1, 'primary'), ...ch(h8, 'secondary')],
-        touches: [...tl(d1), ...tl(h8)],
-        markers: [...markersFrom('D1', aD1, d1?.candles ?? []), ...markersFrom('H8', aH8, h8?.candles ?? [])],
-      };
+    const parent = layers.parent ? ch(d1, 'primary', v.d1) : [];
+    const nested = layers.nested ? [...ch(h8, 'secondary', v.h8), ...ch(h1, 'nested', v.h1)] : [];
+    const shown = view === 'Combined' ? [...parent, ...nested] : view === 'D1' ? parent : nested.filter((c) => c.tf === view);
+    const touchSrc = view === 'Combined' ? [d1, h8, h1] : [base];
+    const markerSrc: [VisionTf, TfAnalysis | null, VisionChartData['candles']][] =
+      view === 'Combined'
+        ? [
+            ['D1', aD1, d1?.candles ?? []],
+            ['H8', aH8, h8?.candles ?? []],
+            ['H1', aH1, h1?.candles ?? []],
+          ]
+        : [[base.timeframe, base.channel?.analysis ?? null, base.candles]];
+    const last = (d1?.lines ?? []).filter((l) => !l.projected).at(-1);
+    const bullish = String(v.d1?.direction ?? '').includes('BULL');
+    const levels: ChartLevel[] = [];
+    if (last && layers.sr) {
+      levels.push({ price: last.upper, label: 'Resistance', color: '#8fd0ff' }, { price: last.lower, label: 'Support', color: '#8fd0ff' });
     }
-    return { channels: ch(base, 'primary'), touches: tl(base), markers: markersFrom(base.timeframe, base.channel?.analysis, base.candles) };
-  }, [base, view, d1, h8, aD1, aH8]);
+    if (last && layers.destination) levels.push({ price: bullish ? last.lower : last.upper, label: 'Destination', color: '#7dcea0' });
+    if (last && layers.invalidation) levels.push({ price: bullish ? last.lower : last.upper, label: 'Invalidation', color: '#e07a7a' });
+    return {
+      channels: shown,
+      touches: layers.touches ? touchSrc.flatMap(tl) : [],
+      markers: layers.structure ? markerSrc.flatMap(([t, a, candles]) => markersFrom(t, a, candles)) : [],
+      swings: layers.swings ? base.swings : [],
+      levels,
+    };
+  }, [base, view, d1, h8, h1, aD1, aH8, aH1, v.d1, v.h8, v.h1, layers]);
 
-  const primaryLines = (view === 'H8' ? h8 : d1)?.lines ?? [];
+  const primaryLines = (view === 'H8' ? h8 : view === 'H1' ? h1 : d1)?.lines ?? [];
   const lastTs = base?.candles.length ? base.candles[base.candles.length - 1].ts : null;
   const formingTs = lastTs != null ? lastTs + TF_SEC[base!.timeframe] : null;
   const bounds = formingTs != null && livePrice != null ? projectAt(primaryLines, formingTs) : null;
   const livePos = bounds && livePrice != null ? ((livePrice - bounds.lower) / (bounds.upper - bounds.lower || 1)) * 100 : null;
-  const a = view === 'H8' ? aH8 : aD1;
-  const summary = view === 'H8' ? v.h8 : v.d1;
+  const a = view === 'H1' ? aH1 : view === 'H8' ? aH8 : aD1;
+  const summary = view === 'H1' ? v.h1 : view === 'H8' ? v.h8 : v.d1;
   const digits = priceDigits(livePrice ?? base?.candles[base.candles.length - 1]?.close);
 
   return (
@@ -207,12 +249,12 @@ function ChartCard({ v, charts, view, setView, livePrice, offline }: { v: Vision
       <div className="card-head hv-chart-head">
         <div>
           <h3>
-            {v.symbol} · {view === 'Combined' ? 'D1 structure on H8 candles' : `${view} channel`}
+            {v.symbol} · {view === 'Combined' ? 'Parent and nested channels' : `${view} channel`}
           </h3>
           <p>
             {view === 'Combined'
-              ? 'D1 primary channel (blue) with the H8 refinement channel (violet), both projected 12 bars ahead'
-              : `${tf === 'D1' ? 'Primary' : 'Refinement'} structure · ${base?.candles.length ?? 0} validated closed bars from the Stage 1 store`}
+              ? 'D1 parent (solid blue), H8 intermediate (dashed violet) and H1 nested (dashed amber) on the same candles'
+              : `${view === 'D1' ? 'Parent' : view === 'H8' ? 'Intermediate' : 'Nested execution'} structure · ${base?.candles.length ?? 0} validated closed bars from the Stage 1 store`}
           </p>
         </div>
         <div className="hv-head-badges">
@@ -224,6 +266,13 @@ function ChartCard({ v, charts, view, setView, livePrice, offline }: { v: Vision
         </div>
       </div>
       <Tabs items={[...VIEWS]} active={view} onChange={(x) => setView(x as View)} idPrefix="hv-view" label="Chart timeframe" />
+      <div className="hv-layers" role="group" aria-label="Chart layers">
+        {LAYER_TOGGLES.map(([key, label]) => (
+          <button key={key} type="button" className={layers[key] ? 'on' : ''} aria-pressed={layers[key]} onClick={() => setLayers((s) => ({ ...s, [key]: !s[key] }))}>
+            {label}
+          </button>
+        ))}
+      </div>
       <div role="tabpanel" id={`hv-view-panel-${view.toLowerCase()}`} aria-labelledby={`hv-view-tab-${view.toLowerCase()}`}>
         {v.status === 'BLOCKED' ? (
           <div className="hr-banner err">
@@ -236,6 +285,7 @@ function ChartCard({ v, charts, view, setView, livePrice, offline }: { v: Vision
           <>
             <DataNotice tf="D1" rec={d1?.channel} summary={v.d1} />
             <DataNotice tf="H8" rec={h8?.channel} summary={v.h8} />
+            <DataNotice tf="H1" rec={h1?.channel} summary={v.h1} />
           </>
         ) : (
           <DataNotice tf={tf} rec={base?.channel} summary={summary} />
@@ -261,9 +311,10 @@ function ChartCard({ v, charts, view, setView, livePrice, offline }: { v: Vision
               tf={base.timeframe}
               candles={base.candles}
               channels={props.channels}
-              swings={base.swings}
+              swings={props.swings}
               touches={props.touches}
               markers={props.markers}
+              levels={props.levels}
               livePrice={livePrice}
               liveLabel={v.live?.marketOpen ? 'live' : 'last quote'}
               position={livePos}
@@ -329,9 +380,9 @@ function Interpretation({ v, onInspect, now }: { v: VisionInstrument; onInspect:
         <p>{v.status === 'READY' || v.status === 'STALE' ? v.reasoning[0] ?? v.reason : v.reason}</p>
       </div>
       <div className="kv hv-kv">
-        <span>Primary direction</span>
+        <span>Primary trend</span>
         <b>
-          <Badge tone={v.d1?.confirmed && v.status === 'READY' ? dirTone(v.primaryDirection) : 'gray'}>{human(v.primaryDirection)}</Badge>
+          <Badge tone={v.d1?.confirmed ? dirTone(v.d1.direction) : 'gray'}>{human(v.d1?.confirmed ? v.d1.direction : v.primaryDirection)}</Badge>
         </b>
         <span>D1 state</span>
         <b>{v.d1 ? tfState(v.d1) : '—'}</b>
@@ -356,6 +407,32 @@ function Interpretation({ v, onInspect, now }: { v: VisionInstrument; onInspect:
         <b>
           <Badge tone={agreeTone(v.agreement)}>{human(v.agreement)}</Badge>
         </b>
+        <span>Parent channel</span>
+        <b>{v.d1?.channelKey ? channelLabel('D1', v.d1) : 'NOT DETECTED'}</b>
+        <span>Parent status</span>
+        <b>{v.d1?.status ? human(v.d1.status) : '—'}</b>
+        <span>Parent position</span>
+        <b>{pct(v.live?.positionD1 ?? v.channelPosition ?? v.d1?.position ?? null, 1)}</b>
+        <span>Current HTF phase</span>
+        <b>{human(v.phase)}</b>
+        <span>Nested channel</span>
+        <b>{v.nested?.h1Status && v.nested.h1Status !== 'NOT_DETECTED' ? channelLabel('H1', v.h1) : 'NOT DETECTED'}</b>
+        <span>Nested direction</span>
+        <b>{v.nested?.h1Direction ? human(v.nested.h1Direction) : '—'}</b>
+        <span>Nested status</span>
+        <b>{v.nested?.h1Status ? human(v.nested.h1Status) : 'NOT DETECTED'}</b>
+        <span>Relationship</span>
+        <b>{v.nested?.h1Status && v.nested.h1Status !== 'NOT_DETECTED' ? human(v.nested.h1Relationship) : v.nested?.relationship ? human(v.nested.relationship) : '—'}</b>
+        <span>Correction state</span>
+        <b>{v.nested?.currentLeg ? human(v.nested.currentLeg) : '—'}</b>
+        <span>Expected destination</span>
+        <b>{v.nested?.expectedDestination ? human(v.nested.expectedDestination) : '—'}</b>
+        <span>Invalidation</span>
+        <b>{v.invalidation[0] ?? '—'}</b>
+        <span>Trade permission</span>
+        <b>{v.scanner?.qualified ? 'ANALYSIS ONLY' : 'BLOCKED'}</b>
+        <span>Blocking reason</span>
+        <b>{v.scanner?.qualified ? 'Execution stays off until Stage 8 authorises and the operator enables it' : v.scanner?.reason || v.reason}</b>
         <span>Breakout / retest</span>
         <b>{v.d1?.breakout || v.h8?.breakout ? [v.d1?.breakout && `D1 ${breakoutText(v.d1)}`, v.h8?.breakout && `H8 ${breakoutText(v.h8)}`].filter(Boolean).join(' · ') : 'None — price inside both channels'}</b>
         <span>Market Scanner (Stage 4)</span>

@@ -149,6 +149,11 @@ class AutonomousOrchestrator:
         elif event_type == "VISION_CHANGE":
             self._enqueue(event_id, 6, "MARK_DIRECTION", symbols=symbols, priority=30, version=f"vision:{_version(payload)}:{_version(symbols)}",
                           payload={"reason": event_type})
+            watch = [s for s in (payload.get("counterTrendWatch") or []) if s in symbols or not symbols]
+            if watch:
+                self._enqueue(event_id, 7, "MARK_CONFIRM", symbols=watch, priority=32,
+                              version=f"zone:{_version(watch)}:{event_id}",
+                              payload={"reason": "HTF_COUNTER_TREND_ZONE"})
         elif event_type == "DIRECTION_CHANGE":
             self._enqueue(event_id, 7, "MARK_CONFIRM", symbols=symbols, priority=35, version=f"direction:{_version(payload)}:{_version(symbols)}",
                           payload={"reason": event_type})

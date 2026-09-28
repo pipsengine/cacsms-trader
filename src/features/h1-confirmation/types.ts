@@ -143,6 +143,17 @@ export type H1Decision = {
   data: { status: string; reason: string; available: number; required: number; latestTs: number | null } | null;
   live: { price: number; at: number | null; event: 'BOS_ATTEMPT' | 'INVALIDATION_BREACH' | null; breakLevel: number | null; invalidationLevel: number | null; note: string | null } | null;
   executes: false;
+  tradeType?: string | null;
+  marketLeg?: {
+    dominantTrend: string;
+    currentLeg: string;
+    ltfTrend: string;
+    tradeType: string;
+    reversalState: string;
+    expectedDestination: string | null;
+    reasonCode: string;
+    reason: string;
+  };
   confirmedSince?: string | null;
   changedAt?: string | null;
   evaluatedAt?: string | null;

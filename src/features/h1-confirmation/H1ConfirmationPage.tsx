@@ -87,6 +87,10 @@ function Summary({ d }: { d: H1Decision }) {
         <b>{d.components.length ? d.score.toFixed(1) : '—'}</b>
       </div>
       <div>
+        <span>Setup type</span>
+        <b>{d.tradeType && d.tradeType !== 'NONE' ? human(d.tradeType) : d.marketLeg?.tradeType && d.marketLeg.tradeType !== 'NONE' ? human(d.marketLeg.tradeType) : human(d.setup?.model ?? 'WAIT')}</b>
+      </div>
+      <div>
         <span>H1 phase</span>
         <b>{human(d.phase)}</b>
       </div>

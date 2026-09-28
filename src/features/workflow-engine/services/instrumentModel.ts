@@ -326,7 +326,10 @@ export function buildTrace(i: Instrument, ctx: InstrumentContext): InstrumentTra
     d1: field(tfValue(v?.d1, v?.status), src[5], Boolean(v), s1ok, ctx, v?.analysedAt ?? null, v ? `${v.d1?.dataReason || v.reason} · confidence ${v.d1?.confidence ?? '—'}` : 'No HTF analysis'),
     h8: field(tfValue(v?.h8, v?.status), src[5], Boolean(v), s1ok, ctx, v?.analysedAt ?? null, v ? `${v.h8?.dataReason || v.reason} · confidence ${v.h8?.confidence ?? '—'}` : 'No HTF analysis'),
     h1: field(h ? `${human(h.state)}${h.score ? ` · ${Math.round(h.score)}` : ''}` : '', src[7], Boolean(h), s1ok, ctx, h?.evaluatedAt ?? null, h ? `${h.reasonCode ?? ''} ${h.reason}`.trim() : 'No H1 evaluation'),
-    risk: field(oppState, src[8], true, s1ok, ctx, src[8].runAt, oppBest ? `${oppBest.reasonCode}: ${oppBest.reason}` : 'No active Stage 8 setup for this instrument'),
+    risk: field(oppState, src[8], true, s1ok, ctx, src[8].runAt, oppBest ? `${oppBest.tradeType && oppBest.tradeType !== 'NONE' ? `${human(oppBest.tradeType)} · ` : ''}${oppBest.reasonCode}: ${oppBest.reason}` : 'No active Stage 8 setup for this instrument'),
+    legLine: d?.marketLeg && d.marketLeg.currentLeg !== 'UNRESOLVED'
+      ? `D1 ${human(d.marketLeg.dominantTrend)} · H8 ${human(v?.h8?.relationship ?? v?.h8?.direction)} · H1 ${v?.nested?.h1Status && v.nested.h1Status !== 'NOT_DETECTED' ? `${human(v.nested.h1Direction)} CHANNEL` : 'NOT DETECTED'} · Parent ${d.marketLeg.channelPosition?.toFixed(0) ?? '—'}% · ${human(d.setupRelationship ?? d.marketLeg.relationship)} · ${human(d.marketLeg.tradeType)}${d.marketLeg.expectedDestination ? ` · ${human(d.marketLeg.expectedDestination)}` : ''}`
+      : v?.nested ? `D1 ${human(v.primaryDirection)} · H1 ${v.nested.h1Status && v.nested.h1Status !== 'NOT_DETECTED' ? human(v.nested.h1Direction) : 'NOT DETECTED'} · ${human(v.nested.relationship)}` : undefined,
     updatedAt: [sc?.updatedAt, v?.analysedAt, d?.evaluatedAt, h?.evaluatedAt, i.lastTickAt].filter((x): x is string => Boolean(x)).sort().pop() ?? null,
     since: null,
     ageSec: null,
@@ -411,11 +414,19 @@ export function buildWorld(i: Instrument, t: InstrumentTrace, ctx: InstrumentCon
     tile('d1', 'D1 channel', 5, { value: t.d1.value, sub: v?.d1 ? `Position ${v.d1.position?.toFixed(0) ?? '—'}% · ${human(v.d1.phase)}` : '—', at: t.d1.at, freshness: t.d1.freshness, evidence: [t.d1.detail, ...(v?.invalidation ?? []).map((x) => `Invalidation: ${x}`)] }),
     tile('h8', 'H8 channel', 5, { value: t.h8.value, sub: v?.h8 ? `Position ${v.h8.position?.toFixed(0) ?? '—'}% · ${human(v.h8.phase)}` : '—', at: t.h8.at, freshness: t.h8.freshness, evidence: [t.h8.detail, v ? `Agreement ${human(v.agreement)}` : ''] }),
     tile('structure', 'Structural direction', 6, {
-      value: d ? human(d.state) : '—',
-      sub: d ? `${human(d.direction)} · ${human(d.alignment)} · zone ${human(d.zone?.name)}` : 'No decision',
+      value: d?.marketLeg ? `${human(d.marketLeg.dominantTrend)} · ${human(d.marketLeg.currentLeg)}` : d ? human(d.state) : '—',
+      sub: d?.marketLeg
+        ? `${human(d.marketLeg.tradeType)} · ${human(d.marketLeg.relationship)} · reversal ${human(d.marketLeg.reversalState)}`
+        : d ? `${human(d.direction)} · ${human(d.alignment)} · zone ${human(d.zone?.name)}` : 'No decision',
       at: d?.evaluatedAt ?? null,
       freshness: field('', ctx.sources[6], Boolean(d), g1.pass, ctx, null, '').freshness,
-      evidence: d ? [`${d.reasonCode ?? ''} ${d.reason}`.trim(), ...(d.conflicts ?? []).map((c) => `Conflict: ${c}`), ...(d.invalidation ?? []).map((x) => `Invalidation: ${x}`)] : [],
+      evidence: d ? [
+        d.marketLeg ? `HTF ${human(d.marketLeg.dominantTrend)} · leg ${human(d.marketLeg.currentLeg)} · LTF ${human(d.marketLeg.ltfTrend)} · ${human(d.marketLeg.tradeType)} · destination ${human(d.marketLeg.expectedDestination)} · reversal ${human(d.marketLeg.reversalState)}` : '',
+        d.marketLeg ? `${d.marketLeg.reasonCode}: ${d.marketLeg.reason}` : '',
+        `${d.reasonCode ?? ''} ${d.reason}`.trim(),
+        ...(d.conflicts ?? []).map((c) => `Conflict: ${c}`),
+        ...(d.invalidation ?? []).map((x) => `Invalidation: ${x}`),
+      ].filter(Boolean) : [],
     }),
     tile('h1', 'H1 confirmation', 7, {
       value: t.h1.value,

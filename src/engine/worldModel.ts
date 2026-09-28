@@ -23,6 +23,16 @@ export interface WorldState {
   h8: { status: ChannelStatus; direction: string; position: number; confidence: number };
   h1: { phase: string; choch: boolean; bos: boolean; confirmed: boolean };
   risk: { approved: boolean; score: number; reason: string };
+  structure: {
+    parentTrend: string;
+    parentChannel: string | null;
+    parentPosition: number | null;
+    marketPhase: string | null;
+    nestedChannel: string;
+    nestedDirection: string | null;
+    relationship: string | null;
+    destination: string | null;
+  };
 }
 
 /** D1/H8 structure from Stage 5; unconfirmed or unavailable structure is FORMING/NEUTRAL with zero confidence. */
@@ -72,6 +82,16 @@ export function createWorldState(i: Instrument): WorldState {
       approved: i.state === 'READY',
       score: i.score,
       reason: i.state === 'READY' ? 'All mandatory gates passed' : 'Awaiting downstream confirmation',
+    },
+    structure: {
+      parentTrend: v?.primaryDirection ?? 'NEUTRAL',
+      parentChannel: v?.d1?.channelId ?? v?.d1?.channelKey ?? null,
+      parentPosition: v?.channelPosition ?? null,
+      marketPhase: v?.phase ?? null,
+      nestedChannel: v?.nested?.h1Status && v.nested.h1Status !== 'NOT_DETECTED' ? (v.nested.h1ChannelId ?? 'DETECTED') : 'NOT_DETECTED',
+      nestedDirection: v?.nested?.h1Direction ?? null,
+      relationship: v?.nested?.h1Relationship ?? v?.nested?.relationship ?? null,
+      destination: v?.nested?.expectedDestination ?? null,
     },
   };
 }

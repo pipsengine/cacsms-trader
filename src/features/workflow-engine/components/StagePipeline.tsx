@@ -48,7 +48,7 @@ export function StagePipeline({ stages, selected, focus, onSelect }: { stages: S
           <span className="eyebrow">DECISION PIPELINE</span>
           <h2>10-stage live path</h2>
         </div>
-        <span className="muted">Health = engine condition · State = where the stage's work stands · connectors show whether instruments pass on</span>
+        <span className="muted">Cards follow the Stage 4 leader{focus ? ` · ${focus}` : ''} · Health = engine condition · State = where the stage's work stands</span>
       </div>
       <div className="stage-grid">
         {rows.map((row, r) => (

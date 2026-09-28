@@ -13,7 +13,7 @@ export type MarketPhase =
   | 'COMPRESSION'
   | 'DETERIORATION';
 export type Agreement = 'AGREE' | 'CONFLICT' | 'PARTIAL' | 'NEUTRAL' | 'UNCONFIRMED';
-export type VisionTf = 'D1' | 'H8';
+export type VisionTf = 'D1' | 'H8' | 'H1';
 
 export type Breakout = {
   side: 'UP' | 'DOWN';
@@ -103,6 +103,11 @@ export type TfSummary = {
   phase: MarketPhase | null;
   confidence: number;
   channelKey?: string;
+  channelId?: string | null;
+  parentChannelId?: string | null;
+  relationship?: string | null;
+  upper?: number | null;
+  lower?: number | null;
   lastTs?: number;
   breakout?: Breakout | null;
   touches?: { anchor: number; opposite: number; total: number };
@@ -140,6 +145,24 @@ export type VisionInstrument = {
   confidence: number;
   d1: TfSummary;
   h8: TfSummary;
+  h1?: TfSummary;
+  nested?: {
+    parentTimeframe: string;
+    parentChannelId?: string | null;
+    childTimeframe: string;
+    childChannelId?: string | null;
+    relationship: string;
+    region: string;
+    currentLeg: string;
+    expectedDestination: string | null;
+    h1Status?: string;
+    h1Direction?: string | null;
+    h1Relationship?: string | null;
+    h1ChannelId?: string | null;
+    h1Upper?: number | null;
+    h1Lower?: number | null;
+  };
+  observation?: 'ELEVATED' | 'NORMAL' | string;
   invalidation: string[];
   evidence: Evidence[];
   reasoning: string[];

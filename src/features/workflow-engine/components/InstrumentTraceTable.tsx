@@ -73,6 +73,7 @@ function Detail({ t, busy, onReevaluate }: { t: InstrumentTrace; busy: string | 
           <b>{t.confidence == null ? '—' : `${t.confidence}%`}</b>
           {t.confidenceSource && <small> from {t.confidenceSource}</small>}
         </p>
+        {t.legLine && <p><b>Structure:</b> {t.legLine}</p>}
         <p>
           <b>Blocker:</b> {t.blocker || 'none'}
         </p>
@@ -226,6 +227,7 @@ export function InstrumentTraceTable({ rows, busy, onReevaluate, expanded, onExp
                   <td>
                     <b>{r.symbol}</b>
                     <small>{r.assetClass}</small>
+                    {r.legLine && <span className="leg-line">{r.legLine}</span>}
                   </td>
                   <td title={`${r.gateName} · ${r.stagesPassed}/10 gates passed`}>
                     <b>S{r.currentGate}</b> <small>{r.gateName}</small>

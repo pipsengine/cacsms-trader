@@ -1,8 +1,8 @@
 """Stage 7 H1 Confirmation: direction-aware H1 structure confirmation engine (pure, no I/O).
 
-H1 never decides the trading direction. The expected direction comes only from a Stage 6 READY_FOR_H1
-hand-off; H1 decides whether that higher-timeframe direction is currently safe and structurally confirmed:
-Stage 6 direction -> H1 structure -> pullback -> BOS/CHoCH -> momentum -> entry location -> confirmation.
+H1 does not invent a direction and does not flip the dominant HTF trend. It confirms the leg Stage 6
+describes: continuation with the dominant trend, or a counter-trend correction when HTF location and
+a confirmed H1 BOS/CHoCH agree. Channel position alone never confirms a trade.
 Confirmation uses closed H1 candles only; Stage 7 never places a trade.
 """
 
@@ -12,8 +12,9 @@ from typing import Any
 
 try:
     import vision
+    import leg_model
 except ImportError:  # pragma: no cover
-    from bridge.mt5 import vision  # type: ignore
+    from bridge.mt5 import vision, leg_model  # type: ignore
 
 STATES = ("WAITING_FOR_STAGE6", "WARMING_UP", "MONITORING", "PULLBACK", "SETUP_FORMING", "CONFIRMING", "CONFIRMED",
           "REJECTED", "INVALIDATED", "STALE", "BLOCKED")
@@ -316,6 +317,59 @@ def intrabar(o: dict[str, Any], live: dict[str, Any] | None, d: int) -> dict[str
              else f"Live price through H1 swing {_fmt(brk)} — BOS/CHoCH needs an H1 close")}
 
 
+def _counter_trend(out: dict[str, Any], s6: dict[str, Any], st: dict[str, Any], cfg: dict[str, Any], d_htf: int,
+                  state: str, code: str, reason: str) -> tuple[str, str, str]:
+    """Confirm a corrective leg when HTF location and H1 structure agree. Never flips the dominant trend."""
+    pos = (s6.get("position") or {}).get("d1")
+    d1, h8 = s6.get("d1") or {}, s6.get("h8") or {}
+    side = "UP" if st.get("bias", 0) > 0 else "DOWN" if st.get("bias", 0) < 0 else ""
+    confirmed = any(e.get("type") in ("BOS", "CHOCH") and e.get("side") == side for e in (st.get("events") or []))
+    data_stale = (out.get("data") or {}).get("status") == "STALE" or (s6.get("freshness") or {}).get("status") == "STALE"
+    leg = leg_model.classify(
+        dominant_direction=d1.get("direction") or s6.get("direction"),
+        position=pos,
+        d1_confirmed=bool(d1.get("confirmed", True)),
+        d1_status=d1.get("status"),
+        d1_phase=s6.get("structuralPhase"),
+        d1_confidence=float(s6.get("confidence") or 0),
+        h8_direction=h8.get("direction"),
+        h8_confirmed=bool(h8.get("confirmed")),
+        h1_bias=int(st.get("bias") or 0),
+        h1_confirmed_break=confirmed,
+        stale=data_stale,
+        d1_boundary_failed=d1.get("status") == "BROKEN",
+        htf_bos=bool(d1.get("breakout")),
+    )
+    out["marketLeg"] = leg
+    out["tradeType"] = leg["tradeType"]
+    if data_stale:
+        return "BLOCKED", "STALE_STRUCTURE", leg["reason"]
+    if leg["reasonCode"] == "INSUFFICIENT_RETRACEMENT_ROOM" and int(st.get("bias") or 0) == -d_htf:
+        return "BLOCKED", "INSUFFICIENT_RETRACEMENT_ROOM", leg["reason"]
+    if leg["candidate"] and str(leg["tradeType"]).startswith("COUNTER_TREND"):
+        trade_sign = -d_htf
+        su = setup(st, trade_sign, cfg)
+        trig = su.get("trigger")
+        fresh_trig = trig is not None and su.get("triggerAgeBars") is not None and su["triggerAgeBars"] <= cfg["triggerMaxAge"]
+        if not fresh_trig or su.get("invalidated"):
+            return "MONITORING", "AWAITING_LTF_STRUCTURE", leg["reason"]
+        su["model"] = leg["tradeType"]
+        out["setup"] = {k: (v if not isinstance(v, dict) else {kk: vv for kk, vv in v.items() if kk != "i"}) for k, v in su.items()}
+        out["invalidationLevel"] = su.get("invalidation")
+        out["expectedDirection"] = "BEARISH" if trade_sign < 0 else "BULLISH"
+        g = out["gates"]
+        g["location"] = _gate("location", "Channel Location", "PASS", leg["reason"])
+        g["h1Structure"] = _gate("h1Structure", "H1 Structure", "PASS",
+                                f"H1 {leg['ltfTrend'].lower()} nested structure confirms the {leg['tradeType']} leg. "
+                                f"Dominant trend stays {leg['dominantTrend']}. Reversal {leg['reversalState']}.")
+        return "CONFIRMED", "CONFIRMED_COUNTER_TREND", leg["reason"]
+    if leg["reasonCode"] == "AWAITING_LTF_STRUCTURE" and int(st.get("bias") or 0) == -d_htf and leg["evidence"].get("counterZone"):
+        return "MONITORING", "AWAITING_LTF_STRUCTURE", leg["reason"]
+    if leg["reasonCode"] == "LOCATION_IS_CONTEXT" and state == "CONFIRMED" and s6.get("structuralPhase") not in BREAKOUT_MODEL_PHASES:
+        return "MONITORING", "LOCATION_IS_CONTEXT", leg["reason"]
+    return state, code, reason
+
+
 def evaluate(symbol: str, s6: dict[str, Any] | None, series: dict[str, Any] | None, bars: list[tuple] | None,
              now_ts: float, cfg: dict[str, Any] | None = None, live: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg or CONFIG
@@ -562,8 +616,16 @@ def evaluate(symbol: str, s6: dict[str, Any] | None, series: dict[str, Any] | No
                   f"{'bullish' if d > 0 else 'bearish'} HTF direction — no confirmation until an H1 {sd.lower()}side CHoCH")
 
     out["reasoning"] = [f"{x['label']}: {x['status']} — {x['detail']}" for x in gate_list]
+    if dst == "READY":
+        state, code, reason = _counter_trend(out, s6, st, cfg, d, state, code, reason)
+        leg = out.get("marketLeg") or {}
+        if leg:
+            out["reasoning"].append(
+                f"Market leg {leg.get('dominantTrend')} dominant · {leg.get('currentLeg')} · "
+                f"{leg.get('tradeType')} · reversal {leg.get('reversalState')} — {leg.get('reason')}"
+            )
     out["confirmed"] = state == "CONFIRMED"
-    out["live"] = intrabar(out, live, d)
+    out["live"] = intrabar(out, live, d if not str((out.get("marketLeg") or {}).get("tradeType") or "").startswith("COUNTER_TREND") else -d)
     _finish(out, state, code, reason)
     if out["confirmed"]:
         out["handoff"] = handoff(out)
@@ -601,6 +663,8 @@ def handoff(o: dict[str, Any]) -> dict[str, Any]:
         "channelLocation": {"zone": s6.get("zone"), "d1": s6.get("positionD1"), "h8": s6.get("positionH8")},
         "confidence": o["score"], "invalidationLevel": o["invalidationLevel"], "riskAtr": su.get("riskAtr"),
         "freshness": (o.get("data") or {}).get("status"), "h1LastTs": h.get("lastTs"), "reasoning": o["reasoning"],
+        "tradeType": o.get("tradeType") or (o.get("marketLeg") or {}).get("tradeType"),
+        "marketLeg": o.get("marketLeg"),
         "executes": False,
     }
 

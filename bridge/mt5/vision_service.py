@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover
     from bridge.mt5 import vision_store as vs  # type: ignore
 
 SYMBOLS: list[str] = list(regime.SYMBOLS)
-TFS = ("D1", "H8")
+TFS = ("D1", "H8", "H1")
 
 CONFIG: dict[str, Any] = {
     "loopSec": 20,
@@ -219,7 +219,7 @@ class VisionService:
             analyses[tf] = a
             channels[tf] = {"data": data[tf], "available": available, "required": vision.TF_CFG[tf]["minBars"], "analysis": a}
 
-        out = vision.combine(sym, scan, analyses["D1"], analyses["H8"], data["D1"], data["H8"])
+        out = vision.combine(sym, scan, analyses["D1"], analyses["H8"], data["D1"], data["H8"], analyses.get("H1"), data.get("H1"))
         for tf in TFS:
             a = analyses[tf]
             out[tf.lower()]["available"] = channels[tf]["available"]

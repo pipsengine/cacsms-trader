@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChartCandle, ChartLine, ChartSwing, Touch, VisionTf } from '../types';
 
-export type ChartChannel = { key: string; label: string; tf: VisionTf; lines: ChartLine[]; tone: 'primary' | 'secondary' };
+export type ChartChannel = { key: string; label: string; tf: VisionTf; lines: ChartLine[]; tone: 'primary' | 'secondary' | 'nested' };
+export type ChartLevel = { price: number; label: string; color: string };
 export type ChartTouch = Touch & { tf: VisionTf };
 export type ChartMarker = {
   ts: number;
@@ -18,6 +19,7 @@ type Props = {
   swings: ChartSwing[];
   touches: ChartTouch[];
   markers: ChartMarker[];
+  levels?: ChartLevel[];
   livePrice: number | null;
   liveLabel?: string;
   position: number | null;
@@ -41,8 +43,9 @@ const ROLE_LABEL: Record<Touch['role'], string> = {
   OPPOSITE: 'opposite',
 };
 const TONE = {
-  primary: { stroke: '#3fb6ff', fill: 'rgba(63,182,255,0.08)' },
-  secondary: { stroke: '#b58cff', fill: 'rgba(181,140,255,0.06)' },
+  primary: { stroke: '#3fb6ff', fill: 'rgba(63,182,255,0.08)', width: 2.6, dash: undefined as string | undefined },
+  secondary: { stroke: '#b58cff', fill: 'rgba(181,140,255,0.05)', width: 1.6, dash: '7 4' },
+  nested: { stroke: '#ffb020', fill: 'rgba(255,176,32,0.05)', width: 1.5, dash: '3 3' },
 };
 
 export function priceDigits(p: number | null | undefined): number {
@@ -56,7 +59,7 @@ const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct
 export function barLabel(ts: number, tf: VisionTf, withYear = false): string {
   const d = new Date(ts * 1000);
   const day = `${String(d.getUTCDate()).padStart(2, '0')} ${MON[d.getUTCMonth()]}`;
-  if (tf === 'H8') return `${day} ${String(d.getUTCHours()).padStart(2, '0')}:00`;
+  if (tf === 'H8' || tf === 'H1') return `${day} ${String(d.getUTCHours()).padStart(2, '0')}:00`;
   return withYear ? `${day} ${String(d.getUTCFullYear()).slice(2)}` : day;
 }
 
@@ -77,7 +80,7 @@ function interp(lines: ChartLine[], ts: number): { lower: number; upper: number 
   return { lower: a.lower + (b.lower - a.lower) * f, upper: a.upper + (b.upper - a.upper) * f };
 }
 
-export function VisionChart({ tf, candles, channels, swings, touches, markers, livePrice, liveLabel, position, height: fullHeight = 400 }: Props) {
+export function VisionChart({ tf, candles, channels, swings, touches, markers, levels = [], livePrice, liveLabel, position, height: fullHeight = 400 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(900);
@@ -167,9 +170,15 @@ export function VisionChart({ tf, candles, channels, swings, touches, markers, l
       lo = Math.min(lo, livePrice);
       hi = Math.max(hi, livePrice);
     }
+    for (const lvl of levels) {
+      if (Number.isFinite(lvl.price)) {
+        lo = Math.min(lo, lvl.price);
+        hi = Math.max(hi, lvl.price);
+      }
+    }
     const pad = (hi - lo) * 0.06;
     return [lo - pad, hi + pad];
-  }, [candles, channels, start, end, axis, livePrice]);
+  }, [candles, channels, start, end, axis, livePrice, levels]);
 
   const y = (p: number) => M.t + ((yMax - p) / (yMax - yMin || 1)) * plotH;
   const digits = priceDigits(candles[candles.length - 1]?.close ?? livePrice);
@@ -331,15 +340,23 @@ export function VisionChart({ tf, candles, channels, swings, touches, markers, l
           <rect x={x(candles.length - 0.5)} y={M.t} width={Math.max(0, M.l + plotW - x(candles.length - 0.5))} height={plotH} className="vc-future" />
         )}
         <g clipPath={`url(#vc-clip-${tf})`}>
+          {levels.map((lvl) => (
+            <g key={lvl.label}>
+              <line x1={M.l} x2={M.l + plotW} y1={y(lvl.price)} y2={y(lvl.price)} stroke={lvl.color} strokeDasharray="2 4" />
+              <text x={M.l + 6} y={y(lvl.price) - 3} fill={lvl.color} fontSize="10">
+                {lvl.label}
+              </text>
+            </g>
+          ))}
           {channelPaths.map(({ ch, hist, proj, path, band, mid }) => (
             <g key={ch.key}>
               <path d={band(hist)} fill={TONE[ch.tone].fill} />
               <path d={band(proj)} fill={TONE[ch.tone].fill} opacity={0.6} />
               <path d={mid} className="vc-mid" stroke={TONE[ch.tone].stroke} />
-              <path d={path(hist, 'upper')} className="vc-line" stroke={TONE[ch.tone].stroke} />
-              <path d={path(hist, 'lower')} className="vc-line" stroke={TONE[ch.tone].stroke} />
-              <path d={path(proj, 'upper')} className="vc-line vc-proj" stroke={TONE[ch.tone].stroke} />
-              <path d={path(proj, 'lower')} className="vc-line vc-proj" stroke={TONE[ch.tone].stroke} />
+              <path d={path(hist, 'upper')} className="vc-line" stroke={TONE[ch.tone].stroke} style={{ strokeWidth: TONE[ch.tone].width, strokeDasharray: TONE[ch.tone].dash }} />
+              <path d={path(hist, 'lower')} className="vc-line" stroke={TONE[ch.tone].stroke} style={{ strokeWidth: TONE[ch.tone].width, strokeDasharray: TONE[ch.tone].dash }} />
+              <path d={path(proj, 'upper')} className="vc-line vc-proj" stroke={TONE[ch.tone].stroke} style={{ strokeWidth: TONE[ch.tone].width, strokeDasharray: TONE[ch.tone].dash }} />
+              <path d={path(proj, 'lower')} className="vc-line vc-proj" stroke={TONE[ch.tone].stroke} style={{ strokeWidth: TONE[ch.tone].width, strokeDasharray: TONE[ch.tone].dash }} />
             </g>
           ))}
           {visibleCandles.map((c, k) => {

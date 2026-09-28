@@ -112,6 +112,15 @@ export type Opportunity = {
   symbol: string;
   direction: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   side: 'BUY' | 'SELL';
+  tradeType?: string | null;
+  marketLeg?: {
+    tradeType?: string;
+    dominantTrend?: string;
+    currentLeg?: string;
+    reversalState?: string;
+    expectedDestination?: string | null;
+    reason?: string;
+  };
   setupState: RiskState;
   setupReasonCode: string;
   setupReason: string;

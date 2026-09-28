@@ -15,13 +15,18 @@ from __future__ import annotations
 import math
 from typing import Any
 
-TF_SEC = {"D1": 86400, "H8": 8 * 3600}
+import leg_model
+
+TF_SEC = {"D1": 86400, "H8": 8 * 3600, "H1": 3600}
 
 TF_CFG: dict[str, dict[str, Any]] = {
     "D1": {"lookback": 260, "pivot": 3, "minSwingAtr": 1.0, "minBars": 120, "maxSwings": 14, "minAnchorGap": 6,
            "invalidBars": 40, "chartBars": 320},
     "H8": {"lookback": 360, "pivot": 3, "minSwingAtr": 1.0, "minBars": 150, "maxSwings": 16, "minAnchorGap": 6,
            "invalidBars": 60, "chartBars": 420},
+    # Same swing, touch and parallel rules as D1/H8. A nested channel is published only when this geometry validates.
+    "H1": {"lookback": 220, "pivot": 3, "minSwingAtr": 1.0, "minBars": 100, "maxSwings": 16, "minAnchorGap": 4,
+           "invalidBars": 40, "chartBars": 280},
 }
 
 CONFIG: dict[str, Any] = {
@@ -642,9 +647,42 @@ def data_status(tf: str, series: dict[str, Any] | None, available: int) -> tuple
     return "WARMING_UP", f"{tf} Stage 1 {st}: {why} ({available}/{need} bars)"
 
 
+def link_channels(d1: dict[str, Any] | None, h8: dict[str, Any] | None, h1: dict[str, Any] | None) -> None:
+    """Attach parent/child identity. This does not change channel geometry or replace the parent direction."""
+    parent_id = d1.get("channelKey") if d1 and d1.get("confirmed") else None
+    if d1 is not None:
+        d1["channelId"] = d1.get("channelKey")
+        d1["parentChannelId"] = None
+        d1["relationship"] = "PRIMARY" if d1.get("confirmed") else "UNRESOLVED"
+    dominant = dir_sign(d1.get("direction")) if d1 and d1.get("confirmed") else 0
+    for child in (h8, h1):
+        if child is None:
+            continue
+        child["channelId"] = child.get("channelKey")
+        child["parentChannelId"] = parent_id
+        confirmed = bool(child.get("confirmed") and child.get("status") not in (None, "NONE", "FORMING"))
+        sign = dir_sign(child.get("direction")) if confirmed else 0
+        if not confirmed:
+            child["relationship"] = "UNRESOLVED"
+        elif not sign:
+            child["relationship"] = "RANGE_INTERNAL"
+        elif dominant == 0:
+            child["relationship"] = "RANGE_INTERNAL"
+        elif sign == dominant:
+            child["relationship"] = "ALIGNED"
+        elif d1 and d1.get("status") in ("BROKEN", "INVALIDATED"):
+            child["relationship"] = "REVERSAL_CANDIDATE"
+        else:
+            child["relationship"] = "CORRECTIVE"
+
+
 def combine(symbol: str, scanner: dict[str, Any], d1: dict[str, Any] | None, h8: dict[str, Any] | None,
-            d1_data: tuple[str, str], h8_data: tuple[str, str]) -> dict[str, Any]:
+            d1_data: tuple[str, str], h8_data: tuple[str, str],
+            h1: dict[str, Any] | None = None, h1_data: tuple[str, str] | None = None) -> dict[str, Any]:
     """Instrument-level Stage 5 output published to Structural Direction (Stage 6)."""
+    link_channels(d1, h8, h1)
+    h1_data = h1_data or ("WARMING_UP", "H1 nested channel not analysed")
+    # H1 availability never downgrades the D1/H8 publication. A missing nested channel is reported as NOT DETECTED.
     worst = min((d1_data, h8_data), key=lambda x: DATA_RANK[x[0]])
     if not scanner.get("qualified"):
         status, reason = "BLOCKED", f"Not qualified by Market Scanner — {scanner.get('reason')}"
@@ -659,10 +697,12 @@ def combine(symbol: str, scanner: dict[str, Any], d1: dict[str, Any] | None, h8:
                     "position": None, "phase": None, "confidence": 0}
         return {"dataStatus": data[0], "dataReason": data[1], "status": x["status"], "direction": x["direction"],
                 "lean": x.get("lean"), "confirmed": x["confirmed"], "position": x.get("position"), "phase": x["phase"],
-                "confidence": x["confidence"], "channelKey": x.get("channelKey"), "lastTs": x.get("lastTs"),
-                "breakout": x.get("breakout"), "touches": x.get("touches")}
+                "confidence": x["confidence"], "channelKey": x.get("channelKey"), "channelId": x.get("channelId") or x.get("channelKey"),
+                "parentChannelId": x.get("parentChannelId"), "relationship": x.get("relationship"),
+                "upper": x.get("upper"), "lower": x.get("lower"), "slope": x.get("slope"), "width": x.get("width"),
+                "lastTs": x.get("lastTs"), "breakout": x.get("breakout"), "touches": x.get("touches")}
 
-    d1s, h8s = dsum(d1, d1_data), dsum(h8, h8_data)
+    d1s, h8s, h1s = dsum(d1, d1_data), dsum(h8, h8_data), dsum(h1, h1_data)
     d1_ok = d1 is not None and d1_data[0] in ("READY", "STALE") and d1["confirmed"]
     s1 = dir_sign(d1["direction"]) if d1_ok else 0
     s2 = dir_sign(h8["direction"]) if h8 and h8_data[0] in ("READY", "STALE") and h8["confirmed"] else 0
@@ -704,10 +744,15 @@ def combine(symbol: str, scanner: dict[str, Any], d1: dict[str, Any] | None, h8:
         reasoning.append(d1["reason"])
     if h8:
         reasoning.append(h8["reason"])
+    if h1 and h1.get("confirmed"):
+        reasoning.append(f"H1 {h1.get('relationship', 'UNRESOLVED').lower().replace('_', ' ')} channel: {h1['reason']}")
+    elif h1 and h1.get("status") in (None, "NONE", "FORMING"):
+        reasoning.append("H1 nested channel: NOT DETECTED — the H1 swings do not validate a channel")
+    structure = d1["direction"] if d1_ok else primary
     if agreement == "AGREE":
-        reasoning.append(f"H8 structure agrees with the D1 {primary.replace('_', ' ').lower()} channel")
+        reasoning.append(f"H8 structure agrees with the D1 {structure.replace('_', ' ').lower()} channel")
     elif agreement == "CONFLICT":
-        reasoning.append(f"H8 {h8['direction'].replace('_', ' ').lower()} structure conflicts with D1 {primary.replace('_', ' ').lower()} — treated as a counter-move")
+        reasoning.append(f"H8 {h8['direction'].replace('_', ' ').lower()} structure conflicts with D1 {structure.replace('_', ' ').lower()} — a nested counter-move, not an HTF reversal")
     elif agreement == "UNCONFIRMED" and d1:
         reasoning.append(f"D1 channel {d1['status'].lower()} — no confirmed primary direction is published")
     if phase:
@@ -716,10 +761,45 @@ def combine(symbol: str, scanner: dict[str, Any], d1: dict[str, Any] | None, h8:
     invalidation = (d1.get("invalidation") if d1 else []) + (h8.get("invalidation") if h8 else [])
     evidence = [{"tf": "D1", **e} for e in (d1.get("evidence") if d1 else [])] + \
                [{"tf": "H8", **e} for e in (h8.get("evidence") if h8 else [])]
+    nested_leg = leg_model.classify(
+        dominant_direction=d1.get("direction") if d1_ok else "NEUTRAL",
+        position=d1.get("position") if d1 else None,
+        d1_confirmed=bool(d1_ok),
+        d1_status=(d1 or {}).get("status"),
+        d1_phase=(d1 or {}).get("phase"),
+        d1_confidence=float((d1 or {}).get("confidence") or 0),
+        h8_direction=(h8 or {}).get("direction"),
+        h8_confirmed=bool(h8 and h8_data[0] in ("READY", "STALE") and h8.get("confirmed")),
+        h1_bias=dir_sign(h1.get("direction")) if h1 and h1.get("confirmed") else 0,
+        h1_confirmed_break=bool(h1 and h1.get("confirmed") and h1.get("relationship") == "CORRECTIVE"),
+        stale=status == "STALE" or d1_data[0] == "STALE" or h8_data[0] == "STALE",
+        d1_boundary_failed=bool(d1 and d1.get("status") == "BROKEN"),
+        htf_bos=bool(d1 and d1.get("breakout")),
+    )
+    if nested_leg["relationship"] == "CORRECTIVE":
+        reasoning.append("H8 opposing D1 is a nested correction inside the dominant channel, not contradictory data and not an HTF reversal.")
+    elif nested_leg["reasonCode"] == "POTENTIAL_COUNTER_TREND_ZONE":
+        reasoning.append(nested_leg["reason"])
+    h1_detected = bool(h1 and h1.get("confirmed") and h1.get("channelKey"))
+    nested = {
+        "parentTimeframe": "D1", "parentChannelId": (d1 or {}).get("channelKey"),
+        "childTimeframe": "H1" if h1_detected else "H8",
+        "childChannelId": (h1 or {}).get("channelKey") if h1_detected else (h8 or {}).get("channelKey"),
+        "relationship": (h1 or {}).get("relationship") if h1_detected else nested_leg["relationship"],
+        "region": nested_leg["region"],
+        "currentLeg": nested_leg["currentLeg"], "expectedDestination": nested_leg["expectedDestination"],
+        "h1Status": h1.get("status") if h1_detected else "NOT_DETECTED",
+        "h1Direction": h1.get("direction") if h1_detected else None,
+        "h1Relationship": h1.get("relationship") if h1_detected else None,
+        "h1ChannelId": h1.get("channelKey") if h1_detected else None,
+        "h1Upper": h1.get("upper") if h1_detected else None,
+        "h1Lower": h1.get("lower") if h1_detected else None,
+    }
     return {
         "symbol": symbol, "status": status, "reason": reason, "scanner": scanner,
         "primaryDirection": primary, "agreement": agreement, "phase": phase,
         "channelPosition": d1.get("position") if d1 else None, "confidence": conf,
-        "d1": d1s, "h8": h8s, "invalidation": invalidation, "evidence": evidence, "reasoning": reasoning,
+        "d1": d1s, "h8": h8s, "h1": h1s, "nested": nested, "observation": nested_leg["observation"],
+        "invalidation": invalidation, "evidence": evidence, "reasoning": reasoning,
         "executes": False,
     }

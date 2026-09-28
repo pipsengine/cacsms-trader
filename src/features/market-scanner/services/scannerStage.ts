@@ -14,6 +14,15 @@ export type Stage4Output = {
   blocked: number;
 };
 
+/** The instrument the autonomous pipeline is watching: the best promoted pair, otherwise rank 1. */
+export function pipelineFocusSymbol(): string | null {
+  const list = getScannerSnapshot().state?.instruments ?? [];
+  if (!list.length) return null;
+  const promoted = list.filter((i) => i.state === 'PROMOTED');
+  const pool = promoted.length ? promoted : list;
+  return [...pool].sort((a, b) => a.rank - b.rank || a.symbol.localeCompare(b.symbol))[0]?.symbol ?? null;
+}
+
 export function stage4Output(now = Date.now()): Stage4Output {
   const snap = getScannerSnapshot();
   const list = snap.state?.instruments ?? [];

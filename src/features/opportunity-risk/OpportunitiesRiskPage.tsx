@@ -174,6 +174,9 @@ function SetupTable({ rows, now, onOpen }: { rows: Opportunity[]; now: number; o
                 </td>
                 <td>
                   <Badge tone={dirTone(o.side)}>{o.side}</Badge>
+                  {(o.tradeType || o.marketLeg?.tradeType) && (o.tradeType || o.marketLeg?.tradeType) !== 'NONE' && (
+                    <small className="sd-sub">{human(o.tradeType || o.marketLeg?.tradeType)}</small>
+                  )}
                 </td>
                 <td>{num(o.confidence, 0)}</td>
                 <td>{px(g.entry, ref)}</td>

@@ -153,6 +153,28 @@ export type DirectionDecision = {
     h8LastTs: number | null;
   };
   executes: false;
+  primaryStructure?: string;
+  currentTradableDirection?: string;
+  setupRelationship?: string;
+  parentStructure?: string;
+  /** Nested trend-within-trend classification. Absent on decisions stored before this model. */
+  marketLeg?: {
+    dominantTrend: string;
+    currentLeg: string;
+    ltfTrend: string;
+    relationship: string;
+    reversalState: string;
+    region: string;
+    channelPosition: number | null;
+    tradeType: string;
+    entryDirection: string;
+    expectedDestination: string | null;
+    candidate: boolean;
+    roomPct: number | null;
+    reasonCode: string;
+    reason: string;
+    confidence?: { continuation: number; correction: number; reversal: number };
+  };
   readySince?: string | null;
   changedAt?: string | null;
   evaluatedAt?: string | null;

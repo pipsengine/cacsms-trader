@@ -326,6 +326,29 @@ function DirectionDrawer({ symbol, version, onClose, offline }: { symbol: string
                       {human(d.zone.name)}
                       {d.zone.relative != null ? <small className="muted"> · {d.zone.relative.toFixed(0)}% from the trend-support side</small> : null}
                     </b>
+                    <span>Primary direction</span>
+                    <b>{human(d.primaryStructure ?? d.marketLeg?.dominantTrend ?? d.direction)}</b>
+                    <span>Current tradable direction</span>
+                    <b>{human(d.currentTradableDirection ?? 'NEUTRAL')}</b>
+                    <span>Parent structure</span>
+                    <b>{human(d.parentStructure ?? 'INTACT')}</b>
+                    <span>Current leg</span>
+                    <b>{d.marketLeg ? human(d.marketLeg.currentLeg) : '—'}</b>
+                    <span>LTF trend</span>
+                    <b>{d.marketLeg ? human(d.marketLeg.ltfTrend) : '—'}</b>
+                    <span>HTF position</span>
+                    <b>{d.marketLeg?.region ? `${human(d.marketLeg.region)} · ${pct(d.position.d1)}` : pct(d.position.d1)}</b>
+                    <span>Expected destination</span>
+                    <b>{d.marketLeg?.expectedDestination ? human(d.marketLeg.expectedDestination) : '—'}</b>
+                    <span>Structure relationship</span>
+                    <b>{d.marketLeg ? human(d.marketLeg.relationship) : human(d.alignment)}</b>
+                    <span>Reversal state</span>
+                    <b>{d.marketLeg ? human(d.marketLeg.reversalState) : '—'}</b>
+                    <span>Trade type</span>
+                    <b>
+                      {d.marketLeg?.tradeType && d.marketLeg.tradeType !== 'NONE' ? human(d.marketLeg.tradeType) : 'NONE'}
+                      {d.marketLeg ? <small className="muted"> · {d.marketLeg.reasonCode}: {d.marketLeg.reason}</small> : null}
+                    </b>
                     <span>Freshness</span>
                     <b>
                       <Badge tone={offline || d.freshness.status !== 'CURRENT' ? 'amber' : 'green'}>{offline ? 'LAST KNOWN' : d.freshness.status}</Badge>{' '}
@@ -725,6 +748,9 @@ export function StructuralDirectionPage() {
                     <div>
                       <b className={d.symbol === 'XAUUSD' ? 'hr-gold' : undefined}>{d.symbol}</b>
                       <small className="sd-code">{d.reasonCode}</small>
+                      {d.marketLeg && d.marketLeg.currentLeg !== 'UNRESOLVED' && (
+                        <small className="sd-sub">{human(d.marketLeg.currentLeg)} · {human(d.marketLeg.reversalState)}</small>
+                      )}
                     </div>
                     <span>
                       <small>

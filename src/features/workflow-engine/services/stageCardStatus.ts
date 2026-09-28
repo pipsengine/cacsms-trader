@@ -28,7 +28,7 @@ function holdLine(stage: StageRuntime): string | null {
   return brief(stage.stateReason);
 }
 
-/** Short facts printed on the stage card. The first line is the selected instrument where the stage has one. */
+/** Short facts printed on the stage card. The first line is the Stage 4 leader, not the chart selection. */
 export function stageCardLines(stage: StageRuntime, focus: string): string[] {
   const pair = focus || '—';
   const lines: string[] = [];

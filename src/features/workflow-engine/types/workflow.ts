@@ -116,6 +116,8 @@ export interface InstrumentTrace {
   h8: TraceField;
   h1: TraceField;
   risk: TraceField;
+  /** Dominant trend, current leg and trade type when Stage 6 has classified them. */
+  legLine?: string;
   updatedAt: string | null;
   since: string | null;
   ageSec: number | null;

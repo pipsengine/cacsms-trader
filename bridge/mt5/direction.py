@@ -4,15 +4,19 @@ Inputs are the published outputs of the upstream stages — never recalculated h
   * Stage 4 Market Scanner instrument record (which carries the Stage 2 strength legs and Stage 3 regimes it used)
   * Stage 5 HTF Market Vision instrument output (D1/H8 channel state, phase, position, breakout, invalidation)
 
-D1 is the primary authority. H8 refines the phase: an H8 move against a healthy D1 channel is a pullback that
-Stage 7 should monitor, not a reversal. Only an H8 structural reversal against deteriorating D1 evidence produces
-CONFLICT/BLOCKED. Stage 6 publishes structural decisions only; it never executes trades.
+D1 is the primary authority and is never flipped because H8 or H1 points the other way.
+An opposing H8 move inside a healthy D1 channel is a correction. `marketLeg` records the
+dominant trend, the current leg, and any counter-trend candidate separately. Only an H8
+structural reversal against deteriorating D1 evidence produces CONFLICT/BLOCKED.
+Stage 6 publishes structural decisions only; it never executes trades.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
+
+import leg_model
 
 DIRECTIONS = ("STRONG_BULLISH", "BULLISH", "NEUTRAL", "BEARISH", "STRONG_BEARISH")
 STATES = ("WAITING", "ANALYSING", "ALIGNED", "CONFLICT", "BLOCKED", "STALE", "INVALIDATED", "READY_FOR_H1")
@@ -95,7 +99,8 @@ def tf_view(v: dict[str, Any] | None, tf: str) -> dict[str, Any]:
         "dataStatus": x.get("dataStatus"), "dataReason": x.get("dataReason"), "status": x.get("status"),
         "direction": x.get("direction") or "NEUTRAL", "lean": x.get("lean"), "confirmed": bool(x.get("confirmed")),
         "phase": x.get("phase"), "position": x.get("position"), "confidence": float(x.get("confidence") or 0),
-        "channelKey": x.get("channelKey"), "lastTs": x.get("lastTs"), "breakout": x.get("breakout"),
+        "channelKey": x.get("channelKey"), "relationship": x.get("relationship"), "parentChannelId": x.get("parentChannelId"),
+        "lastTs": x.get("lastTs"), "breakout": x.get("breakout"),
         "touches": x.get("touches"), "available": x.get("available"), "required": x.get("required"), "reason": x.get("reason"),
     }
 
@@ -169,9 +174,42 @@ def _blank(symbol: str, sv: dict[str, Any] | None, v: dict[str, Any] | None, d1:
     }
 
 
+def _market_leg(out: dict[str, Any]) -> dict[str, Any]:
+    """Attach the nested-leg classification without changing the Stage 6 state machine."""
+    d1, h8, pos = out.get("d1") or {}, out.get("h8") or {}, out.get("position") or {}
+    fresh = out.get("freshness") or {}
+    boundary = d1.get("status") == "BROKEN"
+    h1 = out.get("h1") or {}
+    h1_confirmed = bool(h1.get("confirmed") and h1.get("relationship") in ("CORRECTIVE", "ALIGNED", "REVERSAL_CANDIDATE"))
+    out["marketLeg"] = leg_model.classify(
+        dominant_direction=d1.get("direction") if d1.get("confirmed") else "NEUTRAL",
+        position=pos.get("d1"),
+        d1_confirmed=bool(d1.get("confirmed")),
+        d1_status=d1.get("status"),
+        d1_phase=d1.get("phase"),
+        d1_confidence=float(d1.get("confidence") or 0),
+        h8_direction=h8.get("direction"),
+        h8_confirmed=bool(h8.get("confirmed")),
+        h1_bias=dir_sign(h1.get("direction")) if h1_confirmed else 0,
+        h1_confirmed_break=bool(h1_confirmed and h1.get("relationship") == "CORRECTIVE"),
+        stale=fresh.get("status") == "STALE",
+        d1_boundary_failed=boundary,
+        htf_bos=bool(d1.get("breakout")),
+    )
+    leg = out["marketLeg"]
+    entry = leg.get("entryDirection")
+    out["primaryStructure"] = leg.get("dominantTrend")
+    out["currentTradableDirection"] = "BULLISH" if entry == "LONG" else "BEARISH" if entry == "SHORT" else "NEUTRAL"
+    trade = str(leg.get("tradeType") or "NONE")
+    out["setupRelationship"] = "COUNTER_TREND" if trade.startswith("COUNTER") else "TREND_CONTINUATION" if trade.startswith("TREND") else leg.get("relationship")
+    out["parentStructure"] = "INTACT" if leg.get("reversalState") in (None, "NONE", "FAILED") else leg.get("reversalState")
+    return out
+
+
 def _gate(out: dict[str, Any], state: str, code: str, reason: str) -> dict[str, Any]:
     out.update(state=state, reasonCode=code, reason=reason[:500])
     out["explanation"] = f"{state.replace('_', ' ')} — {code}: {reason}"[:900]
+    _market_leg(out)
     return out
 
 
@@ -184,6 +222,7 @@ def evaluate(symbol: str, sc: dict[str, Any] | None, v: dict[str, Any] | None, v
     pos = positions(v)
     fresh = freshness(v, sv, vision_run_at, now_ts, cfg)
     out = _blank(symbol, sv, v, d1, h8, pos, fresh)
+    out["h1"] = tf_view(v, "H1")
     if v:
         out["invalidation"] = list(v.get("invalidation") or [])
 
@@ -400,6 +439,7 @@ def evaluate(symbol: str, sc: dict[str, Any] | None, v: dict[str, Any] | None, v
     out.update(state=state, reasonCode=code, reason=reason[:500])
     out["explanation"] = explain(out)[:900]
     out["readyForH1"] = state == "READY_FOR_H1"
+    _market_leg(out)
     if out["readyForH1"]:
         out["handoff"] = handoff(out)
     return out
@@ -435,12 +475,14 @@ def handoff(o: dict[str, Any]) -> dict[str, Any]:
         "phase": o["structuralPhase"], "alignment": o["alignment"], "reasonCode": o["reasonCode"],
         "channelPosition": o["position"]["d1"], "zone": o["zone"]["name"], "confidence": o["confidence"],
         "evidence": o["components"], "freshness": o["freshness"]["status"], "invalidation": o["invalidation"],
-        "executes": False,
+        "marketLeg": o.get("marketLeg"), "executes": False,
     }
 
 
 def decision_signature(o: dict[str, Any]) -> tuple:
-    return (o["state"], o["direction"], o["reasonCode"], o["structuralPhase"], o["alignment"], int(o["confidence"] // 5))
+    leg = o.get("marketLeg") or {}
+    return (o["state"], o["direction"], o["reasonCode"], o["structuralPhase"], o["alignment"], int(o["confidence"] // 5),
+            leg.get("currentLeg"), leg.get("tradeType"), leg.get("reversalState"))
 
 
 def evaluate_all(symbols: list[str], scanner_rows: dict[str, dict[str, Any]], vision_rows: dict[str, dict[str, Any]],

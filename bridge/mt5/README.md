@@ -51,6 +51,27 @@ npm run dev
    **Execution ON** in Workflow Engine. Pause New Trades only blocks new orders. It does
    not stop analysis.
 
+## Trend within trend
+
+Stages 5–9 share one classifier, `leg_model.py`. It does not replace the 10-stage pipeline.
+
+For every instrument the classifier keeps these facts separate:
+
+- Dominant HTF trend (a bearish H1 or H8 does not flip a bullish D1)
+- Channel region (lower, lower-middle, equilibrium, upper-middle, upper). Position is context. A touch of the upper boundary is a potential counter-trend zone, not a sell.
+- Current leg (`BULLISH_IMPULSE`, `BEARISH_CORRECTION`, and the other typed legs)
+- Nested relationship (`ALIGNED`, `CORRECTIVE`, `REVERSAL_CANDIDATE`, `RANGE_INTERNAL`, `BREAKOUT`, `UNRESOLVED`)
+- Reversal state (`NONE`, `POTENTIAL`, `DEVELOPING`, `CONFIRMED`, `FAILED`). LTF opposition alone stays `NONE`.
+- Trade type (`TREND_CONTINUATION_*`, `COUNTER_TREND_*`, `RANGE_ROTATION_*`, `BREAKOUT_*`, `REVERSAL_*`, or `NONE`)
+
+A counter-trend candidate needs the outer HTF region, remaining room to the HTF destination, and a confirmed H1 BOS or CHoCH in the corrective direction. Missing evidence, a late correction (`INSUFFICIENT_RETRACEMENT_ROOM`), or stale channels produce `WAIT` or `BLOCKED`. Stage 8 applies a stricter reward and confidence minimum to counter-trend trades. Prop-firm and account limits stay absolute. Targets are the structural layers TP1, TP2 and the final HTF destination, with a reason on each.
+
+Stage 9 exits a counter-trend position when the correction fails and the dominant trend resumes. If the correction later becomes a confirmed HTF reversal, that transition is recorded and the original trade type is not rewritten.
+
+The result is stored on the existing Stage 5, 6 and 7 decision JSON. No new table is required. When price enters an outer channel region, that symbol is queued for closer H1 observation. The other instruments are not recomputed for that event.
+
+Scanner promotion is still required before a setup can be handed to execution. Execution stays off until the operator turns it on.
+
 ## Security
 
 - Passwords are stored only under `bridge/mt5/data/secrets.json` (gitignored), never returned to the browser.

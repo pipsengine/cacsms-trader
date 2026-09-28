@@ -15,6 +15,9 @@ Input: Stage 7 CONFIRMED hand-offs only. Two separate questions are answered for
 
 Only when every mandatory gate passes is an immutable, idempotent execution authorization produced for Stage 9.
 Stage 8 never submits orders. Every missing or uncertain input fails closed with the exact reason.
+
+Counter-trend, reversal, breakout and range trades use the trade-type policy in leg_model. That policy
+can only be stricter than the global minimums. Prop-firm and account limits stay absolute.
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ import json
 import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
+
+import leg_model
 
 CONFIG: dict[str, Any] = {
     # per-trade risk
@@ -251,8 +256,17 @@ def _targets(h: dict[str, Any], d: int, entry: float, atr: float, cfg: dict[str,
             continue
         tp = float(lvl) - d * cfg["tpBufferAtr"] * atr
         if (tp - entry) * d >= cfg["minTargetAtr"] * atr:
-            out.append({"label": f"{tf} {'upper' if d > 0 else 'lower'} boundary", "boundary": float(lvl), "price": tp, "timeframe": tf})
+            out.append({"label": f"{tf} {'upper' if d > 0 else 'lower'} boundary", "boundary": float(lvl), "price": tp, "timeframe": tf,
+                        "layer": None, "reason": f"{tf} structural boundary in the trade direction"})
     out.sort(key=lambda t: (t["price"] - entry) * d)
+    layers = ((h.get("marketLeg") or {}).get("targets") or [])
+    for i, target in enumerate(out):
+        if i < len(layers):
+            target["layer"] = layers[i]["layer"]
+            target["reason"] = layers[i]["reason"]
+            target["destination"] = layers[i]["destination"]
+        else:
+            target["layer"] = "FINAL_STRUCTURAL_TARGET" if i == len(out) - 1 else f"TP{i + 1}"
     return out
 
 
@@ -405,6 +419,14 @@ def evaluate_setup(h: dict[str, Any], market: dict[str, dict[str, Any]], cfg: di
                 fail("WAITING", "RR_BELOW_MIN", f"Reward:risk {rr:.2f} is below the {cfg['minRR']:.1f} minimum")
         else:
             gates["rewardRisk"] = _g("N/A", "No target")
+        typed = leg_model.risk_decision(h.get("marketLeg") or {}, reward_risk=rr, confidence=conf,
+                                        base_min_rr=cfg["minRR"], base_min_confidence=cfg["minConfidence"])
+        if typed:
+            gates["tradeType"] = _g("FAIL", typed["reason"])
+            fail("RISK_BLOCKED", typed["code"], typed["reason"])
+        elif (h.get("marketLeg") or {}).get("tradeType"):
+            gates["tradeType"] = _g("PASS", f"{h['marketLeg']['tradeType']} · dominant {h['marketLeg'].get('dominantTrend')} · "
+                                            f"leg {h['marketLeg'].get('currentLeg')} · reversal {h['marketLeg'].get('reversalState')}")
 
     # setup score (quality ranking — never overrides a mandatory gate)
     comps = []
@@ -445,9 +467,16 @@ def evaluate_setup(h: dict[str, Any], market: dict[str, dict[str, Any]], cfg: di
         "setupState": state, "setupReasonCode": code, "setupReason": reason, "setupFailures": [{"state": s, "code": c, "reason": r} for s, c, r in fails],
         "score": score, "components": comps, "confidence": conf, "gates": gates, "geometry": geo,
         "confirmedSince": iso(confirmed_at), "expiresAt": iso(expires_at),
+        "tradeType": (h.get("marketLeg") or {}).get("tradeType") or h.get("tradeType"),
+        "marketLeg": h.get("marketLeg"),
         "stage7": {"confidence": conf, "model": ec.get("model"), "trigger": ec.get("trigger"), "triggerTs": ec.get("triggerTs"),
                    "triggerLevel": ec.get("triggerLevel"), "invalidationLevel": inv, "riskAtr": h.get("riskAtr"), "h1LastTs": h1_ts,
-                   "freshness": h.get("freshness"), "zone": (h.get("channelLocation") or {}).get("zone"), "reasoning": h.get("reasoning")},
+                   "freshness": h.get("freshness"), "zone": (h.get("channelLocation") or {}).get("zone"), "reasoning": h.get("reasoning"),
+                   "tradeType": (h.get("marketLeg") or {}).get("tradeType") or h.get("tradeType"),
+                   "dominantTrend": (h.get("marketLeg") or {}).get("dominantTrend"),
+                   "currentLeg": (h.get("marketLeg") or {}).get("currentLeg"),
+                   "reversalState": (h.get("marketLeg") or {}).get("reversalState"),
+                   "expectedDestination": (h.get("marketLeg") or {}).get("expectedDestination")},
     }
 
 
@@ -947,7 +976,8 @@ def _authorization(opp: dict[str, Any], acct: dict[str, Any], ps: dict[str, Any]
         "riskAmount": round(float(sizing["riskMoney"]), 2), "riskCurrency": ps["currency"], "riskPct": round(float(sizing["riskPct"]), 4),
         "rewardRisk": geo.get("rewardRisk"), "marginRequired": round(float(sizing.get("marginRequired") or 0), 2),
         "expiresAt": iso(now + cfg["authTtlSec"]), "authorizedAt": iso(now), "configHash": ctx.get("configHash"),
-        "source": {"stage": 7, "symbol": opp["symbol"], "direction": opp["direction"], "confirmedSince": opp["confirmedSince"], **opp["stage7"]},
+        "source": {"stage": 7, "symbol": opp["symbol"], "direction": opp["direction"], "confirmedSince": opp["confirmedSince"],
+                   "tradeType": opp.get("tradeType"), **opp["stage7"]},
         "evidence": {"setupScore": opp["score"], "setupGates": {k: v["status"] for k, v in opp["gates"].items()},
                      "accountGates": {k: v["status"] for k, v in gates.items()}, "sizing": {k: sizing.get(k) for k in
                      ("targetRiskPct", "allowedRiskPct", "lossPerLot", "fxRate", "fxSource", "volumeRaw", "marginRequired", "marginMethod", "marginLevelAfter")}},

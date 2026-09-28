@@ -1,5 +1,7 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTrading } from '../../context/TradingContext';
+import { pipelineFocusSymbol } from '../market-scanner/services/scannerStage';
+import { useScannerStore } from '../market-scanner/services/scannerStore';
 import './styles/workflow-engine.css';
 import { useWorkflowEngine } from './hooks/useWorkflowEngine';
 import type { WorkflowEngineAdapter } from './services/workflowEngineAdapter';
@@ -19,9 +21,12 @@ import { clock } from './utils/format';
 /** Monitoring / control surface only: the pipeline runs on the bridge's central engine whether or not this page is open. */
 export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngineAdapter }) {
   const w = useWorkflowEngine(adapter);
-  const { selected: focusSymbol } = useTrading();
+  const { selected: chartSymbol } = useTrading();
+  const scan = useScannerStore();
+  const focusSymbol = useMemo(() => pipelineFocusSymbol() ?? chartSymbol, [scan.state, chartSymbol]);
   const [selected, setSelected] = useState(1);
-  const [worldSymbol, setWorldSymbol] = useState('EURUSD');
+  const [pinnedWorld, setPinnedWorld] = useState<string | null>(null);
+  const worldSymbol = pinnedWorld ?? focusSymbol;
   const [expanded, setExpanded] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
 
@@ -31,7 +36,7 @@ export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngi
   const stage = d.stages.find((x) => x.id === selected) ?? d.stages[0];
   const focus = (symbol: string) => {
     setExpanded(symbol);
-    setWorldSymbol(symbol);
+    setPinnedWorld(symbol);
   };
 
   return (
@@ -56,7 +61,7 @@ export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngi
       <DecisionQueue rows={d.queue} onSelect={focus} />
       <InstrumentTraceTable rows={d.instruments} busy={w.busy} onReevaluate={(s) => void w.reevaluate(s)} expanded={expanded} onExpand={setExpanded} />
       <div className="two">
-        <WorldModelPanel rows={d.world} symbol={worldSymbol} onSymbol={setWorldSymbol} />
+        <WorldModelPanel rows={d.world} symbol={worldSymbol} onSymbol={setPinnedWorld} />
         <EventStream events={d.events} symbols={d.instruments.map((x) => x.symbol)} />
       </div>
       <RuntimeHealth stages={d.stages} onSelect={setSelected} />

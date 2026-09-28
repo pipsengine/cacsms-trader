@@ -378,7 +378,7 @@ class AutonomousFlow(unittest.TestCase):
         self.svc.on_candles("D1", ["EURUSD"], "INCREMENTAL")
         self.svc.on_candles("H8", ["GBPJPY"], "REPAIR")
         self.svc.on_candles("H1", ["USDJPY"], "INCREMENTAL")
-        self.assertEqual(self.svc._dirty, {"EURUSD": "NEW_CANDLE D1", "GBPJPY": "HISTORY_REPAIR H8"})
+        self.assertEqual(self.svc._dirty, {"EURUSD": "NEW_CANDLE D1", "GBPJPY": "HISTORY_REPAIR H8", "USDJPY": "NEW_CANDLE H1"})
 
         captured: list[dict] = []
         with mock.patch.object(self.svc, "run", lambda dirty, *a, **k: captured.append(dict(dirty)) or {}):

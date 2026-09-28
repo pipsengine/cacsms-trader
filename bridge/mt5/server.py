@@ -734,8 +734,13 @@ DIRECTION = direction_service.DirectionService(on_ready_change=_direction_change
 
 
 def _vision_change(symbols: list[str]) -> None:
+    watch = []
+    cache = getattr(VISION, "_cache", {}) if "VISION" in globals() else {}
+    for sym in symbols:
+        if ((cache.get(sym) or {}).get("out") or {}).get("observation") == "ELEVATED":
+            watch.append(sym)
     if ORCHESTRATOR:
-        ORCHESTRATOR.publish("VISION_CHANGE", "STAGE5", stage=5, symbols=symbols)
+        ORCHESTRATOR.publish("VISION_CHANGE", "STAGE5", stage=5, symbols=symbols, payload={"counterTrendWatch": watch})
     else:
         DIRECTION.on_stage5_run(symbols)
 

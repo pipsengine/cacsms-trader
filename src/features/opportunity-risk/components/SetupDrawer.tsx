@@ -462,6 +462,7 @@ export function SetupDrawer({ setupKey, version, now, onClose }: { setupKey: str
             <small>STAGE 8 · OPPORTUNITIES &amp; RISK</small>
             <h2>
               {o?.symbol ?? setupKey.split('|')[0]} {o && <Badge tone={riskTone(o.state)}>{human(o.state)}</Badge>} {o && <Badge tone={dirTone(o.side)}>{o.side}</Badge>}
+              {o?.tradeType && o.tradeType !== 'NONE' ? <Badge tone="gray">{human(o.tradeType)}</Badge> : o?.marketLeg?.tradeType && o.marketLeg.tradeType !== 'NONE' ? <Badge tone="gray">{human(o.marketLeg.tradeType)}</Badge> : null}
             </h2>
           </div>
           <button type="button" className="md-icon" onClick={onClose} aria-label="Close">
