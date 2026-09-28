@@ -4,6 +4,8 @@ import { Badge, Card, Metric, PageHeader, Tabs } from '../../components/UI';
 import { useTrading } from '../../context/TradingContext';
 import { ageText } from '../htf-vision';
 import { priceDigits } from '../htf-vision/components/VisionChart';
+import { pipelineFocusSymbol } from '../market-scanner/services/scannerStage';
+import { useScannerStore } from '../market-scanner/services/scannerStore';
 import { H1Chart, h1Label } from './components/H1Chart';
 import { fetchH1Chart, fetchH1Detail } from './services/confirmClient';
 import { gateTone, h1Tone, stateLabel } from './services/confirmStage';
@@ -432,14 +434,16 @@ function H1Drawer({ symbol, version, onClose }: { symbol: string; version: strin
 /* ------------------------------------------------------------------ page */
 
 export function H1ConfirmationPage() {
-  const { selected, setSelected } = useTrading();
+  const { selected } = useTrading();
   const store = useH1Store();
+  const scan = useScannerStore();
   const [now, setNow] = useState(Date.now());
   const [scope, setScope] = useState<'candidates' | 'all'>('candidates');
   const [query, setQuery] = useState('');
   const [chart, setChart] = useState<H1ChartData | null>(null);
   const [chartErr, setChartErr] = useState('');
   const [drawer, setDrawer] = useState<string | null>(null);
+  const [pinned, setPinned] = useState<string | null>(null);
 
   useEffect(() => startH1Store(), []);
   useEffect(() => {
@@ -462,9 +466,12 @@ export function H1ConfirmationPage() {
       .sort((a, b) => STATE_ORDER.indexOf(a.state) - STATE_ORDER.indexOf(b.state) || b.score - a.score || a.symbol.localeCompare(b.symbol));
   }, [list, candidates, scope, query]);
 
-  const symbol = shown.some((d) => d.symbol === selected)
-    ? selected
-    : (shown[0] ?? list.find((d) => d.symbol === selected) ?? list[0])?.symbol;
+  const leader = useMemo(() => pipelineFocusSymbol(), [scan.state]);
+  const symbol =
+    (pinned && list.some((d) => d.symbol === pinned) ? pinned : null) ??
+    (leader && list.some((d) => d.symbol === leader) ? leader : null) ??
+    (shown[0] ?? list.find((d) => d.symbol === selected) ?? list[0])?.symbol;
+  const followingLeader = !pinned && symbol === leader;
   const d = list.find((x) => x.symbol === symbol);
   const version = `${d?.changedAt ?? ''}|${d?.evaluatedAt ?? ''}`;
 
@@ -561,7 +568,11 @@ export function H1ConfirmationPage() {
           <div className="h1-list" role="listbox" aria-label="H1 instruments">
             {!shown.length && (
               <p className="hr-reason">
-                {scope === 'candidates' ? 'No Stage 6 candidate is ready for H1 confirmation.' : store.loading ? 'Loading…' : 'No Stage 7 decisions published.'}
+                {scope === 'candidates'
+                  ? `No Stage 6 candidate is ready for H1 confirmation.${leader ? ` Stage 4 leader ${leader} is shown until a row is pinned.` : ''}`
+                  : store.loading
+                    ? 'Loading…'
+                    : 'No Stage 7 decisions published.'}
               </p>
             )}
             {shown.map((x) => (
@@ -571,7 +582,7 @@ export function H1ConfirmationPage() {
                 role="option"
                 aria-selected={x.symbol === symbol}
                 className={x.symbol === symbol ? 'on' : ''}
-                onClick={() => setSelected(x.symbol)}
+                onClick={() => setPinned(x.symbol)}
                 title={x.explanation}
               >
                 <b className={x.symbol === 'XAUUSD' ? 'hr-gold' : undefined}>{x.symbol}</b>
@@ -603,6 +614,7 @@ export function H1ConfirmationPage() {
                       {d.expectedDirection !== 'NEUTRAL' && <Badge tone={biasTone(d.expectedDirection)}>{human(d.expectedDirection)}</Badge>}
                     </h3>
                     <p>
+                      {followingLeader ? `Stage 4 leader · ` : pinned ? `Pinned · ` : ''}
                       HTF direction (Stage 6): {human(d.stage6?.direction ?? 'NEUTRAL')} · {human(d.stage6?.state ?? 'not evaluated')} · H1 phase: {human(d.phase ?? d.state)}
                     </p>
                   </div>
@@ -683,7 +695,7 @@ export function H1ConfirmationPage() {
             <p>BOS · CHoCH · pullback completion · retest · false breakout · invalidation · confirmation — persisted in dbo.app_h1_event</p>
           </div>
         </div>
-        <EventsTable rows={store.state?.events ?? []} onSymbol={setSelected} />
+        <EventsTable rows={store.state?.events ?? []} onSymbol={setPinned} />
       </Card>
 
       <Card>
@@ -694,7 +706,7 @@ export function H1ConfirmationPage() {
           </div>
           <Badge tone="blue">{store.state?.runs.length ?? 0} recent runs</Badge>
         </div>
-        <HistoryTable rows={store.state?.history ?? []} onSymbol={(s) => { setSelected(s); setDrawer(s); }} />
+        <HistoryTable rows={store.state?.history ?? []} onSymbol={(s) => { setPinned(s); setDrawer(s); }} />
       </Card>
 
       {drawer && <H1Drawer symbol={drawer} version={version} onClose={() => setDrawer(null)} />}

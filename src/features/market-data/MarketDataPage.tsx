@@ -29,6 +29,30 @@ const TIMEFRAMES = ['MN1', 'W1', 'D1', 'H8', 'H1', 'M15', 'M5'] as const;
 
 type SortKey = 'symbol' | 'spread' | 'change' | 'score' | 'state';
 
+const PAGE_SIZE = 15;
+
+function TablePager({ page, pages, total, onPage }: { page: number; pages: number; total: number; onPage: (n: number) => void }) {
+  if (total <= PAGE_SIZE) return null;
+  const from = page * PAGE_SIZE + 1;
+  const to = Math.min(total, (page + 1) * PAGE_SIZE);
+  return (
+    <div className="md-pager">
+      <span>
+        {from}–{to} of {total}
+      </span>
+      <button type="button" disabled={page <= 0} onClick={() => onPage(page - 1)}>
+        Previous
+      </button>
+      <span>
+        Page {page + 1} / {pages}
+      </span>
+      <button type="button" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>
+        Next
+      </button>
+    </div>
+  );
+}
+
 function Empty({ title, detail }: { title: string; detail: string }) {
   return (
     <div className="empty-block">
@@ -161,6 +185,7 @@ function LiveMarketTab() {
   const [stateFilter, setStateFilter] = useState('ALL');
   const [sort, setSort] = useState<SortKey>('symbol');
   const [drawer, setDrawer] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
   const marketOpen = isFxMarketOpen();
 
   const rows = useMemo(() => {
@@ -197,6 +222,12 @@ function LiveMarketTab() {
     });
     return list;
   }, [instruments, q, stateFilter, sort]);
+
+  const filterKey = `${q}|${stateFilter}|${sort}|${rows.length}`;
+  useEffect(() => setPage(0), [filterKey]);
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const safePage = Math.min(page, pages - 1);
+  const pageRows = rows.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
 
   const liveCount = instruments.filter((i) => i.bid > 0).length;
 
@@ -242,6 +273,7 @@ function LiveMarketTab() {
           <Empty title="No live quotes yet" detail="Connect an MT5 account and keep npm run mt5:bridge running." />
         ) : (
           <div className="table-wrap">
+            <TablePager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
             <table>
               <thead>
                 <tr>
@@ -260,7 +292,7 @@ function LiveMarketTab() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((x) => {
+                {pageRows.map((x) => {
                   const fresh = freshnessSec(x.lastTickAt);
                   return (
                     <tr
@@ -302,6 +334,7 @@ function LiveMarketTab() {
                 })}
               </tbody>
             </table>
+            <TablePager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
           </div>
         )}
       </Card>

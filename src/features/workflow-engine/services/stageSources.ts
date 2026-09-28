@@ -9,6 +9,7 @@ import { getVisionSnapshot, visionStageStatus } from '../../htf-vision/services/
 import { directionStageStatus, getDirectionSnapshot } from '../../structural-direction/services/directionStore';
 import { getH1Snapshot, h1StageStatus } from '../../h1-confirmation/services/confirmStore';
 import { getRiskSnapshot, riskStageStatus } from '../../opportunity-risk/services/riskStore';
+import { getAutonomySnapshot } from './autonomyStore';
 import { STAGE_DEFINITIONS, type StageDefinition } from '../data/stageDefinitions';
 import type { OperationalHealth } from '../types/workflow';
 
@@ -271,19 +272,28 @@ export function readStageSources(analysisPaused: boolean, now = Date.now()): Rec
     },
     now,
   );
-  const trades = ex.state?.trades ?? [];
-  const lastTrade = trades.map((t) => t.closedAt).filter(Boolean).sort().pop() ?? null;
+  const learning = getAutonomySnapshot()?.learning;
+  const learnStatus = learning?.status || 'WAITING';
+  const learnMessage = learning?.summary?.message || `${learnStatus} · Stage 10 collects stored evidence and does not rewrite production parameters`;
   out[10] = build(
     def(10),
     {
-      storeStatus: executionStageStatus(ex, now),
-      storeError: ex.error,
-      loading: ex.loading,
-      running: false,
-      runAt: run?.runAt ?? null,
-      meta: { ...exMeta, runStatus: exMeta.runStatus === 'DISCONNECTED' ? 'HEALTHY' : exMeta.runStatus, message: `${trades.length} closed trade record(s)${lastTrade ? ` · last close ${lastTrade}` : ''}` },
-      latencyMs: null,
-      latencyLabel: 'Not measured',
+      storeStatus: learnStatus,
+      storeError: '',
+      loading: !learning,
+      running: learnStatus === 'LEARNING' || learnStatus === 'VALIDATING',
+      runAt: learning?.runAt ?? null,
+      meta: {
+        runs: null,
+        errors: null,
+        lastError: null,
+        runStatus: learnStatus === 'DEGRADED' || learnStatus === 'BLOCKED' ? 'DEGRADED' : 'HEALTHY',
+        message: learnMessage,
+        durationMs: learning?.durationMs ?? null,
+        triggers: [],
+      },
+      latencyMs: learning?.durationMs ?? null,
+      latencyLabel: 'Last learning cycle',
       analysisPaused,
     },
     now,

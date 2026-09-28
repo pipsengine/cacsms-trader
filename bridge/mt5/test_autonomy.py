@@ -325,27 +325,16 @@ class LearningBoundary(unittest.TestCase):
     def setUpClass(cls):
         store.ensure_schema()
 
-    def test_learning_never_writes_prop_rules_and_tightens_only_when_configured(self):
-        set_setting("learning.autoApply", '["minRewardRisk","maxSpreadAtr"]')
-        held = learning_service.LearningService._apply_permitted([
-            {"parameter": "minRewardRisk", "direction": "REVIEW_UP", "reason": "lose rate", "autoApplied": False},
-        ])
-        self.assertFalse(held[0]["autoApplied"])
+    def test_learning_never_writes_production_parameters(self):
+        import learning as engine
         before, _ = __import__("risk_store").load_config()
-        applied = learning_service.LearningService._apply_permitted([
-            {"parameter": "maxSpreadAtr", "direction": "TIGHTEN", "reason": "slippage", "autoApplied": False},
-        ])
+        sample = [{"key": f"t{i}", "slippagePoints": 5, "realizedPnl": -1, "rMultiple": -0.2, "outcome": "LOSS", "currency": "USD", "closedAt": "2026-01-01"} for i in range(20)]
+        plan = engine.proposals(sample, before)
         after, _ = __import__("risk_store").load_config()
-        self.assertTrue(applied[0]["autoApplied"])
-        self.assertLess(after["maxSpreadAtr"], before["maxSpreadAtr"])
-        loosened = learning_service.LearningService._apply_permitted([
-            {"parameter": "maxSpreadAtr", "direction": "LOOSEN", "reason": "must not apply", "autoApplied": False},
-        ])
-        again, _ = __import__("risk_store").load_config()
-        self.assertFalse(loosened[0]["autoApplied"])
-        self.assertEqual(again["maxSpreadAtr"], after["maxSpreadAtr"])
-        set_setting("learning.autoApply", "[]")
-        self.assertEqual(get_setting("learning.autoApply"), "[]")
+        self.assertEqual(after["maxSpreadAtr"], before["maxSpreadAtr"])
+        self.assertTrue(plan["proposals"])
+        self.assertFalse(any(p.get("applied") for p in plan["proposals"]))
+        self.assertEqual(plan["lifecycle"], "PROPOSE")
 
 
 if __name__ == "__main__":

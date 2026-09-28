@@ -1,29 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import {
-  Activity,
-  AlertTriangle,
-  Brain,
-  CheckCircle2,
-  Database,
-  Eye,
-  PauseCircle,
-  PlayCircle,
-  Radio,
-  Shield,
-  Target,
-  Zap,
-} from 'lucide-react';
+import { AlertTriangle, CheckCircle2, Database, PauseCircle, PlayCircle, Zap } from 'lucide-react';
 import { allPairs } from '../data/market';
 import { useTrading } from '../context/TradingContext';
 import { Badge, Card, Metric, PageHeader, Tabs } from '../components/UI';
@@ -38,10 +14,34 @@ import { MarketScannerPage, scannerStageStatus, useScannerStore } from '../featu
 import { directionStageStatus, StructuralDirectionPage, useDirectionStore } from '../features/structural-direction';
 import { H1ConfirmationPage, h1StageStatus, useH1Store } from '../features/h1-confirmation';
 import { OpportunitiesRiskPage, riskStageStatus, useRiskStore } from '../features/opportunity-risk';
-import { ExecutionPositionsPage, executionStageStatus, fetchTrades, useExecutionStore, type ExecTrade } from '../features/execution';
+import { ExecutionPositionsPage, executionStageStatus, useExecutionStore } from '../features/execution';
+import { PerformancePage } from '../features/performance';
 import { useAutonomyState } from '../features/workflow-engine/services/autonomyStore';
 
 const dir = (x: string) => (x === 'BULLISH' ? 'green' : x === 'BEARISH' ? 'red' : 'gray');
+const PAGE_SIZE = 15;
+
+function CandidatePager({ page, pages, total, onPage }: { page: number; pages: number; total: number; onPage: (n: number) => void }) {
+  if (total <= PAGE_SIZE) return null;
+  const from = page * PAGE_SIZE + 1;
+  const to = Math.min(total, (page + 1) * PAGE_SIZE);
+  return (
+    <div className="ms-pager">
+      <span>
+        {from}–{to} of {total}
+      </span>
+      <button type="button" disabled={page <= 0} onClick={() => onPage(page - 1)}>
+        Previous
+      </button>
+      <span>
+        Page {page + 1} / {pages}
+      </span>
+      <button type="button" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>
+        Next
+      </button>
+    </div>
+  );
+}
 
 function EmptyState({ title, detail }: { title: string; detail: string }) {
   return (
@@ -54,6 +54,7 @@ function EmptyState({ title, detail }: { title: string; detail: string }) {
 
 function InstrumentTable({ limit }: { limit?: number }) {
   const { selected, setSelected, instruments } = useTrading();
+  const [page, setPage] = useState(0);
   const scanner = useScannerStore();
   const bySymbol = useMemo(() => {
     const m = new Map<string, { rank: number; state: string; conviction: number | null; threshold: number | null; reason: string }>();
@@ -75,11 +76,16 @@ function InstrumentTable({ limit }: { limit?: number }) {
     return rank(a.state) - rank(b.state) || b.score - a.score;
   });
   const rows = limit ? ordered.slice(0, limit) : ordered;
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const safePage = Math.min(page, pages - 1);
+  const pageRows = limit ? rows : rows.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+  useEffect(() => setPage(0), [rows.length, limit]);
   if (!rows.length) {
     return <EmptyState title="No instrument data" detail="Connect MT5 and sync market state into db_Cacsms-Trader." />;
   }
   return (
     <div className="table-wrap">
+      {!limit && <CandidatePager page={safePage} pages={pages} total={rows.length} onPage={setPage} />}
       <table>
         <thead>
           <tr>
@@ -96,7 +102,7 @@ function InstrumentTable({ limit }: { limit?: number }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((x) => (
+          {pageRows.map((x) => (
             <tr key={x.symbol} className={selected === x.symbol ? 'row-selected' : ''} onClick={() => setSelected(x.symbol)}>
               <td>
                 <b>{x.symbol}</b>
@@ -136,6 +142,7 @@ function InstrumentTable({ limit }: { limit?: number }) {
           ))}
         </tbody>
       </table>
+      {!limit && <CandidatePager page={safePage} pages={pages} total={rows.length} onPage={setPage} />}
     </div>
   );
 }
@@ -375,108 +382,9 @@ export function Execution() {
   return <ExecutionPositionsPage />;
 }
 
-/** Closed Stage 9 trades published to Stage 10, read from dbo.app_exec_trade. */
+/** Stage 10 reads persisted Stage 1–9 evidence. The bridge loop runs whether or not this page is open. */
 export function Performance() {
-  const { events } = useTrading();
-  const execStore = useExecutionStore();
-  const [trades, setTrades] = useState<ExecTrade[] | null>(null);
-  const [err, setErr] = useState('');
-  const published = execStore.state?.trades.length ?? 0;
-
-  useEffect(() => {
-    let cancelled = false;
-    fetchTrades({ limit: 500 })
-      .then((r) => !cancelled && (setTrades(r.trades), setErr('')))
-      .catch((e) => !cancelled && setErr(e instanceof Error ? e.message : 'Trade history unavailable'));
-    return () => {
-      cancelled = true;
-    };
-  }, [published]);
-
-  const closed = trades ?? [];
-  const wins = closed.filter((t) => t.realizedPnl > 0).length;
-  const winRate = closed.length ? Math.round((wins / closed.length) * 100) : 0;
-  const net = closed.reduce((s, t) => s + t.realizedPnl, 0);
-  const rs = closed.filter((t) => t.rMultiple != null);
-  const avgR = rs.length ? rs.reduce((s, t) => s + (t.rMultiple ?? 0), 0) / rs.length : null;
-  const currencies = [...new Set(closed.map((t) => t.currency))];
-  const curve = useMemo(() => {
-    let eq = 0;
-    return closed
-      .slice()
-      .reverse()
-      .map((t, i) => {
-        eq += t.realizedPnl;
-        return { n: i + 1, equity: Number(eq.toFixed(2)) };
-      });
-  }, [closed]);
-  const slip = closed.filter((t) => t.slippagePoints != null);
-
-  return (
-    <>
-      <PageHeader title="Performance & Learning" subtitle="Decision audit, strategy diagnostics and controlled model calibration" />
-      {err && <p className="alert">{err}</p>}
-      <div className="metrics">
-        <Metric
-          label="Net P&L"
-          value={trades ? `${net >= 0 ? '+' : ''}${net.toFixed(2)}${currencies.length === 1 ? ` ${currencies[0]}` : ''}` : '—'}
-          sub={currencies.length > 1 ? `Mixed currencies: ${currencies.join(', ')}` : 'Realized · closed Stage 9 trades'}
-        />
-        <Metric label="Win Rate" value={closed.length ? `${winRate}%` : '—'} sub={`${closed.length} closed trades`} />
-        <Metric label="Average R" value={avgR != null ? `${avgR >= 0 ? '+' : ''}${avgR.toFixed(2)}R` : '—'} sub={`${rs.length} trades with initial risk`} />
-        <Metric
-          label="Avg Slippage"
-          value={slip.length ? `${(slip.reduce((s, t) => s + (t.slippagePoints ?? 0), 0) / slip.length).toFixed(1)} pts` : '—'}
-          sub="Expected vs actual entry"
-        />
-      </div>
-      <div className="grid-2">
-        <Card>
-          <h3>Equity Curve</h3>
-          <div className="chart-lg">
-            {!curve.length ? (
-              <EmptyState title="No closed trades yet" detail="The curve builds from closed Stage 9 trades published to Stage 10 (dbo.app_exec_trade)." />
-            ) : (
-              <ResponsiveContainer>
-                <AreaChart data={curve}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="n" />
-                  <YAxis />
-                  <Tooltip />
-                  <Area dataKey="equity" fillOpacity={0.18} />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </div>
-        </Card>
-        <Card>
-          <h3>Learning Insights</h3>
-          <div className="insights">
-            <div>
-              <Brain />
-              <span>Insights appear after real closed trades and decision events are stored — no synthetic recommendations.</span>
-            </div>
-            <div>
-              <Shield />
-              <span>
-                <b>{events.length}</b> system events loaded from dbo.app_events.
-              </span>
-            </div>
-            <div>
-              <Activity />
-              <span>
-                <b>{closed.length}</b> closed Stage 9 trades with full lifecycle evidence available for diagnostics.
-              </span>
-            </div>
-            <div>
-              <Target />
-              <span>Live parameters are not silently rewritten.</span>
-            </div>
-          </div>
-        </Card>
-      </div>
-    </>
-  );
+  return <PerformancePage />;
 }
 
 export function SystemControl() {

@@ -160,15 +160,25 @@ class AutonomousOrchestrator:
         elif event_type == "CONFIRMATION_CHANGE":
             self._enqueue(event_id, 8, "MARK_RISK", symbols=symbols, priority=40, version=f"confirm:{_version(payload)}:{_version(symbols)}",
                           payload={"reason": event_type})
+            self._enqueue(event_id, 10, "RUN_LEARNING", symbols=symbols, priority=45, version=f"h1:{_version(payload)}:{event_id}",
+                          payload={"reason": "SETUP_INVALIDATED"})
         elif event_type == "RISK_CHANGE":
             self._enqueue(event_id, 9, "MARK_EXECUTION", symbols=symbols, priority=5, version=f"risk:{_version(payload)}:{_version(symbols)}",
                           payload={"reason": event_type})
+            self._enqueue(event_id, 10, "RUN_LEARNING", symbols=symbols, priority=46, version=f"risk-learn:{_version(payload)}:{event_id}",
+                          payload={"reason": "SETUP_REJECTED"})
         elif event_type == "EXECUTION_CHANGE":
             self._enqueue(event_id, 8, "MARK_RISK", symbols=symbols, priority=20, version=f"execution:{payload.get('what')}:{_version(symbols)}",
                           payload={"reason": event_type})
             if payload.get("what") == "CLOSED":
                 self._enqueue(event_id, 10, "RUN_LEARNING", symbols=symbols, priority=30, version=f"closed:{_version(payload)}",
                               payload={"reason": "TRADE_CLOSED"})
+            else:
+                self._enqueue(event_id, 10, "RUN_LEARNING", symbols=symbols, priority=48, version=f"managed:{payload.get('what')}:{event_id}",
+                              payload={"reason": "POSITION_MANAGED"})
+        elif event_type in ("MODEL_OUTCOME_AVAILABLE", "PARAMETER_CHANGED"):
+            self._enqueue(event_id, 10, "RUN_LEARNING", symbols=symbols, priority=44, version=f"{event_type}:{event_id}",
+                          payload={"reason": event_type})
 
     def _diagnostic(self, event_id: int, symbols: list[str], payload: dict[str, Any]) -> None:
         """Operator reprocess. It wakes the same engines and cannot skip their dependency or risk gates."""
@@ -492,7 +502,7 @@ class AutonomousOrchestrator:
                                    "reason": "Latest completed trade evaluated" if learned_row else "Awaiting a completed trade or rejected setup",
                                    "reasonCode": None if learned_row else "AWAITING_OUTCOME", "trigger": trigger},
                       engine_health=engines.get("S10", "OFFLINE"), passed=learned_row,
-                      next_action="Record outcome and recommend only parameters listed in learning.autoApply; hard limits stay unchanged")
+                      next_action="Record the outcome. Candidate parameters stay separate from production until an explicit approval.")
 
     def state(self) -> dict[str, Any]:
         out = store.state()

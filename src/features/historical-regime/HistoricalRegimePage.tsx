@@ -793,12 +793,36 @@ function RegimeMonitor({
 /* ------------------------------------------------------------------ transition history tab */
 
 type TSort = 'newest' | 'oldest' | 'confidence';
+const PAGE_SIZE = 15;
+
+function HistoryPager({ page, pages, total, onPage }: { page: number; pages: number; total: number; onPage: (n: number) => void }) {
+  if (total <= PAGE_SIZE) return null;
+  const from = page * PAGE_SIZE + 1;
+  const to = Math.min(total, (page + 1) * PAGE_SIZE);
+  return (
+    <div className="md-pager">
+      <span>
+        {from}–{to} of {total}
+      </span>
+      <button type="button" disabled={page <= 0} onClick={() => onPage(page - 1)}>
+        Previous
+      </button>
+      <span>
+        Page {page + 1} / {pages}
+      </span>
+      <button type="button" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>
+        Next
+      </button>
+    </div>
+  );
+}
 
 function TransitionHistory({ transitions, onPick }: { transitions: RegimeTransition[]; onPick: (t: RegimeTransition) => void }) {
   const [q, setQ] = useState('');
   const [asset, setAsset] = useState('ALL');
   const [target, setTarget] = useState('ALL');
   const [sort, setSort] = useState<TSort>('newest');
+  const [page, setPage] = useState(0);
 
   const rows = useMemo(() => {
     let list = [...transitions];
@@ -822,6 +846,12 @@ function TransitionHistory({ transitions, onPick }: { transitions: RegimeTransit
     );
     return list;
   }, [transitions, q, asset, target, sort]);
+
+  const filterKey = `${q}|${asset}|${target}|${sort}|${rows.length}`;
+  useEffect(() => setPage(0), [filterKey]);
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const safePage = Math.min(page, pages - 1);
+  const pageRows = rows.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
 
   const lag = (t: RegimeTransition) => t.evidence?.observations?.length ?? null;
 
@@ -872,6 +902,7 @@ function TransitionHistory({ transitions, onPick }: { transitions: RegimeTransit
         />
       ) : (
         <div className="table-wrap">
+          <HistoryPager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
           <table>
             <thead>
               <tr>
@@ -887,7 +918,7 @@ function TransitionHistory({ transitions, onPick }: { transitions: RegimeTransit
               </tr>
             </thead>
             <tbody>
-              {rows.map((t) => (
+              {pageRows.map((t) => (
                 <tr key={t.id} className="hr-click" onClick={() => onPick(t)}>
                   <td>{t.confirmedAt}</td>
                   <td>
@@ -914,6 +945,7 @@ function TransitionHistory({ transitions, onPick }: { transitions: RegimeTransit
               ))}
             </tbody>
           </table>
+          <HistoryPager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
         </div>
       )}
     </Card>

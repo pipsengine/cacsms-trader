@@ -18,6 +18,7 @@ import { publishStage7 } from '../features/h1-confirmation/services/confirmStage
 import { getRiskSnapshot, riskStageStatus, saveRiskConfigNow, startRiskStore, subscribeRisk } from '../features/opportunity-risk/services/riskStore';
 import { publishStage8 } from '../features/opportunity-risk/services/riskStage';
 import { executionStageStatus, getExecutionSnapshot, setControlNow, startExecutionStore, subscribeExecution } from '../features/execution/services/executionStore';
+import { startLearningStore } from '../features/performance/services/learningStore';
 import { publishStage9 } from '../features/execution/services/executionStage';
 import { startAutonomyStore } from '../features/workflow-engine/services/autonomyStore';
 import { eventBus } from '../services/eventBus';
@@ -484,6 +485,12 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
       unsub();
       stop();
     };
+  }, [ready]);
+
+  /** Stage 10 learning runs on the bridge. This poll only reads it, including while Performance & Learning is closed. */
+  useEffect(() => {
+    if (!ready) return;
+    return startLearningStore();
   }, [ready]);
 
   /** Stage 9 Execution & Positions runs on the central engine; mirror its global trading switch and publish its lifecycle events. */

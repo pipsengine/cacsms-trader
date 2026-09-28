@@ -11,6 +11,30 @@ import { directionTone } from './services/scannerStage';
 import type { AssetLeg, ScannerDetail, ScannerInstrument, ScannerRun, ScannerState, Stage1Readiness } from './types';
 import './market-scanner.css';
 
+const PAGE_SIZE = 15;
+
+function RankPager({ page, pages, total, onPage }: { page: number; pages: number; total: number; onPage: (n: number) => void }) {
+  if (total <= PAGE_SIZE) return null;
+  const from = page * PAGE_SIZE + 1;
+  const to = Math.min(total, (page + 1) * PAGE_SIZE);
+  return (
+    <div className="ms-pager">
+      <span>
+        {from}–{to} of {total}
+      </span>
+      <button type="button" disabled={page <= 0} onClick={() => onPage(page - 1)}>
+        Previous
+      </button>
+      <span>
+        Page {page + 1} / {pages}
+      </span>
+      <button type="button" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>
+        Next
+      </button>
+    </div>
+  );
+}
+
 const human = (s?: string | null) => (s ? s.replace(/_/g, ' ') : '—');
 const num = (v: number | null | undefined, d = 2) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(d));
 const signed = (v: number | null | undefined, d = 2) => (v == null || !Number.isFinite(v) ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(d)}`);
@@ -535,6 +559,7 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
   const [s1F, setS1F] = useState<(typeof S1_FILTERS)[number]>('All');
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'rank', desc: false });
   const [drawer, setDrawer] = useState<string | null>(null);
+  const [page, setPage] = useState(0);
 
   useEffect(() => startScannerStore(), []);
   useEffect(() => startVisionStore(), []);
@@ -574,6 +599,12 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
       return sort.desc ? -c : c;
     });
   }, [list, query, stateF, dirF, convF, relF, s1F, sort]);
+
+  const filterKey = `${query}|${stateF}|${dirF}|${convF}|${relF}|${s1F}|${sort.key}|${sort.desc}|${shown.length}`;
+  useEffect(() => setPage(0), [filterKey]);
+  const pages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  const safePage = Math.min(page, pages - 1);
+  const pageRows = shown.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
 
   const th = (key: SortKey, label: string, title?: string) => (
     <th title={title} aria-sort={sort.key === key ? (sort.desc ? 'descending' : 'ascending') : 'none'}>
@@ -727,6 +758,7 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
           </div>
         ) : (
           <div className="table-wrap">
+            <RankPager page={safePage} pages={pages} total={shown.length} onPage={setPage} />
             <table className="cs-table ms-table">
               <thead>
                 <tr>
@@ -745,7 +777,7 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
                 </tr>
               </thead>
               <tbody>
-                {shown.map((i) => (
+                {pageRows.map((i) => (
                   <tr key={i.symbol} className={`hr-click ${selected === i.symbol ? 'cs-focus' : ''}`} onClick={() => open(i.symbol)} title={i.reason}>
                     <td>{i.rank}</td>
                     <td>
@@ -786,6 +818,7 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
                 ))}
               </tbody>
             </table>
+            <RankPager page={safePage} pages={pages} total={shown.length} onPage={setPage} />
             {!shown.length && <p className="hr-reason">No instrument matches these filters.</p>}
           </div>
         )}

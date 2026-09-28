@@ -52,6 +52,8 @@ const STATUS_FILTERS: Array<HistoryStatusCode | 'ALL'> = [
 
 type SortKey = 'symbol' | 'status' | 'count' | 'completeness' | 'quality' | 'latest';
 
+const PAGE_SIZE = 15;
+
 const pct = (v?: number | null, digits = 1) => (v == null ? '—' : `${v.toFixed(digits)}%`);
 const localTime = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : '—');
 
@@ -70,6 +72,28 @@ function duration(sec?: number | null): string {
   if (sec < 5400) return `${Math.round(sec / 60)}m`;
   if (sec < 172800) return `${Math.round(sec / 3600)}h`;
   return `${Math.round(sec / 86400)}d`;
+}
+
+function SeriesPager({ page, pages, total, onPage }: { page: number; pages: number; total: number; onPage: (n: number) => void }) {
+  if (total <= PAGE_SIZE) return null;
+  const from = page * PAGE_SIZE + 1;
+  const to = Math.min(total, (page + 1) * PAGE_SIZE);
+  return (
+    <div className="md-pager">
+      <span>
+        {from}–{to} of {total}
+      </span>
+      <button type="button" disabled={page <= 0} onClick={() => onPage(page - 1)}>
+        Previous
+      </button>
+      <span>
+        Page {page + 1} / {pages}
+      </span>
+      <button type="button" disabled={page >= pages - 1} onClick={() => onPage(page + 1)}>
+        Next
+      </button>
+    </div>
+  );
 }
 
 function Empty({ title, detail }: { title: string; detail: string }) {
@@ -348,6 +372,7 @@ export function HistoricalDataTab() {
   const [statusFilter, setStatusFilter] = useState<HistoryStatusCode | 'ALL'>('ALL');
   const [tfFilter, setTfFilter] = useState('ALL');
   const [sort, setSort] = useState<SortKey>('symbol');
+  const [page, setPage] = useState(0);
   const [drawer, setDrawer] = useState<{ symbol: string; timeframe: string } | null>(null);
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState('');
@@ -379,6 +404,12 @@ export function HistoricalDataTab() {
     });
     return list;
   }, [status, q, statusFilter, tfFilter, sort, timeframes]);
+
+  const filterKey = `${q}|${statusFilter}|${tfFilter}|${sort}|${rows.length}`;
+  useEffect(() => setPage(0), [filterKey]);
+  const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+  const safePage = Math.min(page, pages - 1);
+  const pageRows = rows.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
 
   const act = async (label: string, fn: () => Promise<{ message?: string } & Record<string, unknown>>) => {
     setBusy(label);
@@ -676,6 +707,7 @@ export function HistoricalDataTab() {
           <Empty title="No series match" detail="Adjust the search or filters." />
         ) : (
           <div className="table-wrap">
+            <SeriesPager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
             <table>
               <thead>
                 <tr>
@@ -693,7 +725,7 @@ export function HistoricalDataTab() {
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r) => (
+                {pageRows.map((r) => (
                   <tr
                     key={`${r.symbol}-${r.timeframe}`}
                     className={r.symbol === symbol && r.timeframe === tf ? 'row-selected' : ''}
@@ -732,6 +764,7 @@ export function HistoricalDataTab() {
                 ))}
               </tbody>
             </table>
+            <SeriesPager page={safePage} pages={pages} total={rows.length} onPage={setPage} />
           </div>
         )}
       </Card>

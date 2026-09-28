@@ -330,10 +330,12 @@ export type AutonomyState = {
   };
   learning?: {
     status?: string;
+    runAt?: string | null;
+    durationMs?: number | null;
     tradesEvaluated?: number;
     rejectionsEvaluated?: number;
     recommendations?: number;
-    summary?: { message?: string; autoApplied?: boolean };
+    summary?: { message?: string; autoApplied?: boolean; productionUnchanged?: boolean };
   } | null;
   decisions?: AutonomyDecision[];
   events?: { id: number; type: string; stage: number | null; symbol: string | null; severity: string; createdAt: string | null }[];

@@ -700,10 +700,13 @@ LEARNING = learning_service.LearningService()
 def _execution_change(what: str) -> None:
     if ORCHESTRATOR:
         ORCHESTRATOR.publish("EXECUTION_CHANGE", "STAGE9", stage=9, payload={"what": what})
+        if what == "CLOSED":
+            ORCHESTRATOR.publish("MODEL_OUTCOME_AVAILABLE", "STAGE9", stage=10, payload={"what": what})
     else:
         RISK.mark("STAGE9_" + what)
         if what == "CLOSED":
             LEARNING.mark("TRADE_CLOSED")
+            LEARNING.mark("MODEL_OUTCOME_AVAILABLE")
 
 
 EXECUTION = execution_service.ExecutionService(
@@ -1137,6 +1140,9 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/autonomy/state":
                 self._json(200, ORCHESTRATOR.state() if ORCHESTRATOR else autonomy_store.state())
                 return
+            if parsed.path == "/learning/state":
+                self._json(200, LEARNING.snapshot(parse_qs(parsed.query)))
+                return
             if parsed.path == "/accounts":
                 accounts = list_accounts()
                 positions = list_positions()
@@ -1365,7 +1371,24 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(400, {"ok": False, "message": "; ".join(result.get("errors") or []), "errors": result.get("errors")})
                     return
                 run = RISK.run(["RISK_CONFIG_CHANGE " + ",".join(result.get("changed") or [])[:120]]) if result.get("changed") else {}
+                if result.get("changed"):
+                    if ORCHESTRATOR:
+                        ORCHESTRATOR.publish("PARAMETER_CHANGED", "STAGE8", stage=10, payload={"changed": result.get("changed")})
+                    else:
+                        LEARNING.mark("PARAMETER_CHANGED")
                 self._json(200, {**result, "run": run, "state": _risk_state()})
+                return
+            if parsed.path == "/learning/approve":
+                result = LEARNING.approve(str(body.get("parameter") or ""), str(body.get("actor") or "operator"))
+                self._json(200 if result.get("ok") else 400, result)
+                return
+            if parsed.path == "/learning/rollback":
+                result = LEARNING.rollback(str(body.get("actor") or "operator"))
+                self._json(200 if result.get("ok") else 400, result)
+                return
+            if parsed.path == "/learning/governance":
+                result = LEARNING.set_governance(str(body.get("mode") or ""))
+                self._json(200 if result.get("ok") else 400, result)
                 return
             if parsed.path == "/risk/approve":
                 result = risk_store.approve(str(body.get("setupKey") or ""), str(body.get("accountId") or ""), str(body.get("actor") or "operator"))

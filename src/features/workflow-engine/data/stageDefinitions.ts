@@ -126,13 +126,13 @@ export const STAGE_DEFINITIONS: StageDefinition[] = [
     id: 10,
     name: 'Learning, Audit & Feedback',
     short: 'Learning',
-    description: 'Closed-trade records, attribution and calibration feedback published from Stage 9.',
+    description: 'Audits Stage 1–9 evidence, measures closed trades and non-trade decisions, and proposes calibration without rewriting production parameters.',
     deps: [9],
     slaLatencyMs: null,
-    slaFreshnessSec: 60,
-    slaNote: 'Trade records published within one engine cycle of the close',
-    triggers: ['Stage 9 trade close'],
-    invalidation: ['Trade record not published', 'Missing deal evidence'],
+    slaFreshnessSec: 600,
+    slaNote: 'Learning cycle at least every 10 min, and on each close or rejection',
+    triggers: ['TRADE_CLOSED', 'SETUP_REJECTED', 'SETUP_INVALIDATED', 'POSITION_MANAGED', 'MODEL_OUTCOME_AVAILABLE', 'PARAMETER_CHANGED', '5 min catch-up'],
+    invalidation: ['Learning loop not publishing', 'Production parameters changed outside the approval record'],
   },
 ];
 
