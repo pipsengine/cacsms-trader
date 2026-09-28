@@ -24,6 +24,8 @@ type Props = {
   liveLabel?: string;
   position: number | null;
   height?: number;
+  /** Starting zoom. H1 and Combined open wider so a parent trend and its nested channel are both visible. */
+  initialVisible?: number;
 };
 
 const M = { l: 6, r: 70, t: 16, b: 24 };
@@ -80,12 +82,26 @@ function interp(lines: ChartLine[], ts: number): { lower: number; upper: number 
   return { lower: a.lower + (b.lower - a.lower) * f, upper: a.upper + (b.upper - a.upper) * f };
 }
 
-export function VisionChart({ tf, candles, channels, swings, touches, markers, levels = [], livePrice, liveLabel, position, height: fullHeight = 400 }: Props) {
+/** Draw a coarser channel on every candle of the chart, so a D1 trend is a continuous channel around an H1 correction. */
+function resampleOnto(lines: ChartLine[], times: number[]): ChartLine[] {
+  const sorted = [...lines].sort((a, b) => a.ts - b.ts);
+  if (sorted.length < 2) return sorted;
+  const lastClosed = [...sorted].reverse().find((l) => !l.projected)?.ts ?? sorted[sorted.length - 1].ts;
+  const out: ChartLine[] = [];
+  for (const ts of times) {
+    const b = interp(sorted, ts);
+    if (!b) continue;
+    out.push({ ts, lower: b.lower, upper: b.upper, projected: ts > lastClosed });
+  }
+  return out.length >= 2 ? out : sorted;
+}
+
+export function VisionChart({ tf, candles, channels, swings, touches, markers, levels = [], livePrice, liveLabel, position, height: fullHeight = 400, initialVisible = 120 }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const [width, setWidth] = useState(900);
   const height = width < 520 ? Math.min(fullHeight, 320) : fullHeight;
-  const [visible, setVisible] = useState<number>(120);
+  const [visible, setVisible] = useState<number>(initialVisible);
   const [offset, setOffset] = useState(0);
   const [hover, setHover] = useState<number | null>(null);
   const drag = useRef<{ x: number; offset: number } | null>(null);
@@ -118,8 +134,9 @@ export function VisionChart({ tf, candles, channels, swings, touches, markers, l
 
   const firstTs = candles.length ? candles[0].ts : 0;
   useEffect(() => {
+    setVisible(initialVisible);
     setOffset(0);
-  }, [tf, firstTs]);
+  }, [tf, firstTs, initialVisible]);
 
   const step = useMemo(() => {
     const d: number[] = [];
@@ -162,8 +179,13 @@ export function VisionChart({ tf, candles, channels, swings, touches, markers, l
     for (const ch of channels) {
       for (const l of ch.lines) {
         if (l.ts < t0 || l.ts > t1) continue;
-        lo = Math.min(lo, Math.max(l.lower, lo - lim));
-        hi = Math.max(hi, Math.min(l.upper, hi + lim));
+        if (ch.tone === 'primary' || ch.tone === 'secondary') {
+          lo = Math.min(lo, l.lower);
+          hi = Math.max(hi, l.upper);
+        } else {
+          lo = Math.min(lo, Math.max(l.lower, lo - lim));
+          hi = Math.max(hi, Math.min(l.upper, hi + lim));
+        }
       }
     }
     if (livePrice != null && Number.isFinite(livePrice)) {
@@ -240,7 +262,8 @@ export function VisionChart({ tf, candles, channels, swings, touches, markers, l
   const visibleCandles = candles.slice(start, Math.min(end, candles.length));
 
   const channelPaths = channels.map((ch) => {
-    const pts = ch.lines.map((l) => ({ ...l, i: tsToIdx(l.ts) })).filter((p) => p.i >= start - 2 && p.i <= end + 1);
+    const source = ch.tf === tf ? ch.lines : resampleOnto(ch.lines, axis);
+    const pts = source.map((l) => ({ ...l, i: tsToIdx(l.ts) })).filter((p) => p.i >= start - 2 && p.i <= end + 1);
     const hist = pts.filter((p) => !p.projected);
     const proj = pts.filter((p) => p.projected);
     if (hist.length && proj.length) proj.unshift(hist[hist.length - 1]);

@@ -26,7 +26,7 @@ import './htf-vision.css';
 
 const VIEWS = ['D1', 'H8', 'H1', 'Combined'] as const;
 type View = (typeof VIEWS)[number];
-const CHART_BARS: Record<VisionTf, number> = { D1: 320, H8: 420, H1: 280 };
+const CHART_BARS: Record<VisionTf, number> = { D1: 320, H8: 420, H1: 840 };
 const TF_SEC: Record<VisionTf, number> = { D1: 86400, H8: 28800, H1: 3600 };
 const FILTERS = ['All', 'Qualified', 'Confirmed D1', 'Breakout / retest', 'Conflict', 'Data issues'] as const;
 type Filter = (typeof FILTERS)[number];
@@ -208,7 +208,7 @@ function ChartCard({ v, charts, view, setView, livePrice, offline }: { v: Vision
     const tl = (c: VisionChartData | null): ChartTouch[] => (c?.channel?.analysis?.touchList ?? []).map((t) => ({ ...t, tf: c!.timeframe }));
     const parent = layers.parent ? ch(d1, 'primary', v.d1) : [];
     const nested = layers.nested ? [...ch(h8, 'secondary', v.h8), ...ch(h1, 'nested', v.h1)] : [];
-    const shown = view === 'Combined' ? [...parent, ...nested] : view === 'D1' ? parent : nested.filter((c) => c.tf === view);
+    const shown = view === 'D1' ? parent : view === 'H8' ? nested.filter((c) => c.tf === 'H8') : [...parent, ...nested];
     const touchSrc = view === 'Combined' ? [d1, h8, h1] : [base];
     const markerSrc: [VisionTf, TfAnalysis | null, VisionChartData['candles']][] =
       view === 'Combined'
@@ -254,7 +254,7 @@ function ChartCard({ v, charts, view, setView, livePrice, offline }: { v: Vision
           <p>
             {view === 'Combined'
               ? 'D1 parent (solid blue), H8 intermediate (dashed violet) and H1 nested (dashed amber) on the same candles'
-              : `${view === 'D1' ? 'Parent' : view === 'H8' ? 'Intermediate' : 'Nested execution'} structure · ${base?.candles.length ?? 0} validated closed bars from the Stage 1 store`}
+              : `${view === 'D1' ? 'Parent' : view === 'H8' ? 'Intermediate' : 'H1 channel drawn inside the D1 and H8 trend'} · ${base?.candles.length ?? 0} validated closed bars from the Stage 1 store`}
           </p>
         </div>
         <div className="hv-head-badges">
@@ -319,6 +319,7 @@ function ChartCard({ v, charts, view, setView, livePrice, offline }: { v: Vision
               liveLabel={v.live?.marketOpen ? 'live' : 'last quote'}
               position={livePos}
               height={420}
+              initialVisible={view === 'D1' || view === 'H8' ? 120 : 480}
             />
           )
         )}
@@ -878,7 +879,7 @@ function matches(v: VisionInstrument, f: Filter): boolean {
 export function HtfVisionPage() {
   const { selected, setSelected, instruments: live } = useTrading();
   const store = useVisionStore();
-  const [view, setView] = useState<View>('D1');
+  const [view, setView] = useState<View>('Combined');
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<Filter>('All');
   const [drawer, setDrawer] = useState<string | null>(null);

@@ -777,7 +777,8 @@ def combine(symbol: str, scanner: dict[str, Any], d1: dict[str, Any] | None, h8:
         htf_bos=bool(d1 and d1.get("breakout")),
     )
     if nested_leg["relationship"] == "CORRECTIVE":
-        reasoning.append("H8 opposing D1 is a nested correction inside the dominant channel, not contradictory data and not an HTF reversal.")
+        child = "H1" if h1 and h1.get("relationship") == "CORRECTIVE" else "H8"
+        reasoning.append(f"{child} opposing D1 is a nested correction inside the dominant channel, not contradictory data and not an HTF reversal.")
     elif nested_leg["reasonCode"] == "POTENTIAL_COUNTER_TREND_ZONE":
         reasoning.append(nested_leg["reason"])
     h1_detected = bool(h1 and h1.get("confirmed") and h1.get("channelKey"))
