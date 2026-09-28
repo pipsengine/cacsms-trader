@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { ScannerInstrument, ScannerStateResponse } from '../types';
+import { explainBridgeError } from '../../../services/bridgeError';
 import { fetchScannerState, runScanner, saveScannerConfig } from './scannerClient';
 
 /** The bridge re-ranks autonomously; the UI only reads persisted Stage 4 state. */
@@ -45,7 +46,7 @@ async function load() {
     const state = await fetchScannerState();
     set({ state, loading: false, error: '', lastFetchAt: Date.now() });
   } catch (e) {
-    set({ loading: false, error: e instanceof Error ? e.message : 'Scanner state unavailable' });
+    set({ loading: false, error: explainBridgeError(e, 'Scanner state unavailable') });
   }
 }
 

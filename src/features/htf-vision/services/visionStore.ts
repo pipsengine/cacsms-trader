@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { VisionInstrument, VisionState } from '../types';
+import { explainBridgeError } from '../../../services/bridgeError';
 import { fetchVisionState, runVision } from './visionClient';
 
 /** The bridge re-analyses autonomously; the UI only reads persisted Stage 5 state. */
@@ -45,7 +46,7 @@ async function load() {
     const state = await fetchVisionState();
     set({ state, loading: false, error: '', lastFetchAt: Date.now() });
   } catch (e) {
-    set({ loading: false, error: e instanceof Error ? e.message : 'Vision state unavailable' });
+    set({ loading: false, error: explainBridgeError(e, 'Vision state unavailable') });
   }
 }
 

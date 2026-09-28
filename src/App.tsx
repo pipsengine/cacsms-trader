@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import Sidebar, { useSidebarCollapsed } from './components/Sidebar';
 import Topbar from './components/Topbar';
 import { TradingProvider } from './context/TradingContext';
@@ -19,6 +19,8 @@ import {
 import { WorkflowEnginePage } from './features/workflow-engine';
 import { MT5ConnectionPage } from './features/mt5-connection';
 
+const slug = (label: string) => label.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
 const pages: Record<string, React.ComponentType> = {
   Overview,
   'Workflow Engine': WorkflowEnginePage,
@@ -36,10 +38,37 @@ const pages: Record<string, React.ComponentType> = {
   'MT5 Connection': MT5ConnectionPage,
 };
 
+const pageBySlug = Object.fromEntries(Object.keys(pages).map((label) => [slug(label), label]));
+
+function pageFromHash(): string {
+  const raw = decodeURIComponent(window.location.hash.replace(/^#\/?/, ''));
+  if (pages[raw]) return raw;
+  return pageBySlug[raw] || 'Overview';
+}
+
 export default function App() {
-  const [page, setPage] = useState('Overview');
+  const [page, setPageState] = useState(pageFromHash);
   const [collapsed, setCollapsed] = useSidebarCollapsed();
   const P = pages[page] || Overview;
+
+  const setPage = (next: string) => {
+    const label = pages[next] ? next : 'Overview';
+    setPageState(label);
+    const hash = `#/${slug(label)}`;
+    if (window.location.hash !== hash) history.pushState(null, '', hash);
+  };
+
+  useEffect(() => {
+    const hash = `#/${slug(page)}`;
+    if (window.location.hash !== hash) history.replaceState(null, '', hash);
+    const onHash = () => setPageState(pageFromHash());
+    window.addEventListener('hashchange', onHash);
+    window.addEventListener('popstate', onHash);
+    return () => {
+      window.removeEventListener('hashchange', onHash);
+      window.removeEventListener('popstate', onHash);
+    };
+  }, [page]);
 
   return (
     <TradingProvider>

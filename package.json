@@ -4,7 +4,8 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "db:migrate": "node database/scripts/migrate.mjs",
@@ -17,7 +18,7 @@
     "postinstall": "node database/scripts/postinstall.mjs",
     "mt5:bridge": "py -u bridge/mt5/server.py",
     "mt5:bridge:install": "py -m pip install -r bridge/mt5/requirements.txt",
-    "db:mssql:init": "sqlcmd -S localhost -U cascms -P \"%MSSQL_PASSWORD%\" -C -d db_Cacsms-Trader -i database/mssql/001_mt5_persistence.sql"
+    "db:runtime:init": "py -c \"from bridge.mt5.db import ensure_database, ensure_schema; ensure_database(); ensure_schema()\""
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",

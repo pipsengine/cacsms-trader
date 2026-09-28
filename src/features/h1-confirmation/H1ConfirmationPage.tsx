@@ -498,7 +498,7 @@ export function H1ConfirmationPage() {
             {run.config.engine.minBars} H1 bars · Stage 6 {run.upstream?.directionStatus ?? '—'}
           </span>
         )}
-        <button type="button" className="hr-run" disabled={store.running} onClick={() => void runH1Now()}>
+        <button type="button" className="hr-run" title="Diagnostic reprocess. H1 confirmation already runs on H1 closes and Stage 6 hand-offs." disabled={store.running} onClick={() => void runH1Now()}>
           <RefreshCw size={14} className={store.running ? 'hr-spin' : undefined} />
           {store.running ? 'Evaluating…' : 'Re-evaluate now'}
         </button>

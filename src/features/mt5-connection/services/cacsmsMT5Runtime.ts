@@ -403,7 +403,7 @@ async function persistAccount(account: MT5Account) {
   return result;
 }
 
-/** Stage 8 reads account permissions and prop rules from SQL Server; a setting that cannot be persisted is rolled back. */
+/** Stage 8 reads account permissions and prop rules from SQLite; a setting that cannot be persisted is rolled back. */
 async function applyAccountSetting(id: string, patch: Partial<MT5Account>): Promise<MT5CommandResult> {
   const before = snapshot.accounts.find((a) => a.id === id);
   if (!before) return { ok: false, message: 'Account not found' };
@@ -422,7 +422,7 @@ async function applyAccountSetting(id: string, patch: Partial<MT5Account>): Prom
 async function hydrateFromDb() {
   const data = await bridgeListAccounts();
   if (!data.ok) {
-    pushEvent(data.message || 'Unable to hydrate accounts from SQL Server', 'WARNING', 'SYSTEM');
+    pushEvent(data.message || 'Unable to hydrate accounts from SQLite', 'WARNING', 'SYSTEM');
     return;
   }
   if (!data.accounts.length) return;

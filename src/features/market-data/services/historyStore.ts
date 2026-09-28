@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { explainBridgeError } from '../../../services/bridgeError';
 import { routeEvent, type MarketEvent } from '../../../engine/orchestrator';
 import { eventBus, type TradingEventType } from '../../../services/eventBus';
 import {
@@ -90,7 +91,7 @@ async function poll() {
     const events = [...fresh.slice().reverse(), ...snapshot.events].slice(0, 200);
     set({ status, events, loading: false, error: status.ok ? '' : status.message || 'History status unavailable', lastFetchAt: Date.now() });
   } catch (e) {
-    set({ loading: false, error: e instanceof Error ? e.message : 'History status unavailable' });
+    set({ loading: false, error: explainBridgeError(e, 'History status unavailable') });
   } finally {
     inflight = false;
   }

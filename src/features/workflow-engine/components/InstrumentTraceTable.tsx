@@ -82,7 +82,7 @@ function Detail({ t, busy, onReevaluate }: { t: InstrumentTrace; busy: string | 
         <p>
           <b>Next action:</b> {t.nextAction || '—'}
         </p>
-        <button type="button" className="mini" disabled={Boolean(busy)} onClick={() => onReevaluate(t.symbol)} title="Requests Stage 5→8 processing for this instrument on the bridge">
+        <button type="button" className="mini" disabled={Boolean(busy)} onClick={() => onReevaluate(t.symbol)} title="Queues a diagnostic reprocess on the bridge orchestrator. It cannot bypass dependencies or execution authorization.">
           Re-evaluate {t.symbol}
         </button>
       </div>
@@ -189,7 +189,7 @@ export function InstrumentTraceTable({ rows, busy, onReevaluate, expanded, onExp
           <label className="check">
             <input type="checkbox" checked={liveOnly} onChange={(e) => setLiveOnly(e.target.checked)} /> Live-eligible only
           </label>
-          <button type="button" onClick={() => onReevaluate()} disabled={Boolean(busy)} title="Requests Stage 4→8 processing on the bridge; no gate is bypassed">
+          <button type="button" onClick={() => onReevaluate()} disabled={Boolean(busy)} title="Queues a diagnostic reprocess on the bridge orchestrator. It cannot bypass dependencies or execution authorization.">
             Re-evaluate all
           </button>
         </div>

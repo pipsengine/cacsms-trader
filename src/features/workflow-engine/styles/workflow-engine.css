@@ -193,7 +193,7 @@
   flex-direction: column;
   gap: 6px;
   min-width: 0;
-  min-height: 158px;
+  min-height: 214px;
   text-align: left;
   padding: 10px;
   border-radius: 10px;
@@ -206,9 +206,44 @@
 .wf-shell .stage > span.chip { width: auto; height: auto; display: inline-flex; place-items: initial; border-radius: 999px; }
 .wf-shell .stage b,
 .wf-shell .stage small { display: inline; }
+/* Pipeline status uses the same colors as the state chips. */
+.wf-shell .stage.s-running,
+.wf-shell .stage.s-ready {
+  --h: var(--wf-green);
+  background: linear-gradient(180deg, #143f2e, #0c261b);
+  border-color: #17603f;
+}
+.wf-shell .stage.s-waiting,
+.wf-shell .stage.s-warming_up,
+.wf-shell .stage.s-idle {
+  --h: var(--wf-blue);
+  background: linear-gradient(180deg, #123552, #0c2236);
+  border-color: #1c4e77;
+}
+.wf-shell .stage.s-paused,
+.wf-shell .stage.s-stale {
+  --h: var(--wf-amber);
+  background: linear-gradient(180deg, #3d2d10, #241a09);
+  border-color: #6d5114;
+}
+.wf-shell .stage.s-blocked,
+.wf-shell .stage.s-invalidated {
+  --h: var(--wf-red);
+  background: linear-gradient(180deg, #4a1e22, #2a1215);
+  border-color: #7a2c31;
+}
 .wf-shell .stage.h-degraded { --h: var(--wf-amber); }
-.wf-shell .stage.h-error { --h: var(--wf-red); }
-.wf-shell .stage.h-offline { --h: var(--wf-grey); background: linear-gradient(180deg, #0f1f30, #0a1624); }
+.wf-shell .stage.h-error {
+  --h: var(--wf-red);
+  background: linear-gradient(180deg, #4a1e22, #2a1215);
+  border-color: #7a2c31;
+}
+.wf-shell .stage.h-offline {
+  --h: var(--wf-grey);
+  background: linear-gradient(180deg, #1c2834, #121a22);
+  border-color: #3d5164;
+}
+.wf-shell button.stage:hover:not(:disabled) { filter: brightness(1.12); }
 .wf-shell .stage.selected { outline: 2px solid #45b8ff; outline-offset: 2px; }
 .wf-shell .stage-top { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
 .wf-shell .stage-no { width: 25px; height: 25px; border-radius: 50%; background: #173b5b; display: grid; place-items: center; font-weight: 800; flex: none; }
@@ -216,9 +251,11 @@
 .wf-shell .stage > .chip { align-self: flex-start; }
 .wf-shell .meter { height: 4px; background: #142d43; border-radius: 10px; overflow: hidden; margin-top: auto; }
 .wf-shell .meter i { display: block; height: 100%; background: linear-gradient(90deg, #1a9cff, #20d783); }
+.wf-shell .stage-status { display: flex; flex-direction: column; gap: 3px; min-height: 52px; }
+.wf-shell .stage-status span { font-size: 10px; line-height: 1.35; color: #d5e4f0; white-space: normal; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .wf-shell .stage-meta,
 .wf-shell .stage-foot { display: flex; justify-content: space-between; gap: 6px; font-size: 10px; color: var(--wf-muted); }
-.wf-shell .stage-foot { color: #a9c0d4; white-space: nowrap; overflow: hidden; }
+.wf-shell .stage-foot { color: #a9c0d4; }
 .wf-shell .stage-foot em { font-style: normal; color: #5da4d7; flex: none; }
 
 .wf-shell .conn { position: relative; align-self: center; height: 2px; margin: 0 3px; background: var(--wf-green); box-shadow: 0 0 6px rgba(32, 215, 131, 0.5); }

@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { DirectionDecision, DirectionState } from '../types';
+import { explainBridgeError } from '../../../services/bridgeError';
 import { fetchDirectionState, runDirection } from './directionClient';
 
 /** The bridge decides autonomously; the UI only reads persisted Stage 6 state. */
@@ -45,7 +46,7 @@ async function load() {
     const state = await fetchDirectionState();
     set({ state, loading: false, error: '', lastFetchAt: Date.now() });
   } catch (e) {
-    set({ loading: false, error: e instanceof Error ? e.message : 'Structural Direction state unavailable' });
+    set({ loading: false, error: explainBridgeError(e, 'Structural Direction state unavailable') });
   }
 }
 

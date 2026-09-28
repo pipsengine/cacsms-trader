@@ -1,0 +1,19 @@
+.live-pill.off {
+  color: #ffb4b4;
+  border-color: #7a3030;
+  background: #2a1216;
+}
+.live-pill.off span,
+.live-pill.warn span {
+  background: #ff5d5d;
+  box-shadow: none;
+}
+.live-pill.warn {
+  color: #ffd27a;
+  border-color: #6e5420;
+  background: #2a220f;
+}
+.engine-box button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

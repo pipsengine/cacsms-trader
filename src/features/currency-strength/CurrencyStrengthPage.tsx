@@ -1145,7 +1145,7 @@ export function CurrencyStrengthPage() {
           {fresh.obsDate ? ` · latest D1 ${fresh.obsDate}${fresh.closed ? ' (closed)' : ' (provisional)'}` : ''} · published to Historical Regime & Market
           Scanner
         </span>
-        <button type="button" className="hr-run" onClick={() => void runRegimeNow()} disabled={store.running}>
+        <button type="button" className="hr-run" title="Diagnostic reprocess. The bridge already runs this from candle events and will not bypass freshness or downstream gates." onClick={() => void runRegimeNow()} disabled={store.running}>
           <RefreshCw size={13} className={store.running ? 'hr-spin' : ''} /> {store.running ? 'Running…' : 'Run now'}
         </button>
       </div>

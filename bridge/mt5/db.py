@@ -1,4 +1,4 @@
-"""SQL Server persistence for MT5 accounts (db_Cacsms-Trader)."""
+"""SQLite persistence for MT5 accounts and autonomous pipeline state."""
 
 from __future__ import annotations
 
@@ -8,7 +8,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import pyodbc
+import sqlite3
+
+try:
+    from sqlite_db import connect, database_path
+except ImportError:  # pragma: no cover
+    from bridge.mt5.sqlite_db import connect, database_path  # type: ignore
 
 
 def _parse_dt(value: Any) -> datetime | None:
@@ -43,39 +48,14 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 
-def connection_string() -> str:
-    driver = os.environ.get("MSSQL_DRIVER", "ODBC Driver 18 for SQL Server")
-    server = os.environ.get("MSSQL_SERVER", "localhost")
-    database = os.environ.get("MSSQL_DATABASE", "db_Cacsms-Trader")
-    user = os.environ.get("MSSQL_USER", "cascms")
-    password = os.environ.get("MSSQL_PASSWORD", "")
-    trust = os.environ.get("MSSQL_TRUST_CERT", "1") in ("1", "true", "TRUE", "yes")
-    parts = [
-        f"DRIVER={{{driver}}}",
-        f"SERVER={server}",
-        f"DATABASE={database}",
-        f"UID={user}",
-        f"PWD={password}",
-    ]
-    if trust:
-        parts.append("TrustServerCertificate=yes")
-    return ";".join(parts)
-
-
-def connect() -> pyodbc.Connection:
-    return pyodbc.connect(connection_string(), autocommit=False)
+def ensure_database() -> None:
+    with connect():
+        pass
 
 
 def ensure_schema() -> None:
-    schema = ROOT / "database" / "mssql" / "001_mt5_persistence.sql"
-    sql = schema.read_text(encoding="utf-8")
-    # sqlcmd batches use GO — execute statements split on GO
-    batches = [b.strip() for b in sql.split("\nGO") if b.strip()]
-    with connect() as conn:
-        cur = conn.cursor()
-        for batch in batches:
-            cur.execute(batch)
-        conn.commit()
+    with connect():
+        pass
 
 
 def upsert_account(account: dict[str, Any]) -> dict[str, Any]:
@@ -218,8 +198,8 @@ def list_accounts() -> list[dict[str, Any]]:
                     "freeMargin": float(d["free_margin"] or 0),
                     "profit": float(d["profit"] or 0),
                     "latencyMs": int(d["latency_ms"]) if d["latency_ms"] is not None else 0,
-                    "lastHeartbeat": d["last_heartbeat"].isoformat() + "Z" if d["last_heartbeat"] else None,
-                    "connectedAt": d["connected_at"].isoformat() + "Z" if d["connected_at"] else None,
+                    "lastHeartbeat": _iso(d["last_heartbeat"]),
+                    "connectedAt": _iso(d["connected_at"]),
                     "assignedSymbols": symbols,
                     "propRules": prop,
                 }
@@ -303,7 +283,7 @@ def list_positions(account_id: str | None = None) -> list[dict[str, Any]]:
                     "pnl": float(d["pnl"] or 0),
                     "currency": d["currency"],
                     "status": d["status"],
-                    "openedAt": d["opened_at"].isoformat() + "Z" if d["opened_at"] else None,
+                    "openedAt": _iso(d["opened_at"]),
                 }
             )
         return out
@@ -313,8 +293,6 @@ def health() -> dict[str, Any]:
     try:
         with connect() as conn:
             cur = conn.cursor()
-            cur.execute("SELECT DB_NAME()")
-            db_name = cur.fetchone()[0]
             cur.execute("SELECT COUNT(*) FROM dbo.mt5_accounts")
             accounts = int(cur.fetchone()[0])
             cur.execute("SELECT COUNT(*) FROM dbo.app_instruments")
@@ -323,11 +301,12 @@ def health() -> dict[str, Any]:
             open_positions = int(cur.fetchone()[0])
             return {
                 "ok": True,
-                "database": db_name,
+                "database": str(database_path()),
+                "engine": "sqlite",
                 "accounts": accounts,
                 "instruments": instruments,
                 "openPositions": open_positions,
-                "message": f"SQL Server ready ({db_name})",
+                "message": f"SQLite ready ({database_path().name})",
             }
     except Exception as exc:
         return {"ok": False, "message": str(exc)}
@@ -439,7 +418,7 @@ def load_app_state() -> dict[str, Any]:
             events.append(
                 {
                     "id": int(d["id"]),
-                    "ts": d["ts"].isoformat() + "Z" if d["ts"] else None,
+                    "ts": _iso(d["ts"]),
                     "severity": d["severity"],
                     "source": d["source"],
                     "message": d["message"],
@@ -564,7 +543,7 @@ def save_app_state(body: dict[str, Any]) -> dict[str, Any]:
 
         conn.commit()
 
-    return {"ok": True, "message": "App state saved to db_Cacsms-Trader"}
+    return {"ok": True, "message": "App state saved to db_cacsms-trader"}
 
 
 # ---------------------------------------------------------------- Stage 3 Historical Regime
@@ -589,6 +568,8 @@ def ensure_regime_schema() -> None:
 def _iso(value: Any) -> str | None:
     if value is None:
         return None
+    if isinstance(value, str):
+        return value
     if isinstance(value, datetime):
         return value.isoformat() + "Z"
     return value.isoformat()
@@ -651,7 +632,7 @@ def _executemany(cur: Any, sql: str, rows: list[list[Any]]) -> None:
     try:
         cur.fast_executemany = True
         cur.executemany(sql, rows)
-    except pyodbc.Error:
+    except sqlite3.Error:
         cur.fast_executemany = False
         for row in rows:
             cur.execute(sql, row)
@@ -671,12 +652,10 @@ def regime_persist(result: dict[str, Any], meta: dict[str, Any]) -> dict[str, in
         for t in transitions:
             cur.execute(
                 """
-                IF NOT EXISTS (SELECT 1 FROM dbo.app_regime_transition WHERE asset = ? AND confirmed_at = ?)
-                INSERT INTO dbo.app_regime_transition
+                INSERT OR IGNORE INTO dbo.app_regime_transition
                   (asset, confirmed_at, first_seen, prev_regime, new_regime, confidence, reason, evidence_json)
                 VALUES (?,?,?,?,?,?,?,?)
                 """,
-                t["asset"], t["confirmedAt"],
                 t["asset"], t["confirmedAt"], t["firstSeen"], t["prev"], t["new"], t["confidence"],
                 t["reason"][:600], json.dumps(t["evidence"]),
             )

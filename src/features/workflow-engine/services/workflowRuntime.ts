@@ -1,22 +1,23 @@
 import { allPairs, instruments } from '../../../data/market';
 import type { Instrument } from '../../../types';
 import { eventBus, type TradingEvent, type TradingEventType } from '../../../services/eventBus';
+import { bridgeAutonomyRun } from '../../mt5-connection/services/mt5BridgeClient';
 import { getMT5Snapshot, subscribeMT5 } from '../../mt5-connection/services/cacsmsMT5Runtime';
 import { getExecutionSnapshot, loadExecution, reconcileNow, setControlNow, subscribeExecution } from '../../execution/services/executionStore';
 import { stage9Output } from '../../execution/services/executionStage';
 import type { ControlPatch } from '../../execution/services/executionClient';
 import { getHistorySnapshot, historyReadyCount, refreshHistory, subscribeHistory } from '../../market-data/services/historyStore';
-import { getRegimeSnapshot, refreshRegime, runRegimeNow, subscribeRegime } from '../../historical-regime/services/regimeStore';
+import { getRegimeSnapshot, refreshRegime, subscribeRegime } from '../../historical-regime/services/regimeStore';
 import { stage2Output } from '../../currency-strength/services/strengthStage';
-import { refreshScanner, runScannerNow, subscribeScanner } from '../../market-scanner/services/scannerStore';
+import { refreshScanner, subscribeScanner } from '../../market-scanner/services/scannerStore';
 import { stage4Output } from '../../market-scanner/services/scannerStage';
-import { refreshVision, runVisionNow, subscribeVision } from '../../htf-vision/services/visionStore';
+import { refreshVision, subscribeVision } from '../../htf-vision/services/visionStore';
 import { stage5Output } from '../../htf-vision/services/visionStage';
-import { refreshDirection, runDirectionNow, subscribeDirection } from '../../structural-direction/services/directionStore';
+import { refreshDirection, subscribeDirection } from '../../structural-direction/services/directionStore';
 import { stage6Output } from '../../structural-direction/services/directionStage';
-import { refreshH1, runH1Now, subscribeH1 } from '../../h1-confirmation/services/confirmStore';
+import { refreshH1, subscribeH1 } from '../../h1-confirmation/services/confirmStore';
 import { stage7Output } from '../../h1-confirmation/services/confirmStage';
-import { refreshRisk, runRiskNow, subscribeRisk } from '../../opportunity-risk/services/riskStore';
+import { refreshRisk, subscribeRisk } from '../../opportunity-risk/services/riskStore';
 import { stage8Output } from '../../opportunity-risk/services/riskStage';
 import type { Opportunity } from '../../opportunity-risk/types';
 import type { Execution } from '../../execution/types';
@@ -564,27 +565,7 @@ function audit(detail: string, stage: number, extra: Record<string, unknown> = {
 
 const errOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-type StageRunner = { run: () => Promise<unknown>; error: () => string };
-
-const RUNNERS: Record<number, StageRunner> = {
-  1: { run: () => refreshHistory(), error: () => getHistorySnapshot().error },
-  2: { run: () => runRegimeNow(), error: () => getRegimeSnapshot().error },
-  3: { run: () => runRegimeNow(), error: () => getRegimeSnapshot().error },
-  4: { run: () => runScannerNow(), error: () => '' },
-  5: { run: () => runVisionNow(), error: () => '' },
-  6: { run: () => runDirectionNow(), error: () => '' },
-  7: { run: () => runH1Now(), error: () => '' },
-  8: { run: () => runRiskNow(), error: () => '' },
-  9: { run: () => reconcileNow(), error: () => getExecutionSnapshot().error },
-};
-
-function storeError(stage: number): string {
-  const snap = getWorkflowSnapshot();
-  const s = snap.stages[stage - 1];
-  return s.health === 'ERROR' || s.health === 'OFFLINE' ? s.healthReason : RUNNERS[stage]?.error() ?? '';
-}
-
-/** Every action here only asks the bridge engines to process; none of them can create a signal, bypass a gate, Stage 8 or Stage 9. */
+/** Every action here only asks the bridge orchestrator to process. None of them sequence the pipeline or bypass a gate. */
 export const workflowActions = {
   /** Refresh = reconcile the page with the persisted engine state (read-only; no stage is re-run). */
   async reconcile(): Promise<ActionResult> {
@@ -598,55 +579,38 @@ export const workflowActions = {
     const s = snap.stages[stage - 1];
     if (!s) return { ok: false, message: `Unknown stage ${stage}` };
     if (!s.rerun.allowed) return { ok: false, message: s.rerun.reason };
-    const runner = RUNNERS[stage];
-    audit(`Operator re-run of Stage ${stage} (${s.name}) requested from the Workflow Engine`, stage, {}, 'DATA_EVENT');
-    try {
-      await runner.run();
-    } catch (e) {
-      audit(`Stage ${stage} re-run failed: ${errOf(e)}`, stage, { severity: 'ERROR' }, 'DATA_EVENT');
-      return { ok: false, message: errOf(e) };
+    if (stage === 1) {
+      try {
+        await refreshHistory();
+      } catch (e) {
+        return { ok: false, message: errOf(e) };
+      }
+      return { ok: true, message: 'Reloaded Stage 1 status. The historical synchronizer keeps running on the bridge.' };
     }
-    const err = storeError(stage);
-    if (err) {
-      audit(`Stage ${stage} re-run did not complete: ${err}`, stage, { severity: 'WARNING' }, 'DATA_EVENT');
-      return { ok: false, message: err };
+    if (stage === 9) {
+      try {
+        await reconcileNow();
+      } catch (e) {
+        return { ok: false, message: errOf(e) };
+      }
+      return { ok: true, message: 'Reconciliation requested. Stage 9 still applies authorization, freshness and risk checks.' };
     }
-    audit(`Stage ${stage} re-run completed on the bridge — downstream stages re-run from their own triggers`, stage, {}, 'DATA_EVENT');
-    return { ok: true, message: `Stage ${stage} re-run completed` };
+    audit(`Diagnostic reprocess of Stage ${stage} queued on the orchestrator`, stage, {}, 'DATA_EVENT');
+    const queued = await bridgeAutonomyRun({ stage, reason: `Diagnostic reprocess of Stage ${stage}` });
+    return queued.ok ? { ok: true, message: queued.message } : { ok: false, message: queued.message };
   },
 
-  /** Request Stage 4→8 processing (per instrument for Stage 5); each engine still applies every one of its gates. */
+  /** Ask the orchestrator to reprocess. The browser does not sequence stages or bypass a gate. */
   async reevaluate(symbol?: string): Promise<ActionResult> {
     const snap = getWorkflowSnapshot();
     if (snap.engine.analysisPaused) return { ok: false, message: 'Analysis is paused — resume analysis before re-evaluating' };
-    const chain: [number, () => Promise<unknown>][] = [
-      ...(symbol ? [] : ([[4, () => runScannerNow()]] as [number, () => Promise<unknown>][])),
-      [5, () => runVisionNow(symbol)],
-      [6, () => runDirectionNow()],
-      [7, () => runH1Now()],
-      [8, () => runRiskNow()],
-    ];
     const target = symbol ?? `all ${allPairs.length} instruments`;
-    audit(`Operator re-evaluation of ${target} requested (Stages ${chain.map((c) => c[0]).join('→')}); gates are not bypassed`, symbol ? 5 : 4, {}, 'DATA_EVENT', symbol);
-    const done: number[] = [];
-    for (const [stage, run] of chain) {
-      const st = getWorkflowSnapshot().stages[stage - 1];
-      if (st.health === 'OFFLINE' || st.health === 'ERROR') {
-        const msg = `Stopped at Stage ${stage}: ${st.health} — ${st.healthReason}`;
-        audit(`Re-evaluation of ${target} ${msg}`, stage, { severity: 'WARNING' }, 'DATA_EVENT', symbol);
-        return { ok: false, message: done.length ? `Stages ${done.join(', ')} re-run. ${msg}` : msg };
-      }
-      try {
-        await run();
-      } catch (e) {
-        return { ok: false, message: `Stage ${stage}: ${errOf(e)}` };
-      }
-      done.push(stage);
-    }
-    const t = symbol ? getWorkflowSnapshot().instruments.find((x) => x.symbol === symbol) : null;
-    const result = t ? `${symbol} held at Stage ${t.currentGate} (${t.state})${t.blocker ? ` — ${t.blocker}` : ''}` : `Stages ${done.join(', ')} re-run`;
-    audit(`Re-evaluation of ${target} complete: ${result}`, symbol ? 5 : 4, {}, 'DATA_EVENT', symbol);
-    return { ok: true, message: result };
+    audit(`Diagnostic reprocess of ${target} queued on the orchestrator`, symbol ? 5 : 4, {}, 'DATA_EVENT', symbol);
+    const queued = await bridgeAutonomyRun({
+      reason: symbol ? `Diagnostic reprocess ${symbol}` : 'Diagnostic reprocess',
+      ...(symbol ? { symbol } : {}),
+    });
+    return queued.ok ? { ok: true, message: queued.message } : { ok: false, message: queued.message };
   },
 
   /** Operator controls are applied and audited by the central engine; this page never pauses protection. */

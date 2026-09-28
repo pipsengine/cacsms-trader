@@ -1,9 +1,11 @@
 import { useSyncExternalStore } from 'react';
 import type { RegimePair, RegimeStageStatus, RegimeState } from '../types';
+import { explainBridgeError } from '../../../services/bridgeError';
 import { fetchRegimeState, runRegime } from './regimeClient';
 
-/** Stage 3 recomputes incrementally; D1 closes change once a day, forming bars update intraday. */
+/** Server-side orchestrator cadence. The browser only polls persisted output. */
 export const REGIME_INTERVAL_MS = 60_000;
+const REGIME_OBSERVE_POLL_MS = 5_000;
 
 export type RegimeStoreSnapshot = {
   state: RegimeState | null;
@@ -49,7 +51,7 @@ async function loadState() {
     const state = await fetchRegimeState();
     set({ state, loading: false, error: state.ok ? '' : state.message || 'Regime state unavailable', lastFetchAt: Date.now() });
   } catch (e) {
-    set({ loading: false, error: e instanceof Error ? e.message : 'Regime state unavailable' });
+    set({ loading: false, error: explainBridgeError(e, 'Regime state unavailable') });
   }
 }
 
@@ -75,12 +77,12 @@ export async function runRegimeNow() {
 /** Re-read the persisted state only; never triggers an engine run. */
 export const refreshRegime = () => loadState();
 
-/** Ref-counted: the first caller starts polling, the last one stops it. */
+/** Ref-counted observation only: opening a page never starts or sustains the trading engine. */
 export function startRegimeStore(): () => void {
   starts += 1;
   if (starts === 1) {
-    void loadState().then(() => runRegimeNow());
-    timer = setInterval(() => void runRegimeNow(), REGIME_INTERVAL_MS);
+    void loadState();
+    timer = setInterval(() => void loadState(), REGIME_OBSERVE_POLL_MS);
   }
   return () => {
     starts = Math.max(0, starts - 1);

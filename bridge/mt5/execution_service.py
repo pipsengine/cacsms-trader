@@ -450,6 +450,12 @@ class ExecutionService:
             px = ex.exit_price(ex.dsign(x["direction"]), float(mkt.get("bid") or pos["priceCurrent"]), float(mkt.get("ask") or pos["priceCurrent"]))
             r = ex.r_multiple(x, px)
             x["currentR"] = None if r is None else round(r, 2)
+            # Persist path-dependent excursion for Stage 10. Only new extremes cause a ledger write.
+            mg["minPrice"] = min(float(mg.get("minPrice", px)), px)
+            mg["maxPrice"] = max(float(mg.get("maxPrice", px)), px)
+            if r is not None:
+                mg["maeR"] = round(min(float(mg.get("maeR", r)), r), 3)
+                mg["mfeR"] = round(max(float(mg.get("mfeR", r)), r), 3)
             x["positionState"] = ex.position_state(x)
             x["nextAction"] = ex.next_action(x, cfg)
             if (x.get("positionState"), x.get("protectiveSl"), x.get("nextAction"), json_sig(mg)) != before:

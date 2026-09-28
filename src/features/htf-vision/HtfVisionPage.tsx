@@ -3,6 +3,7 @@ import { AlertTriangle, Eye, RefreshCw, Search, X } from 'lucide-react';
 import { useTrading } from '../../context/TradingContext';
 import { Badge, Card, Metric, PageHeader, Tabs } from '../../components/UI';
 import { barLabel, priceDigits, VisionChart, type ChartChannel, type ChartMarker, type ChartTouch } from './components/VisionChart';
+import { explainBridgeError } from '../../services/bridgeError';
 import { fetchVisionChart, fetchVisionDetail } from './services/visionClient';
 import { runVisionNow, startVisionStore, useVisionStore, visionRunAgeMs, visionStageStatus } from './services/visionStore';
 import { visionPosition } from './services/visionStage';
@@ -124,7 +125,7 @@ function useCharts(symbol: string | null, version: string): Charts {
         if (!cancelled) setCharts({ D1: d1, H8: h8, loading: false, error: '' });
       })
       .catch((e: unknown) => {
-        if (!cancelled) setCharts((c) => ({ ...c, loading: false, error: e instanceof Error ? e.message : 'Chart unavailable' }));
+        if (!cancelled) setCharts((c) => ({ ...c, loading: false, error: explainBridgeError(e, 'Chart unavailable') }));
       });
     return () => {
       cancelled = true;
@@ -169,7 +170,7 @@ function DataNotice({ tf, rec, summary }: { tf: VisionTf; rec: ChannelRecord | n
   return null;
 }
 
-function ChartCard({ v, charts, view, setView, livePrice }: { v: VisionInstrument; charts: Charts; view: View; setView: (x: View) => void; livePrice: number | null }) {
+function ChartCard({ v, charts, view, setView, livePrice, offline }: { v: VisionInstrument; charts: Charts; view: View; setView: (x: View) => void; livePrice: number | null; offline?: boolean }) {
   const tf: VisionTf = view === 'H8' ? 'H8' : 'D1';
   const d1 = charts.D1;
   const h8 = charts.H8;
@@ -215,8 +216,8 @@ function ChartCard({ v, charts, view, setView, livePrice }: { v: VisionInstrumen
           </p>
         </div>
         <div className="hv-head-badges">
-          <Badge tone={dataTone(summary?.dataStatus)}>{human(summary?.dataStatus)}</Badge>
-          {summary?.status && <Badge tone={statusTone(summary.status)}>{human(summary.status)}</Badge>}
+          <Badge tone={offline ? 'amber' : dataTone(summary?.dataStatus)}>{offline ? 'LAST KNOWN' : human(summary?.dataStatus)}</Badge>
+          {summary?.status && <Badge tone={offline ? 'amber' : statusTone(summary.status)}>{offline ? 'NOT LIVE' : human(summary.status)}</Badge>}
           <Badge tone={summary?.confirmed ? dirTone(summary.direction) : 'gray'}>
             {summary?.confirmed ? `${dirArrow(summary.direction)} ${human(summary.direction)}` : `Unconfirmed${summary?.lean && summary.lean !== 'NEUTRAL' ? ` · lean ${human(summary.lean)}` : ''}`}
           </Badge>
@@ -851,10 +852,11 @@ export function HtfVisionPage() {
         )}
         {svcCfg && (
           <span className="muted">
-            Autonomous bridge loop {svcCfg.loopSec}s · full sweep {Math.round((svcCfg.fullEverySec ?? 0) / 60)}m · scanner gate {svcCfg.scannerGate}
+            {store.error ? 'Last reported schedule, not a live engine. ' : ''}
+            Bridge loop {svcCfg.loopSec}s · full sweep {Math.round((svcCfg.fullEverySec ?? 0) / 60)}m · scanner gate {svcCfg.scannerGate}
           </span>
         )}
-        <button type="button" className="hr-run" disabled={store.running || !v} onClick={() => v && void runVisionNow(v.symbol)}>
+        <button type="button" className="hr-run" title="Diagnostic reprocess for this instrument. Stage 5 already runs from promotions and D1/H8 closes." disabled={store.running || !v} onClick={() => v && void runVisionNow(v.symbol)}>
           <RefreshCw size={14} className={store.running ? 'hr-spin' : undefined} />
           {store.running ? 'Analysing…' : `Re-analyse ${v?.symbol ?? ''}`}
         </button>
@@ -882,10 +884,10 @@ export function HtfVisionPage() {
       )}
 
       <div className="metrics hv-metrics">
-        <Metric label="Analysed" value={summary?.analysed ?? list.length} sub={`${summary?.ready ?? list.filter((i) => i.status === 'READY').length} READY`} />
-        <Metric label="Scanner qualified" value={summary?.qualified ?? list.filter((i) => i.scanner?.qualified).length} sub={`gate ${svcCfg?.scannerGate ?? list[0]?.scanner?.gate ?? '—'}`} />
-        <Metric label="Confirmed D1 channels" value={summary?.confirmedD1 ?? list.filter((i) => i.status === 'READY' && i.d1?.confirmed).length} sub="≥3 touches, parallel opposite side" />
-        <Metric label="D1 / H8 agree" value={summary?.agree ?? list.filter((i) => i.agreement === 'AGREE').length} sub={`${summary?.conflict ?? list.filter((i) => i.agreement === 'CONFLICT').length} in conflict`} />
+        <Metric label="Analysed" value={summary?.analysed ?? list.length} sub={store.error ? 'Last known · bridge offline' : `${summary?.ready ?? list.filter((i) => i.status === 'READY').length} READY`} />
+        <Metric label="Scanner qualified" value={summary?.qualified ?? list.filter((i) => i.scanner?.qualified).length} sub={store.error ? 'Not a live qualification' : `gate ${svcCfg?.scannerGate ?? list[0]?.scanner?.gate ?? '—'}`} />
+        <Metric label="Confirmed D1 channels" value={summary?.confirmedD1 ?? list.filter((i) => i.status === 'READY' && i.d1?.confirmed).length} sub={store.error ? 'Last known · not published live' : '≥3 touches, parallel opposite side'} />
+        <Metric label="D1 / H8 agree" value={summary?.agree ?? list.filter((i) => i.agreement === 'AGREE').length} sub={store.error ? 'Last known' : `${summary?.conflict ?? list.filter((i) => i.agreement === 'CONFLICT').length} in conflict`} />
       </div>
 
       <Card className="hv-picker">
@@ -933,7 +935,7 @@ export function HtfVisionPage() {
 
       {v && (
         <div className="grid-vision hv-grid">
-          <ChartCard v={v} charts={charts} view={view} setView={setView} livePrice={livePrice} />
+          <ChartCard v={v} charts={charts} view={view} setView={setView} livePrice={livePrice} offline={Boolean(store.error)} />
           <Interpretation v={v} now={now} onInspect={() => setDrawer(v.symbol)} />
         </div>
       )}

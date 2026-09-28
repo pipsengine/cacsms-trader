@@ -3,7 +3,7 @@
 ## Layout
 ```
 database/
-  cacsms-trader.db      # runtime DB (gitignored)
+  db_cacsms-trader.db   # runtime DB (gitignored)
   migrations/           # versioned schema changes
   seeds/                # reference data (29 instruments, currencies, defaults)
   backups/              # local backups only (gitignored contents)
@@ -22,7 +22,7 @@ The TypeScript data-access ports in `src/db` stay portable so a future managed d
 
 ## Configure
 ```env
-DATABASE_URL=file:./database/cacsms-trader.db
+DATABASE_URL=file:./database/db_cacsms-trader.db
 ```
 
 ## Commands

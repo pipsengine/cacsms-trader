@@ -566,7 +566,7 @@ function FeedStatusTab() {
           </div>
           {!db?.ok && (
             <p className="alert" style={{ marginTop: 10 }}>
-              <AlertTriangle size={14} /> {db?.message || 'SQL Server unreachable — start bridge and check credentials.'}
+              <AlertTriangle size={14} /> {db?.message || 'SQLite database unavailable — start the MT5 bridge.'}
             </p>
           )}
         </Card>

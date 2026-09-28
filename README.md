@@ -16,5 +16,14 @@ The bundled gateway is SIMULATION mode. Live order placement deliberately fails 
 2. `npm run dev`
 3. Production: `npm run build` then `npm run preview`
 
+`npm run dev` starts the Vite web app and the local MT5 bridge together. On Windows,
+the bridge opens or attaches to the configured/detected MetaTrader 5 terminal. Set
+`MT5_TERMINAL_PATH` in `.env` when more than one terminal is installed, or set
+`MT5_AUTO_LAUNCH=0` to disable automatic terminal startup. Use `npm run dev:web`
+when only the UI is needed.
+
+Runtime state is stored in the repository-local SQLite database
+`database/db_cacsms-trader.db`. SQLite requires no server, username, or password.
+
 ## Historical fixture
 `src/data/fixtures/h1-history.json` contains deterministic simulated H1 history for all 29 instruments. It exists to exercise charts, scanners, backtesting adapters and state transitions without pretending to be broker history. Replace it with validated broker history for production research.

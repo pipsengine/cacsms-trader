@@ -4,7 +4,7 @@ import { loadAppState, saveAppState, type AppEvent } from '../services/appDb';
 import { mergeEnrichIntoInstruments, mergeTicksIntoInstruments, subscribeLiveFeed } from '../services/liveFeed';
 import { subscribeMT5 } from '../features/mt5-connection/services/cacsmsMT5Runtime';
 import { bridgeEnrich } from '../features/mt5-connection/services/mt5BridgeClient';
-import { getRegimeSnapshot, runRegimeNow, startRegimeStore, subscribeRegime } from '../features/historical-regime/services/regimeStore';
+import { getRegimeSnapshot, startRegimeStore, subscribeRegime } from '../features/historical-regime/services/regimeStore';
 import { startHistoryStore } from '../features/market-data/services/historyStore';
 import { publishStage2 } from '../features/currency-strength/services/strengthStage';
 import { getVisionSnapshot, startVisionStore, subscribeVision, visionStageStatus } from '../features/htf-vision/services/visionStore';
@@ -19,6 +19,7 @@ import { getRiskSnapshot, riskStageStatus, saveRiskConfigNow, startRiskStore, su
 import { publishStage8 } from '../features/opportunity-risk/services/riskStage';
 import { executionStageStatus, getExecutionSnapshot, setControlNow, startExecutionStore, subscribeExecution } from '../features/execution/services/executionStore';
 import { publishStage9 } from '../features/execution/services/executionStage';
+import { startAutonomyStore } from '../features/workflow-engine/services/autonomyStore';
 import { eventBus } from '../services/eventBus';
 import type { CurrencyStrength, Instrument, Position } from '../types';
 
@@ -299,18 +300,16 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
     };
   }, [ready, syncModuleExports, scheduleInstrumentPersist]);
 
-  /** Stage 1 historical data: the bridge synchronizes autonomously; closes drive downstream refreshes. */
+  /** Stage 1 is server-owned; this store observes scheduler state only. */
   useEffect(() => {
     if (!ready) return;
-    const stop = startHistoryStore();
-    const refreshRegime = (e: { payload: Record<string, unknown> }) => {
-      if (e.payload.source === 'history') void runRegimeNow();
-    };
-    const offs = (['D1_CLOSE', 'W1_CLOSE', 'MN_CLOSE'] as const).map((t) => eventBus.on(t, refreshRegime));
-    return () => {
-      offs.forEach((off) => off());
-      stop();
-    };
+    return startHistoryStore();
+  }, [ready]);
+
+  /** The orchestrator runs on the bridge. This subscription only displays its heartbeat, jobs and decisions. */
+  useEffect(() => {
+    if (!ready) return;
+    return startAutonomyStore();
   }, [ready]);
 
   /** Stage 3 regime engine owns strength trajectories; the bridge persists them, so no client write-back. */

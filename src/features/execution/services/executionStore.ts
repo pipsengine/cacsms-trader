@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { ExecutionStateResponse } from '../types';
+import { explainBridgeError } from '../../../services/bridgeError';
 import { fetchExecutionState, requestExit, requestReconcile, resolveFinding, setExecutionControl, type ControlPatch } from './executionClient';
 
 /** Stage 9 runs on the bridge's central engine; the page only reads its persisted state and sends audited operator commands. */
@@ -45,7 +46,7 @@ export async function loadExecution() {
     const state = await fetchExecutionState();
     set({ state, loading: false, error: '', lastFetchAt: Date.now() });
   } catch (e) {
-    set({ loading: false, error: e instanceof Error ? e.message : 'Execution & Positions state unavailable' });
+    set({ loading: false, error: explainBridgeError(e, 'Execution & Positions state unavailable') });
   }
 }
 

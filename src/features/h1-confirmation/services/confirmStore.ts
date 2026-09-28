@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { H1ConfirmState, H1Decision } from '../types';
+import { explainBridgeError } from '../../../services/bridgeError';
 import { fetchH1State, runH1 } from './confirmClient';
 
 /** The bridge confirms autonomously; the UI only reads persisted Stage 7 state. */
@@ -45,7 +46,7 @@ async function load() {
     const state = await fetchH1State();
     set({ state, loading: false, error: '', lastFetchAt: Date.now() });
   } catch (e) {
-    set({ loading: false, error: e instanceof Error ? e.message : 'H1 Confirmation state unavailable' });
+    set({ loading: false, error: explainBridgeError(e, 'H1 Confirmation state unavailable') });
   }
 }
 

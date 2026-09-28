@@ -27,6 +27,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useTrading } from '../context/TradingContext';
+import { useAutonomyState } from '../features/workflow-engine/services/autonomyStore';
 
 type NavItem = { label: string; icon: LucideIcon; section?: string; sectionIcon?: LucideIcon };
 
@@ -61,7 +62,26 @@ export default function Sidebar({
   onCollapsedChange: (v: boolean) => void;
 }) {
   const { auto, setAuto, positions, riskUsed } = useTrading();
+  const autonomy = useAutonomyState();
   const openCount = useMemo(() => positions.filter((x) => x.status === 'ACTIVE').length, [positions]);
+  const bridgeUp = Boolean(autonomy?.ok && autonomy.orchestrator?.status);
+  const engineLabel = !autonomy
+    ? 'CHECKING ENGINE'
+    : !bridgeUp
+      ? 'ENGINE OFFLINE'
+      : !auto
+        ? 'NEW TRADES PAUSED'
+        : autonomy?.orchestrator?.status === 'HEALTHY'
+          ? 'AUTONOMOUS ON'
+          : 'ENGINE DEGRADED';
+  const engineOn = bridgeUp && Boolean(auto) && autonomy?.orchestrator?.status === 'HEALTHY';
+  const engineHint = !bridgeUp
+    ? 'Bridge stopped. Run npm run mt5:bridge'
+    : !auto
+      ? 'Analysis continues. New orders are paused.'
+      : openCount
+        ? 'MT5 positions synced'
+        : 'No open positions';
 
   return (
     <aside className={'sidebar' + (collapsed ? ' collapsed' : '')} aria-label="Primary navigation">
@@ -115,14 +135,15 @@ export default function Sidebar({
       <div className={'engine-box' + (collapsed ? ' compact' : '')}>
         {collapsed ? (
           <>
-            <div className={'engine-compact ' + (auto ? 'on' : 'off')} title={auto ? 'Autonomous ON' : 'Paused'}>
-              <span className={auto ? 'dot on' : 'dot'} />
-              {auto ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
+            <div className={'engine-compact ' + (engineOn ? 'on' : 'off')} title={engineLabel}>
+              <span className={engineOn ? 'dot on' : 'dot'} />
+              {engineOn ? <PlayCircle size={16} /> : <PauseCircle size={16} />}
             </div>
             <button
               type="button"
               className={'icon-action ' + (auto ? 'danger' : 'primary')}
-              title={auto ? 'Pause New Trades' : 'Resume Trading'}
+              title={bridgeUp ? (auto ? 'Pause New Trades' : 'Resume Trading') : 'Start the MT5 bridge before changing trading'}
+              disabled={!bridgeUp}
               onClick={() => setAuto(!auto)}
             >
               {auto ? <PauseCircle size={16} /> : <PlayCircle size={16} />}
@@ -131,10 +152,10 @@ export default function Sidebar({
         ) : (
           <>
             <div className="engine-title">
-              <span className={auto ? 'dot on' : 'dot'} />
-              <b>{auto ? 'AUTONOMOUS ON' : 'PAUSED'}</b>
+              <span className={engineOn ? 'dot on' : 'dot'} />
+              <b>{engineLabel}</b>
             </div>
-            <small>{openCount ? 'MT5 positions synced' : 'No open positions'}</small>
+            <small>{engineHint}</small>
             <div className="engine-stats">
               <span>
                 Open <b>{openCount}</b>
@@ -143,7 +164,7 @@ export default function Sidebar({
                 Risk <b>{riskUsed.toFixed(2)}%</b>
               </span>
             </div>
-            <button type="button" className={auto ? 'danger' : 'primary'} onClick={() => setAuto(!auto)}>
+            <button type="button" className={auto ? 'danger' : 'primary'} disabled={!bridgeUp} title={bridgeUp ? '' : 'The bridge must be running before this control can reach the engine'} onClick={() => setAuto(!auto)}>
               {auto ? 'Pause New Trades' : 'Resume Trading'}
             </button>
           </>

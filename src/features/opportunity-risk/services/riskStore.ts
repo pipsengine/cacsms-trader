@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import type { RiskConfig, RiskStateResponse } from '../types';
+import { explainBridgeError } from '../../../services/bridgeError';
 import { approveRisk, fetchRiskState, runRisk, saveRiskConfig } from './riskClient';
 
 /** Stage 8 qualifies and authorizes on the bridge; the UI only reads persisted state and submits audited config changes. */
@@ -46,7 +47,7 @@ async function load() {
     const state = await fetchRiskState();
     set({ state, loading: false, error: '', lastFetchAt: Date.now() });
   } catch (e) {
-    set({ loading: false, error: e instanceof Error ? e.message : 'Opportunities & Risk state unavailable' });
+    set({ loading: false, error: explainBridgeError(e, 'Opportunities & Risk state unavailable') });
   }
 }
 

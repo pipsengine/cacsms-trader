@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, Iterable
 
 try:
@@ -147,41 +148,19 @@ def upsert_candles(symbol: str, timeframe: str, rows: list[tuple], source: str) 
         return 0, 0
     with connect() as conn:
         cur = conn.cursor()
-        cur.execute(
-            "CREATE TABLE #stage (open_ts BIGINT PRIMARY KEY, o FLOAT, h FLOAT, l FLOAT, c FLOAT, v BIGINT, sp INT)"
-        )
         params = [(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), int(r[5] or 0), int(r[6]) if r[6] is not None else None) for r in rows]
-        cur.fast_executemany = True
-        cur.executemany("INSERT INTO #stage (open_ts, o, h, l, c, v, sp) VALUES (?,?,?,?,?,?,?)", params)
-        cur.fast_executemany = False
-        cur.execute(
-            """
-            UPDATE t SET [open]=s.o, high=s.h, low=s.l, [close]=s.c, tick_volume=s.v, spread=s.sp,
-                   source=?, revised_at=SYSUTCDATETIME()
-            FROM dbo.app_candles t JOIN #stage s ON t.symbol=? AND t.timeframe=? AND t.open_ts=s.open_ts
-            WHERE t.[open]<>s.o OR t.high<>s.h OR t.low<>s.l OR t.[close]<>s.c
-            """,
-            source,
-            symbol,
-            timeframe,
-        )
-        revised = max(0, cur.rowcount)
-        cur.execute(
-            """
-            INSERT INTO dbo.app_candles (symbol, timeframe, open_ts, [open], high, low, [close], tick_volume, spread, source)
-            SELECT ?, ?, s.open_ts, s.o, s.h, s.l, s.c, s.v, s.sp, ? FROM #stage s
-            WHERE NOT EXISTS (
-              SELECT 1 FROM dbo.app_candles t WHERE t.symbol=? AND t.timeframe=? AND t.open_ts=s.open_ts
-            )
-            """,
-            symbol,
-            timeframe,
-            source,
-            symbol,
-            timeframe,
-        )
-        inserted = max(0, cur.rowcount)
-        cur.execute("DROP TABLE #stage")
+        inserted = revised = 0
+        for ts, o, h, lo, close, volume, spread in params:
+            cur.execute("SELECT [open],high,low,[close] FROM dbo.app_candles WHERE symbol=? AND timeframe=? AND open_ts=?", symbol, timeframe, ts)
+            prior = cur.fetchone()
+            if prior is None:
+                cur.execute("INSERT INTO dbo.app_candles (symbol,timeframe,open_ts,[open],high,low,[close],tick_volume,spread,source) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            symbol, timeframe, ts, o, h, lo, close, volume, spread, source)
+                inserted += 1
+            elif tuple(float(x) for x in prior) != (o, h, lo, close):
+                cur.execute("UPDATE dbo.app_candles SET [open]=?,high=?,low=?,[close]=?,tick_volume=?,spread=?,source=?,revised_at=CURRENT_TIMESTAMP WHERE symbol=? AND timeframe=? AND open_ts=?",
+                            o, h, lo, close, volume, spread, source, symbol, timeframe, ts)
+                revised += 1
         conn.commit()
     return inserted, revised
 
@@ -203,6 +182,9 @@ def series_all() -> dict[tuple[str, str], dict[str, Any]]:
         out = {}
         for raw in cur.fetchall():
             d = dict(zip(_SERIES_COLS, raw))
+            for key in ("last_sync_at", "last_success_at", "last_validated_at", "last_repair_at", "updated_at"):
+                if isinstance(d.get(key), str):
+                    d[key] = datetime.fromisoformat(d[key].replace("Z", "+00:00")).replace(tzinfo=None)
             out[(d["symbol"], d["timeframe"])] = d
         return out
 
@@ -314,18 +296,13 @@ def job_enqueue(job_type: str, symbol: str, timeframe: str, trigger: str, priori
 def job_claim() -> dict[str, Any] | None:
     with connect() as conn:
         cur = conn.cursor()
-        cur.execute(
-            f"""
-            WITH c AS (
-              SELECT TOP 1 * FROM dbo.app_hist_job WITH (UPDLOCK, READPAST, ROWLOCK)
-              WHERE state IN (N'QUEUED', N'RETRYING') AND (next_attempt_at IS NULL OR next_attempt_at <= SYSUTCDATETIME())
-              ORDER BY priority, id
-            )
-            UPDATE c SET state=N'RUNNING', started_at=SYSUTCDATETIME(), attempts=attempts+1, finished_at=NULL
-            OUTPUT {', '.join('inserted.' + c for c in _JOB_COLS)};
-            """
-        )
-        row = cur.fetchone()
+        cur.execute("SELECT id FROM dbo.app_hist_job WHERE state IN ('QUEUED','RETRYING') AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP) ORDER BY priority,id LIMIT 1")
+        found = cur.fetchone()
+        row = None
+        if found:
+            cur.execute("UPDATE dbo.app_hist_job SET state='RUNNING',started_at=CURRENT_TIMESTAMP,attempts=attempts+1,finished_at=NULL WHERE id=?", found[0])
+            cur.execute(f"SELECT {', '.join(_JOB_COLS)} FROM dbo.app_hist_job WHERE id=?", found[0])
+            row = cur.fetchone()
         conn.commit()
         return dict(zip(_JOB_COLS, row)) if row else None
 

@@ -1,6 +1,14 @@
 import React from'react';import{ArrowUpRight,ArrowDownRight}from'lucide-react';
+import { useAutonomyState } from '../features/workflow-engine/services/autonomyStore';
 export const Card=({children,className=''}:{children:React.ReactNode,className?:string})=><section className={'card '+className}>{children}</section>;
-export const PageHeader=({title,subtitle}:{title:string,subtitle:string})=><div className="page-head"><div><h1>{title}</h1><p>{subtitle}</p></div><div className="live-pill"><span/> LIVE ENGINE</div></div>;
+export const PageHeader=({title,subtitle}:{title:string,subtitle:string})=>{
+  const autonomy=useAutonomyState();
+  const status=autonomy?.orchestrator?.status;
+  const online=Boolean(autonomy?.ok && status);
+  const label=!autonomy?'CHECKING ENGINE':!online?'ENGINE OFFLINE':status==='HEALTHY'?'ENGINE LIVE':status==='DEGRADED'?'ENGINE DEGRADED':'ENGINE STARTING';
+  const tone=!autonomy?'':!online?' off':status==='HEALTHY'?'':' warn';
+  return <div className="page-head"><div><h1>{title}</h1><p>{subtitle}</p></div><div className={'live-pill'+tone} title={autonomy?.orchestrator?.message||autonomy?.message||'Waiting for the MT5 bridge'}><span/> {label}</div></div>;
+};
 export const Badge=({children,tone='blue'}:{children:React.ReactNode,tone?:string})=><span className={'badge '+tone}>{children}</span>;
 export const Metric=({label,value,sub,trend}:{label:string,value:string|number,sub?:string,trend?:number})=><Card className="metric"><div className="muted">{label}</div><div className="metric-row"><strong>{value}</strong>{trend!==undefined&&(trend>=0?<ArrowUpRight size={17}/>:<ArrowDownRight size={17}/>)}</div>{sub&&<small>{sub}</small>}</Card>;
 const tabSlug=(x:string)=>x.toLowerCase().replace(/[^a-z0-9]+/g,'-');

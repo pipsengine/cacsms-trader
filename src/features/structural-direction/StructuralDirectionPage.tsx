@@ -3,6 +3,7 @@ import { AlertTriangle, RefreshCw, Search, X, XCircle } from 'lucide-react';
 import { Badge, Card, Metric, PageHeader, Tabs } from '../../components/UI';
 import { useTrading } from '../../context/TradingContext';
 import { ageText, dataTone, dirArrow, dirTone, statusTone } from '../htf-vision';
+import { explainBridgeError } from '../../services/bridgeError';
 import { fetchDirectionDetail } from './services/directionClient';
 import { directionRunAgeMs, directionStageStatus, runDirectionNow, startDirectionStore, useDirectionStore } from './services/directionStore';
 import { stateTone } from './services/directionStage';
@@ -201,7 +202,7 @@ function HistoryTable({ rows, onSymbol }: { rows: DirectionHistoryRow[]; onSymbo
 
 type DrawerTab = 'Decision' | 'Evidence' | 'Scoring' | 'History';
 
-function DirectionDrawer({ symbol, version, onClose }: { symbol: string; version: string; onClose: () => void }) {
+function DirectionDrawer({ symbol, version, onClose, offline }: { symbol: string; version: string; onClose: () => void; offline?: boolean }) {
   const [detail, setDetail] = useState<DirectionDetail | null>(null);
   const [err, setErr] = useState('');
   const [tab, setTab] = useState<DrawerTab>('Decision');
@@ -214,7 +215,7 @@ function DirectionDrawer({ symbol, version, onClose }: { symbol: string; version
         if (!cancelled) setDetail(d);
       })
       .catch((e: unknown) => {
-        if (!cancelled) setErr(e instanceof Error ? e.message : 'Detail unavailable');
+        if (!cancelled) setErr(explainBridgeError(e, 'Detail unavailable'));
       });
     return () => {
       cancelled = true;
@@ -296,8 +297,8 @@ function DirectionDrawer({ symbol, version, onClose }: { symbol: string; version
                     </b>
                     <span>Freshness</span>
                     <b>
-                      <Badge tone={d.freshness.status === 'CURRENT' ? 'green' : d.freshness.status === 'STALE' ? 'amber' : 'gray'}>{d.freshness.status}</Badge>{' '}
-                      <small className="muted">{d.freshness.reason}</small>
+                      <Badge tone={offline || d.freshness.status !== 'CURRENT' ? 'amber' : 'green'}>{offline ? 'LAST KNOWN' : d.freshness.status}</Badge>{' '}
+                      <small className="muted">{offline ? 'Bridge unreachable — this is not live evidence. ' : ''}{d.freshness.reason}</small>
                     </b>
                     <span>Stage 7 hand-off</span>
                     <b>
@@ -556,11 +557,12 @@ export function StructuralDirectionPage() {
         )}
         {run?.config && (
           <span className="muted">
-            Autonomous bridge loop {run.config.service.loopSec}s · sweep {Math.round(run.config.service.fullEverySec / 60)}m · READY ≥ {run.config.engine.readyScore} · Stage 4{' '}
+            {store.error ? 'Last reported schedule, not a live engine. ' : ''}
+            Bridge loop {run.config.service.loopSec}s · sweep {Math.round(run.config.service.fullEverySec / 60)}m · READY ≥ {run.config.engine.readyScore} · Stage 4{' '}
             {up?.scannerStatus ?? '—'} · Stage 5 {up?.visionStatus ?? '—'}
           </span>
         )}
-        <button type="button" className="hr-run" disabled={store.running} onClick={() => void runDirectionNow()}>
+        <button type="button" className="hr-run" title="Diagnostic reprocess. Direction already updates from Stage 5 and does not bypass its gates." disabled={store.running} onClick={() => void runDirectionNow()}>
           <RefreshCw size={14} className={store.running ? 'hr-spin' : undefined} />
           {store.running ? 'Evaluating…' : 'Re-evaluate now'}
         </button>
@@ -709,7 +711,7 @@ export function StructuralDirectionPage() {
                       </b>
                     </span>
                     <span>
-                      <small>{d.position.source === 'LIVE' ? 'Live' : 'Close'}</small>
+                      <small>{store.error ? 'Last' : d.position.source === 'LIVE' ? 'Live' : 'Close'}</small>
                       <b>{pct(d.position.d1)}</b>
                       {d.zone.name !== 'UNKNOWN' && <small className="sd-sub">{human(d.zone.name)}</small>}
                     </span>
@@ -723,8 +725,8 @@ export function StructuralDirectionPage() {
                     <span>
                       <ConfBar d={d} />
                     </span>
-                    <span title={d.freshness.reason}>
-                      <Badge tone={d.freshness.status === 'CURRENT' ? 'green' : d.freshness.status === 'STALE' ? 'amber' : 'gray'}>{d.freshness.status}</Badge>
+                    <span title={store.error ? 'Last known. The bridge is unreachable, so this is not live evidence.' : d.freshness.reason}>
+                      <Badge tone={store.error || d.freshness.status !== 'CURRENT' ? 'amber' : 'green'}>{store.error ? 'LAST KNOWN' : d.freshness.status}</Badge>
                       <small className="sd-sub">{ageText(d.upstream.vision?.analysedAt, now)}</small>
                     </span>
                     <span>
@@ -750,7 +752,7 @@ export function StructuralDirectionPage() {
         <HistoryTable rows={store.state?.history ?? []} onSymbol={open} />
       </Card>
 
-      {drawer && <DirectionDrawer symbol={drawer} version={`${drawerRow?.changedAt ?? ''}|${drawerRow?.evaluatedAt ?? ''}`} onClose={() => setDrawer(null)} />}
+      {drawer && <DirectionDrawer symbol={drawer} version={`${drawerRow?.changedAt ?? ''}|${drawerRow?.evaluatedAt ?? ''}`} offline={Boolean(store.error)} onClose={() => setDrawer(null)} />}
     </div>
   );
 }

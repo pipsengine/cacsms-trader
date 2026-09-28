@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTrading } from '../../context/TradingContext';
 import './styles/workflow-engine.css';
 import { useWorkflowEngine } from './hooks/useWorkflowEngine';
 import type { WorkflowEngineAdapter } from './services/workflowEngineAdapter';
@@ -18,6 +19,7 @@ import { clock } from './utils/format';
 /** Monitoring / control surface only: the pipeline runs on the bridge's central engine whether or not this page is open. */
 export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngineAdapter }) {
   const w = useWorkflowEngine(adapter);
+  const { selected: focusSymbol } = useTrading();
   const [selected, setSelected] = useState(1);
   const [worldSymbol, setWorldSymbol] = useState('EURUSD');
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -37,7 +39,7 @@ export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngi
       <div className="wf-body">
       <WorkflowHeader d={d} busy={w.busy} onReconcile={() => void w.reconcile()} onControl={(cmd, reason) => void w.control(cmd, reason)} confirm={setConfirm} />
       {w.error && <div className="alert">Snapshot failed: {w.error}</div>}
-      {!d.engine.bridgeReachable && <div className="alert">MT5 bridge unreachable — every stage is OFFLINE and nothing downstream is treated as live. Start it with npm run mt5:bridge.</div>}
+      {!d.engine.bridgeReachable && <div className="alert">MT5 bridge is not running, so every stage is OFFLINE and nothing on screen is live. Open a terminal in the project folder and run npm run mt5:bridge. Leave that window open. If the website is closed as well, run npm run dev instead.</div>}
       {d.engine.analysisPaused && <div className="alert info">Analysis is PAUSED on the central engine: Stages 2–8 hold their triggers, Stage 9 blocks new entries and keeps managing open positions.</div>}
       {w.busy && <div className="notice busy">{w.busy} in progress…</div>}
       {!w.busy && w.notice && (
@@ -46,7 +48,7 @@ export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngi
         </div>
       )}
       <KpiStrip d={d} />
-      <StagePipeline stages={d.stages} selected={selected} onSelect={setSelected} />
+      <StagePipeline stages={d.stages} selected={selected} focus={focusSymbol} onSelect={setSelected} />
       <div className="two">
         <StageInspector stage={stage} busy={Boolean(w.busy)} onRerun={() => void w.rerunStage(stage.id)} />
         <OrchestratorPanel d={d} />

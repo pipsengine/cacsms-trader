@@ -612,7 +612,7 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
             Autonomous bridge loop {run.config.service.loopSec}s · sweep {Math.round(run.config.service.fullEverySec / 60)}m · Stage 3 {run.regimeStatus ?? '—'} · latest closed D1 {run.expectedD1 ?? '—'}
           </span>
         )}
-        <button type="button" className="hr-run" disabled={store.running} onClick={() => void runScannerNow()}>
+        <button type="button" className="hr-run" title="Diagnostic reprocess. Ranking already runs from strength, regime and candle events." disabled={store.running} onClick={() => void runScannerNow()}>
           <RefreshCw size={14} className={store.running ? 'hr-spin' : undefined} />
           {store.running ? 'Ranking…' : 'Re-rank now'}
         </button>

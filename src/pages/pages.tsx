@@ -39,6 +39,7 @@ import { directionStageStatus, StructuralDirectionPage, useDirectionStore } from
 import { H1ConfirmationPage, h1StageStatus, useH1Store } from '../features/h1-confirmation';
 import { OpportunitiesRiskPage, riskStageStatus, useRiskStore } from '../features/opportunity-risk';
 import { ExecutionPositionsPage, executionStageStatus, fetchTrades, useExecutionStore, type ExecTrade } from '../features/execution';
+import { useAutonomyState } from '../features/workflow-engine/services/autonomyStore';
 
 const dir = (x: string) => (x === 'BULLISH' ? 'green' : x === 'BEARISH' ? 'red' : 'gray');
 
@@ -141,24 +142,32 @@ export function Overview() {
   const execStore = useExecutionStore();
   const execStatus = executionStageStatus(execStore);
   const execRun = execStore.state?.run;
+  const autonomy = useAutonomyState();
+  const learningStatus = autonomy?.learning?.status ?? 'WAITING';
   const stageOk = (idx: number) =>
-    idx === 2
-      ? regimeStatus === 'HEALTHY' || regimeStatus === 'RUNNING'
-      : idx === 3
-        ? scannerStatus === 'HEALTHY'
-        : idx === 4
-          ? visionStatus === 'HEALTHY'
-          : idx === 5
-            ? directionStatus === 'HEALTHY'
-            : idx === 6
-              ? h1Status === 'HEALTHY'
-              : idx === 7
-                ? riskStatus === 'HEALTHY'
-                : idx === 8
-                  ? execStatus === 'HEALTHY'
-                  : !!stage1Pass;
+    idx === 0
+      ? !!stage1Pass
+      : idx === 1
+        ? regimeStatus === 'HEALTHY' && regimeClassified > 0
+        : idx === 2
+          ? regimeStatus === 'HEALTHY' || regimeStatus === 'RUNNING'
+          : idx === 3
+            ? scannerStatus === 'HEALTHY'
+            : idx === 4
+              ? visionStatus === 'HEALTHY'
+              : idx === 5
+                ? directionStatus === 'HEALTHY'
+                : idx === 6
+                  ? h1Status === 'HEALTHY'
+                  : idx === 7
+                    ? riskStatus === 'HEALTHY'
+                    : idx === 8
+                      ? execStatus === 'HEALTHY'
+                      : learningStatus === 'HEALTHY';
   const stageNote = (idx: number) => {
+    if (idx === 1) return regimeClassified ? `${regimeStatus} · ${regimeClassified}/9 assets with strength` : `${regimeStatus} · waiting for Stage 2`;
     if (idx === 2) return `${regimeStatus} · ${regimeClassified}/9 classified`;
+    if (idx === 9) return autonomy?.learning?.summary?.message ?? `${learningStatus} · engine health is separate from a learned trade`;
     if (idx === 3) return scan ? `${scannerStatus} · ${scan.directional} directional · ${scan.promoted} promoted` : scannerStatus;
     if (idx === 4) return vsum ? `${visionStatus} · ${vsum.qualified} qualified · ${vsum.confirmedD1} confirmed D1` : visionStatus;
     if (idx === 5) return dc ? `${directionStatus} · ${dc.candidates} candidates · ${dc.ready} ready for H1` : directionStatus;
@@ -224,13 +233,12 @@ export function Overview() {
           <div className="status-big">
             <Zap />
             <div>
-              <b>{!instruments.length ? 'IDLE' : stage1Pass ? 'READY' : 'BLOCKED'}</b>
+              <b>{autonomy?.orchestrator?.status ?? (autonomy && !autonomy.ok ? 'OFFLINE' : 'STARTING')}</b>
               <span>
-                {!instruments.length
-                  ? 'No market state in database yet'
-                  : stage1Pass
-                    ? `Event-driven · ${readyCount} qualified of ${stage1Pass} valid`
-                    : `Stage 1 fail-closed · ${blockReason ?? 'no valid data'}`}
+                {autonomy?.orchestrator?.message
+                  ?? (autonomy?.message || 'Waiting for the bridge orchestrator. Opening this page does not start the pipeline.')}
+                {autonomy?.orchestrator ? ` · cycle ${autonomy.orchestrator.cycles ?? '—'}` : ''}
+                {stage1Pass ? ` · ${readyCount} of ${stage1Pass} instruments currently valid` : blockReason ? ` · ${blockReason}` : ''}
               </span>
             </div>
           </div>
@@ -257,7 +265,7 @@ export function Overview() {
           <h3>Recent Decisions</h3>
           <div className="feed">
             {events.length === 0 ? (
-              <EmptyState title="No events yet" detail="Decisions and system events are stored in SQL Server." />
+              <EmptyState title="No events yet" detail="Decisions and system events are stored in SQLite." />
             ) : (
               events.slice(0, 8).map((e, i) => (
                 <div key={e.id ?? i}>
@@ -499,7 +507,7 @@ export function SystemControl() {
         <h3>Infrastructure Health</h3>
         <div className="health-grid">
           {[
-            ['SQL Server', sql.ok ? `ONLINE · ${sql.database}` : 'OFFLINE'],
+            ['SQLite', sql.ok ? `ONLINE · ${sql.database}` : 'OFFLINE'],
             ['MT5 Accounts', String(sql.accounts ?? '—')],
             ['SQLite Foundation', db.writable ? 'LOCAL R/W' : db.mode],
             ['App State', dbError ? 'ERROR' : 'READY'],

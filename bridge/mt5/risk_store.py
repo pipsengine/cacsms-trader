@@ -170,8 +170,8 @@ def baselines(day_start_utc: float) -> dict[str, dict[str, Any]]:
         cur.execute(
             """
             SELECT b.account_id, MAX(b.equity) AS peak,
-                   (SELECT TOP 1 x.equity FROM dbo.account_balances x WHERE x.account_id = b.account_id AND x.as_of >= ? ORDER BY x.as_of ASC) AS day_first,
-                   (SELECT TOP 1 x.as_of FROM dbo.account_balances x WHERE x.account_id = b.account_id AND x.as_of >= ? ORDER BY x.as_of ASC) AS day_first_at
+                   (SELECT x.equity FROM dbo.account_balances x WHERE x.account_id = b.account_id AND x.as_of >= ? ORDER BY x.as_of ASC LIMIT 1) AS day_first,
+                   (SELECT x.as_of FROM dbo.account_balances x WHERE x.account_id = b.account_id AND x.as_of >= ? ORDER BY x.as_of ASC LIMIT 1) AS day_first_at
             FROM dbo.account_balances b GROUP BY b.account_id
             """,
             start, start,

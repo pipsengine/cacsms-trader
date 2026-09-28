@@ -1,8 +1,12 @@
 import type { WorkflowSnapshot } from '../types/workflow';
+import { useAutonomyState } from '../services/autonomyStore';
 import { age, ago, human, stamp } from '../utils/format';
 
 export function OrchestratorPanel({ d }: { d: WorkflowSnapshot }) {
   const e = d.engine;
+  const autonomy = useAutonomyState();
+  const beat = autonomy?.orchestrator;
+  const jobs = autonomy?.jobs ?? {};
   const worst = e.indicators.some((i) => i.status === 'FAIL') ? 'bad' : e.indicators.some((i) => i.status === 'WARN') ? 'warn' : 'ok';
   return (
     <section className="panel">
@@ -11,13 +15,15 @@ export function OrchestratorPanel({ d }: { d: WorkflowSnapshot }) {
           <span className="eyebrow">AUTONOMOUS ORCHESTRATOR</span>
           <h2>Control Plane</h2>
         </div>
-        <span className={`live ${worst}`}>{worst === 'ok' ? '● ALL CHECKS PASS' : worst === 'warn' ? '● ATTENTION' : '● FAULT'}</span>
+        <span className={`live ${beat?.status === 'HEALTHY' ? 'ok' : beat?.status === 'DEGRADED' ? 'warn' : worst}`} title={beat?.message ?? 'Waiting for the bridge orchestrator'}>
+          {beat?.status ? `● ${beat.status}` : worst === 'ok' ? '● ALL CHECKS PASS' : worst === 'warn' ? '● ATTENTION' : '● FAULT'}
+        </span>
       </div>
       <div className="orchestrator">
         <div className="brain" title={e.node ? `Central engine node ${e.node}` : 'Central engine not reporting'}>
           ◎<b>CENTRAL ENGINE</b>
-          <span>Cycle #{e.cycle ?? '—'}</span>
-          <span>{e.node ?? 'no node'}</span>
+          <span>Cycle #{beat?.cycles ?? e.cycle ?? '—'}</span>
+          <span>{beat?.threadAlive === false ? 'orchestrator thread down' : e.node ?? 'no node'}</span>
         </div>
         <div className="control-list">
           {e.indicators.map((x, i) => (
@@ -34,16 +40,16 @@ export function OrchestratorPanel({ d }: { d: WorkflowSnapshot }) {
       </div>
       <div className="runtime-grid">
         <div>
-          <span>Last heartbeat</span>
-          <b title={stamp(e.lastHeartbeat)}>{e.heartbeatAgeSec == null ? '—' : `${age(e.heartbeatAgeSec)} ago`}</b>
+          <span>Orchestrator heartbeat</span>
+          <b title={beat?.heartbeatAt ? stamp(beat.heartbeatAt) : stamp(e.lastHeartbeat)}>{beat?.heartbeatAt ? ago(beat.heartbeatAt) : e.heartbeatAgeSec == null ? '—' : `${age(e.heartbeatAgeSec)} ago`}</b>
         </div>
         <div>
-          <span>Active jobs</span>
-          <b title={e.activeJobs.join('\n') || 'None'}>{e.activeJobs.length}</b>
+          <span>Running jobs</span>
+          <b title={e.activeJobs.join('\n') || 'None'}>{jobs.RUNNING ?? e.activeJobs.length}</b>
         </div>
         <div>
           <span>Queued jobs</span>
-          <b>{e.queuedJobs}</b>
+          <b>{(jobs.READY ?? 0) + (jobs.RETRY ?? 0) || e.queuedJobs}</b>
         </div>
         <div>
           <span>Queued authorizations</span>
@@ -95,7 +101,22 @@ export function OrchestratorPanel({ d }: { d: WorkflowSnapshot }) {
         <p className="muted">
           Flags: {e.controlFlags.length ? e.controlFlags.map((f) => human(f.state)).join(' · ') : 'none'} · last control change {ago(e.controlUpdatedAt)}
           {e.controlUpdatedBy ? ` by ${e.controlUpdatedBy}` : ''}
+          {autonomy && !autonomy.ok ? ` · autonomy feed: ${autonomy.message ?? 'unavailable'}` : ''}
+          {` · jobs ready ${jobs.READY ?? 0} · retry ${jobs.RETRY ?? 0} · blocked ${jobs.BLOCKED ?? 0} · done ${jobs.DONE ?? 0}`}
         </p>
+        <h4>Recent autonomous decisions</h4>
+        {(autonomy?.decisions ?? []).length ? (
+          (autonomy?.decisions ?? []).slice(0, 6).map((decision) => (
+            <p key={decision.id} className="muted" title={decision.blocker ?? decision.reason ?? ''}>
+              S{decision.stage}
+              {decision.symbol ? ` ${decision.symbol}` : ''} · {decision.decision}
+              {decision.trigger ? ` · ${decision.trigger}` : ''}
+              {decision.blocker ? ` · ${decision.blocker}` : ''}
+            </p>
+          ))
+        ) : (
+          <p className="muted">No orchestrator decisions recorded yet. They appear here as the bridge processes events.</p>
+        )}
       </div>
     </section>
   );

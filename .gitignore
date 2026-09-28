@@ -16,9 +16,13 @@ Thumbs.db
 database/cacsms-trader.db
 database/cacsms-trader.db-wal
 database/cacsms-trader.db-shm
+database/db_cacsms-trader.db
+database/db_cacsms-trader.db-wal
+database/db_cacsms-trader.db-shm
 database/backups/*
 !database/backups/.gitkeep
 
 # MT5 bridge local secrets (never commit)
 bridge/mt5/data/
 bridge/mt5/**/__pycache__/
+database/scripts/__pycache__/

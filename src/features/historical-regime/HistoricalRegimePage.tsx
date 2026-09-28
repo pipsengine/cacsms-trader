@@ -959,7 +959,7 @@ export function HistoricalRegimePage() {
           {run?.latestObsDate ? ` · latest D1 close ${run.latestObsDate}` : ''}
           {run?.forming ? ' · forming bar provisional' : ''}
         </span>
-        <button type="button" className="hr-run" onClick={() => void runRegimeNow()} disabled={store.running}>
+        <button type="button" className="hr-run" title="Diagnostic reprocess. The bridge already runs this from candle events and will not bypass freshness or downstream gates." onClick={() => void runRegimeNow()} disabled={store.running}>
           <RefreshCw size={13} className={store.running ? 'hr-spin' : ''} /> {store.running ? 'Running…' : 'Run now'}
         </button>
       </div>

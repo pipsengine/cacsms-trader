@@ -492,7 +492,7 @@ export function OpportunitiesRiskPage() {
             Event-driven loop {run.service.loopSec}s · full re-evaluation {run.service.fullEverySec}s · Stage 7 {run.upstream?.h1Status ?? '—'}
           </span>
         )}
-        <button type="button" className="hr-run" disabled={store.running} onClick={() => void runRiskNow()}>
+        <button type="button" className="hr-run" title="Diagnostic reprocess. Risk already runs from confirmations and cannot authorize a stale setup." disabled={store.running} onClick={() => void runRiskNow()}>
           <RefreshCw size={14} className={store.running ? 'hr-spin' : undefined} />
           {store.running ? 'Evaluating…' : 'Re-evaluate now'}
         </button>

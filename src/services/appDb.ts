@@ -1,4 +1,4 @@
-/** Browser client for app world state in SQL Server (via MT5 bridge). */
+/** Browser client for the SQLite-backed app world state (via MT5 bridge). */
 
 const BASE = (import.meta.env.VITE_MT5_BRIDGE_URL as string | undefined)?.replace(/\/$/, '') || '/mt5-bridge';
 

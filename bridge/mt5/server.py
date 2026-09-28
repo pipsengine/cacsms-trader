@@ -24,6 +24,8 @@ except ImportError as exc:  # pragma: no cover
 
 try:
     import analysis_gate
+    import autonomy_service
+    import autonomy_store
     import confirm
     import confirm_service
     import confirm_store
@@ -34,6 +36,7 @@ try:
     import execution_store
     import history
     import history_store
+    import learning_service
     import regime
     import risk_mt5
     import risk_service
@@ -46,7 +49,9 @@ try:
     import vision_store
     from db import (
         delete_account,
+        ensure_database,
         ensure_regime_schema,
+        ensure_schema,
         health as db_health,
         list_accounts,
         list_positions,
@@ -62,17 +67,21 @@ try:
     )
 except ImportError:
     from bridge.mt5 import analysis_gate  # type: ignore
+    from bridge.mt5 import autonomy_service, autonomy_store  # type: ignore
     from bridge.mt5 import confirm, confirm_service, confirm_store  # type: ignore
     from bridge.mt5 import direction_service, direction_store  # type: ignore
     from bridge.mt5 import execution_mt5, execution_service, execution_store  # type: ignore
     from bridge.mt5 import history, history_store  # type: ignore
+    from bridge.mt5 import learning_service  # type: ignore
     from bridge.mt5 import regime  # type: ignore
     from bridge.mt5 import risk_mt5, risk_service, risk_store  # type: ignore
     from bridge.mt5 import scanner, scanner_service, scanner_store  # type: ignore
     from bridge.mt5 import vision, vision_service, vision_store  # type: ignore
     from bridge.mt5.db import (  # type: ignore
         delete_account,
+        ensure_database,
         ensure_regime_schema,
+        ensure_schema,
         health as db_health,
         list_accounts,
         list_positions,
@@ -93,6 +102,12 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 SECRETS_PATH = DATA / "secrets.json"
 MT5_PATH = os.environ.get("MT5_TERMINAL_PATH", "").strip() or None
+MT5_AUTO_LAUNCH = os.environ.get("MT5_AUTO_LAUNCH", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
 
 DATA.mkdir(parents=True, exist_ok=True)
 
@@ -185,9 +200,47 @@ def _mt5_time(ts: int) -> str:
     return datetime.fromtimestamp(int(ts), tz=timezone.utc).isoformat()
 
 
+def _terminal_path(path: str | None = None) -> str | None:
+    """Resolve an explicit path or discover a local Windows MT5 installation."""
+    configured = (path or MT5_PATH or "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if candidate.is_dir():
+            for exe in ("terminal64.exe", "terminal.exe"):
+                nested = candidate / exe
+                if nested.is_file():
+                    return str(nested)
+        return str(candidate)
+
+    if os.name != "nt":
+        return None
+
+    roots = [
+        os.environ.get("ProgramFiles"),
+        os.environ.get("ProgramFiles(x86)"),
+        os.environ.get("LOCALAPPDATA"),
+    ]
+    patterns = (
+        "MetaTrader 5*/terminal64.exe",
+        "*/terminal64.exe",
+        "Programs/MetaTrader 5*/terminal64.exe",
+    )
+    seen: set[Path] = set()
+    for root in filter(None, roots):
+        base = Path(root)
+        for pattern in patterns:
+            for candidate in sorted(base.glob(pattern)):
+                if candidate in seen:
+                    continue
+                seen.add(candidate)
+                if candidate.is_file():
+                    return str(candidate)
+    return None
+
+
 def _ensure_terminal(path: str | None = None) -> tuple[bool, str]:
     global _mt5_ready, _mt5_ready_path
-    terminal = path or MT5_PATH
+    terminal = _terminal_path(path)
     same_terminal = not terminal or terminal == _mt5_ready_path
     if _mt5_ready and same_terminal and mt5.terminal_info() is not None:
         return True, "ok"
@@ -626,18 +679,68 @@ def _vision_ticks(symbols: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
+ORCHESTRATOR: autonomy_service.AutonomousOrchestrator | None = None
+
+
+def _risk_change(result: dict[str, Any]) -> None:
+    if ORCHESTRATOR:
+        ORCHESTRATOR.publish("RISK_CHANGE", "STAGE8", stage=8, payload={"changed": result.get("changed")})
+    elif "EXECUTION" in globals():
+        EXECUTION.mark("STAGE8_RISK_CHANGE")
+
+
 RISK = risk_service.RiskService(
     risk_mt5.RiskMT5(mt5, _MT5_LOCK, lambda: _mt5_ready, lambda: HISTORY.server_offset),
     lambda: HISTORY.server_offset,
+    on_change=_risk_change,
 )
+LEARNING = learning_service.LearningService()
+
+
+def _execution_change(what: str) -> None:
+    if ORCHESTRATOR:
+        ORCHESTRATOR.publish("EXECUTION_CHANGE", "STAGE9", stage=9, payload={"what": what})
+    else:
+        RISK.mark("STAGE9_" + what)
+        if what == "CLOSED":
+            LEARNING.mark("TRADE_CLOSED")
+
+
 EXECUTION = execution_service.ExecutionService(
     execution_mt5.ExecutionMT5(mt5, _MT5_LOCK, lambda: _mt5_ready, lambda: HISTORY.server_offset, fx_factory=RISK.provider.fx_resolver),
     node=os.environ.get("MT5_NODE_ID", "CACSMS-MT5-0001"),
-    on_change=lambda what: RISK.mark("STAGE9_" + what),
+    on_change=_execution_change,
 )
-CONFIRM = confirm_service.ConfirmService(_vision_ticks, on_confirm_change=RISK.on_stage7_change)
-DIRECTION = direction_service.DirectionService(on_ready_change=CONFIRM.on_stage6_change)
-VISION = vision_service.VisionService(_vision_ticks, on_run=DIRECTION.on_stage5_run)
+
+
+def _confirm_change(symbols: list[str]) -> None:
+    if ORCHESTRATOR:
+        ORCHESTRATOR.publish("CONFIRMATION_CHANGE", "STAGE7", stage=7, symbols=symbols)
+    else:
+        RISK.on_stage7_change(symbols)
+
+
+CONFIRM = confirm_service.ConfirmService(_vision_ticks, on_confirm_change=_confirm_change)
+
+
+def _direction_change(symbols: list[str]) -> None:
+    if ORCHESTRATOR:
+        ORCHESTRATOR.publish("DIRECTION_CHANGE", "STAGE6", stage=6, symbols=symbols)
+    else:
+        CONFIRM.on_stage6_change(symbols)
+
+
+DIRECTION = direction_service.DirectionService(on_ready_change=_direction_change)
+
+
+def _vision_change(symbols: list[str]) -> None:
+    if ORCHESTRATOR:
+        ORCHESTRATOR.publish("VISION_CHANGE", "STAGE5", stage=5, symbols=symbols)
+    else:
+        DIRECTION.on_stage5_run(symbols)
+
+
+VISION = vision_service.VisionService(_vision_ticks, on_run=_vision_change)
 
 
 def _scanner_context() -> dict[str, Any]:
@@ -645,24 +748,42 @@ def _scanner_context() -> dict[str, Any]:
 
 
 def _on_promotion_change(symbols: list[str], reason: str) -> None:
-    VISION.mark(symbols, reason)
-    DIRECTION.mark("STAGE4_PROMOTION_CHANGE")
+    if ORCHESTRATOR:
+        ORCHESTRATOR.publish("SCANNER_CHANGE", "STAGE4", stage=4, symbols=symbols, trigger={"reason": reason})
+    else:
+        VISION.mark(symbols, reason)
+        DIRECTION.mark("STAGE4_PROMOTION_CHANGE")
 
 
 SCANNER = scanner_service.ScannerService(_vision_ticks, _scanner_context, _on_promotion_change)
 
 
 def _on_candles(timeframe: str, symbols: list[str], kind: str = "INCREMENTAL") -> None:
-    if timeframe in _REGIME_TRIGGER_TFS and kind == "INCREMENTAL":
-        _regime_trigger_pending.set()
-    SCANNER.on_candles(timeframe, symbols, kind)
-    VISION.on_candles(timeframe, symbols, kind)
-    DIRECTION.on_candles(timeframe, symbols, kind)
-    CONFIRM.on_candles(timeframe, symbols, kind)
-    RISK.on_candles(timeframe, symbols, kind)
+    if ORCHESTRATOR:
+        bar_time = None
+        if len(symbols) == 1:
+            try:
+                bar_time = history_store.candle_stats(symbols[0], timeframe)[2]
+            except Exception:
+                bar_time = None
+        ORCHESTRATOR.publish("CANDLE_CHANGE", "STAGE1", stage=1, symbols=symbols,
+                             payload={"timeframe": timeframe, "kind": kind, "barTime": bar_time})
+    else:
+        if timeframe in _REGIME_TRIGGER_TFS and kind == "INCREMENTAL":
+            _regime_trigger_pending.set()
+        SCANNER.on_candles(timeframe, symbols, kind)
+        VISION.on_candles(timeframe, symbols, kind)
+        DIRECTION.on_candles(timeframe, symbols, kind)
+        CONFIRM.on_candles(timeframe, symbols, kind)
+        RISK.on_candles(timeframe, symbols, kind)
 
 
 HISTORY = history.HistoryService(history.MT5Provider(mt5, _MT5_LOCK, _ensure_terminal), on_candles=_on_candles)
+
+ORCHESTRATOR = autonomy_service.AutonomousOrchestrator(
+    list(regime.SYMBOLS), cmd_regime_run, SCANNER, VISION, DIRECTION, CONFIRM, RISK, EXECUTION, LEARNING,
+    connected_fn=lambda: bool(_mt5_ready),
+)
 
 
 def cmd_vision_chart(symbol: str, timeframe: str, bars: int) -> dict[str, Any]:
@@ -1008,6 +1129,9 @@ class Handler(BaseHTTPRequestHandler):
                 result = db_health()
                 self._json(200 if result.get("ok") else 500, result)
                 return
+            if parsed.path == "/autonomy/state":
+                self._json(200, ORCHESTRATOR.state() if ORCHESTRATOR else autonomy_store.state())
+                return
             if parsed.path == "/accounts":
                 accounts = list_accounts()
                 positions = list_positions()
@@ -1166,6 +1290,22 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             body = self._read_json()
+            if parsed.path == "/autonomy/run":
+                if not ORCHESTRATOR:
+                    self._json(503, {"ok": False, "message": "Autonomous orchestrator not started"})
+                    return
+                symbol = str(body.get("symbol") or "").strip().upper() or None
+                stage = body.get("stage")
+                reason = str(body.get("reason") or "Manual diagnostic reprocess")
+                event_id = ORCHESTRATOR.publish(
+                    "DIAGNOSTIC_REPROCESS", "OPERATOR",
+                    stage=int(stage) if stage else None,
+                    symbols=[symbol] if symbol else None,
+                    trigger={"reason": reason, "stage": stage, "symbol": symbol},
+                    payload={"reason": reason, "stage": int(stage) if stage else None, "symbol": symbol},
+                )
+                self._json(202, {"ok": True, "eventId": event_id, "message": "Diagnostic reprocess queued. Dependencies, freshness, risk and execution authorization still apply."})
+                return
             if parsed.path == "/sync" or parsed.path == "/connect":
                 result = cmd_sync(body)
                 self._json(200 if result.get("ok") else 400, result)
@@ -1343,6 +1483,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     try:
+        ensure_database()
+        ensure_schema()
         db = db_health()
         print(f"[mt5-bridge] database: {db}")
         ensure_regime_schema()
@@ -1354,7 +1496,8 @@ def main() -> None:
         confirm_store.ensure_confirm_schema()
         risk_store.ensure_risk_schema()
         execution_store.ensure_schema()
-        print("[mt5-bridge] scanner + vision + direction + H1 confirmation + opportunities & risk + execution schema ready")
+        autonomy_store.ensure_schema()
+        print("[mt5-bridge] S1-S10 runtime + autonomy control-plane schema ready")
         history_ready = True
     except Exception as exc:
         history_ready = False
@@ -1363,10 +1506,29 @@ def main() -> None:
     ThreadingHTTPServer.daemon_threads = True
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"[mt5-bridge] listening on http://{HOST}:{PORT}")
+    if MT5_AUTO_LAUNCH:
+        ok, message = _ensure_terminal()
+        if ok:
+            info = mt5.terminal_info()
+            print(f"[mt5-bridge] MT5 terminal ready: {info.path if info else _mt5_ready_path or 'auto-detected'}")
+            account = mt5.account_info()
+            if account:
+                account_class = "DEMO" if account.trade_mode == mt5.ACCOUNT_TRADE_MODE_DEMO else "LIVE"
+                synced = cmd_sync(
+                    {
+                        "login": str(account.login),
+                        "accountId": str(account.login),
+                        "accountClass": account_class,
+                        "tradingMode": "ANALYSIS_ONLY",
+                        "tradingEnabled": False,
+                    }
+                )
+                print(f"[mt5-bridge] startup account sync: {synced.get('message', 'unknown result')}")
+        else:
+            print(f"[mt5-bridge] MT5 startup warning: {message}")
     # Bound before touching MT5: a terminal busy downloading history can block initialize() for minutes.
     if history_ready:
         HISTORY.start()
-        threading.Thread(target=_regime_trigger_loop, name="regime-trigger", daemon=True).start()
         print("[mt5-bridge] autonomous historical synchronizer started")
         SCANNER.start()
         print("[mt5-bridge] Stage 4 Market Scanner engine started")
@@ -1380,6 +1542,10 @@ def main() -> None:
         print("[mt5-bridge] Stage 8 Opportunities & Risk engine started")
         EXECUTION.start()
         print("[mt5-bridge] Stage 9 Execution & Positions engine started")
+        LEARNING.start()
+        print("[mt5-bridge] Stage 10 Performance & Learning engine started")
+        ORCHESTRATOR.start()
+        print("[mt5-bridge] persistent Autonomous Orchestrator + Event Bus + World Model started")
     print("[mt5-bridge] keep MetaTrader 5 running; Ctrl+C to stop")
     try:
         server.serve_forever()

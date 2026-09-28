@@ -33,7 +33,7 @@ export const allPairs = [
   'XAUUSD',
 ] as const;
 
-/** Live rows come from SQL Server via TradingContext — start empty (no mock quotes). */
+/** Live rows come from the SQLite-backed bridge via TradingContext — start empty (no mock quotes). */
 export let instruments: Instrument[] = [];
 export let positions: Position[] = [];
 export let strengths: CurrencyStrength[] = [];

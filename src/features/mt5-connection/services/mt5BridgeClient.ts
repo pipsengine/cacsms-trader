@@ -299,6 +299,67 @@ export type BridgeBar = {
   volume: number;
 };
 
+export type AutonomyDecision = {
+  id: number;
+  stage: number;
+  symbol: string | null;
+  accountId: string | null;
+  trigger: string | null;
+  decision: string;
+  reason: string | null;
+  blockerCode: string | null;
+  blocker: string | null;
+  nextAction: string | null;
+  createdAt: string | null;
+};
+
+export type AutonomyState = {
+  ok: boolean;
+  message?: string;
+  jobs: Record<string, number>;
+  orchestrator?: {
+    status?: string;
+    message?: string;
+    heartbeatAt?: string;
+    connected?: boolean;
+    analysisPaused?: boolean;
+    cycles?: number;
+    errors?: number;
+    threadAlive?: boolean;
+    recoveredJobs?: number;
+  };
+  learning?: {
+    status?: string;
+    tradesEvaluated?: number;
+    rejectionsEvaluated?: number;
+    recommendations?: number;
+    summary?: { message?: string; autoApplied?: boolean };
+  } | null;
+  decisions?: AutonomyDecision[];
+  events?: { id: number; type: string; stage: number | null; symbol: string | null; severity: string; createdAt: string | null }[];
+};
+
+export async function bridgeAutonomyState(): Promise<AutonomyState> {
+  try {
+    const body = await request<AutonomyState>('/autonomy/state');
+    return { ...body, jobs: body.jobs ?? {}, ok: body.ok !== false };
+  } catch (e) {
+    return { ok: false, jobs: {}, message: e instanceof Error ? e.message : 'Autonomy state unavailable' };
+  }
+}
+
+export async function bridgeAutonomyRun(input: { reason: string; stage?: number; symbol?: string }): Promise<{ ok: boolean; message: string }> {
+  try {
+    const body = await request<{ ok: boolean; message?: string }>('/autonomy/run', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+    return { ok: body.ok !== false, message: body.message || 'Diagnostic reprocess queued' };
+  } catch (e) {
+    return { ok: false, message: e instanceof Error ? e.message : 'Diagnostic reprocess failed' };
+  }
+}
+
 export async function bridgeBars(
   symbol: string,
   timeframe: string,
