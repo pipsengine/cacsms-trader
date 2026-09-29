@@ -59,6 +59,76 @@ CREATE TABLE account_snapshots (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- app_auto_checkpoint
+CREATE TABLE app_auto_checkpoint (
+    checkpoint_key TEXT NOT NULL PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_auto_decision
+CREATE TABLE app_auto_decision (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NULL,
+    job_id INTEGER NULL,
+    stage INT NOT NULL,
+    symbol TEXT NULL,
+    account_id TEXT NULL,
+    trigger_reason TEXT NULL,
+    inputs_json TEXT NULL,
+    decision TEXT NOT NULL,
+    confidence REAL NULL,
+    reason TEXT NULL,
+    blocker_code TEXT NULL,
+    blocker TEXT NULL,
+    next_action TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_auto_event
+CREATE TABLE app_auto_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NULL,
+    event_type TEXT NOT NULL,
+    source TEXT NOT NULL,
+    stage INT NULL,
+    symbol TEXT NULL,
+    account_id TEXT NULL,
+    severity TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trigger_json TEXT NULL,
+    payload_json TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    processed_at TEXT NULL,
+    error TEXT NULL
+  );
+
+-- app_auto_job
+CREATE TABLE app_auto_job (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_key TEXT NOT NULL,
+    event_id INTEGER NULL,
+    stage INT NOT NULL,
+    symbol TEXT NULL,
+    account_id TEXT NULL,
+    action TEXT NOT NULL,
+    state TEXT NOT NULL,
+    priority INT NOT NULL,
+    attempt INT NOT NULL DEFAULT 0,
+    max_attempts INT NOT NULL DEFAULT 5,
+    input_version TEXT NULL,
+    not_before TEXT NULL,
+    lease_owner TEXT NULL,
+    lease_until TEXT NULL,
+    blocker_code TEXT NULL,
+    blocker TEXT NULL,
+    payload_json TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at TEXT NULL,
+    CONSTRAINT UQ_app_auto_job_key UNIQUE (job_key)
+  );
+
 -- app_candles
 CREATE TABLE app_candles (
     symbol TEXT NOT NULL,
@@ -456,6 +526,67 @@ CREATE TABLE app_instruments (
     channel_pos REAL NOT NULL DEFAULT 50,
     confidence REAL NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_learning_evaluation
+CREATE TABLE app_learning_evaluation (
+    evaluation_key TEXT NOT NULL PRIMARY KEY,
+    kind TEXT NOT NULL,
+    execution_id TEXT NULL,
+    setup_key TEXT NULL,
+    account_id TEXT NULL,
+    symbol TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    outcome TEXT NULL,
+    confidence REAL NULL,
+    expected_json TEXT NULL,
+    actual_json TEXT NULL,
+    evidence_json TEXT NOT NULL,
+    recommendation_json TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_learning_proposal
+CREATE TABLE app_learning_proposal (
+    proposal_key TEXT NOT NULL PRIMARY KEY,
+    parameter TEXT NOT NULL,
+    lifecycle TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    sample_size INT NOT NULL,
+    required_size INT NOT NULL,
+    production_value REAL NULL,
+    candidate_value REAL NULL,
+    applied INTEGER NOT NULL DEFAULT 0,
+    evidence_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_learning_run
+CREATE TABLE app_learning_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at TEXT NOT NULL,
+    trigger_reason TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trades_evaluated INT NOT NULL,
+    rejections_evaluated INT NOT NULL,
+    recommendations INT NOT NULL,
+    duration_ms INT NOT NULL,
+    summary_json TEXT NOT NULL
+  );
+
+-- app_learning_version
+CREATE TABLE app_learning_version (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_label TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    parameters_json TEXT NOT NULL,
+    metrics_json TEXT NULL,
+    predecessor_id INTEGER NULL,
+    comparison TEXT NULL,
+    note TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
 -- app_positions
@@ -889,6 +1020,28 @@ CREATE TABLE app_vision_touch (
     line_price REAL NOT NULL,
     deviation_atr REAL NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_world_instrument
+CREATE TABLE app_world_instrument (
+    symbol TEXT NOT NULL,
+    stage INT NOT NULL,
+    engine_health TEXT NOT NULL,
+    pipeline_state TEXT NOT NULL,
+    confidence REAL NULL,
+    freshness TEXT NOT NULL,
+    input_version TEXT NULL,
+    output_version TEXT NULL,
+    trigger TEXT NULL,
+    current_action TEXT NULL,
+    next_action TEXT NULL,
+    blocker_code TEXT NULL,
+    blocker TEXT NULL,
+    dependencies_json TEXT NULL,
+    evidence_json TEXT NULL,
+    evaluated_at TEXT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT PK_app_world_instrument PRIMARY KEY (symbol, stage)
   );
 
 -- audit_logs

@@ -19,6 +19,7 @@ import {
 import { WorkflowEnginePage } from './features/workflow-engine';
 import { MT5ConnectionPage } from './features/mt5-connection';
 import { ChannelAnalysisPage } from './features/channel-analysis';
+import { EconomicIntelligencePage } from './features/economic-intelligence';
 
 const slug = (label: string) => label.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
@@ -29,6 +30,7 @@ const pages: Record<string, React.ComponentType> = {
   'Currency & XAU Strength': Strength,
   'Historical Regime': Regime,
   'Market Scanner': Scanner,
+  'Economic Intelligence': EconomicIntelligencePage,
   'HTF Market Vision': Vision,
   'Channel Analysis': ChannelAnalysisPage,
   'Structural Direction': Direction,

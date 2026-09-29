@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import calendar
 import functools
 import json
 import os
@@ -36,6 +37,7 @@ try:
     import direction_store
     import execution_mt5
     import execution_service
+    import economic_service
     import execution_store
     import history
     import history_store
@@ -74,6 +76,7 @@ except ImportError:
     from bridge.mt5 import channel_analysis, channel_service, channel_store  # type: ignore
     from bridge.mt5 import confirm, confirm_service, confirm_store  # type: ignore
     from bridge.mt5 import direction_service, direction_store  # type: ignore
+    from bridge.mt5 import economic_service  # type: ignore
     from bridge.mt5 import execution_mt5, execution_service, execution_store  # type: ignore
     from bridge.mt5 import history, history_store  # type: ignore
     from bridge.mt5 import learning_service  # type: ignore
@@ -820,6 +823,22 @@ ORCHESTRATOR = autonomy_service.AutonomousOrchestrator(
 )
 
 
+def _econ_quotes(symbols: list[str]) -> dict[str, dict[str, float]]:
+    if not _mt5_ready:
+        return {}
+    out: dict[str, dict[str, float]] = {}
+    with _MT5_LOCK:
+        for symbol in symbols:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick and tick.bid and tick.ask:
+                out[symbol] = {"bid": float(tick.bid), "ask": float(tick.ask)}
+    return out
+
+
+ECONOMIC = economic_service.EconomicService()
+ECONOMIC.bind(publish=ORCHESTRATOR.publish, wake_risk=RISK.mark, wake_learning=LEARNING.mark, quotes=_econ_quotes)
+
+
 def cmd_vision_chart(symbol: str, timeframe: str, bars: int) -> dict[str, Any]:
     """Chart payload: stored closed candles from the Stage 1 store + the persisted Stage 5 channel projected onto them."""
     cfg = vision.TF_CFG[timeframe]
@@ -853,6 +872,81 @@ def _channel_universe() -> list[dict[str, Any]]:
     return [{**item, "enabled": True, "availableTimeframes": list(channel_analysis.TIMEFRAMES)} for item in CHANNELS.instruments()]
 
 
+@_mt5_serialized
+def _channel_market(symbol: str) -> dict[str, Any] | None:
+    """One tick plus the provider's current bar for each source series. The open bar is never written to Stage 1."""
+    if not _mt5_ready:
+        return None
+    mt5.symbol_select(symbol, True)
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None or not tick.bid:
+        return None
+    offset = HISTORY.server_offset
+    now = HISTORY.server_now() or int(tick.time)
+
+    def rates(tf: int, n: int) -> list[tuple]:
+        raw = mt5.copy_rates_from_pos(symbol, tf, 0, n)
+        if raw is None:
+            return []
+        return [(int(r["time"]), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"])) for r in raw]
+
+    return {
+        "bid": float(tick.bid),
+        "ask": float(tick.ask or tick.bid),
+        "tickUtc": int(tick.time) - offset if offset is not None else int(time.time()),
+        "now": int(now),
+        "H1": rates(mt5.TIMEFRAME_H1, 12),
+        "D1": rates(mt5.TIMEFRAME_D1, 1),
+        "W1": rates(mt5.TIMEFRAME_W1, 1),
+        "MN1": rates(mt5.TIMEFRAME_MN1, 1),
+    }
+
+
+def _closed_months(symbol: str, now: int) -> list[tuple]:
+    d = datetime.fromtimestamp(int(now), tz=timezone.utc)
+    start = calendar.timegm((d.year, 1, 1, 0, 0, 0))
+    rows = history_store.candle_full(symbol, "MN1", start, int(now) + 40 * 86400)
+    return [(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])) for r in rows]
+
+
+def _paint_current_candles(channels: dict[str, Any], market: dict[str, Any], closed_mn1: list[tuple]) -> float:
+    """Append each timeframe's open candle and the live position. Channel geometry stays on closed candles."""
+    price = (market["bid"] + market["ask"]) / 2
+    bars = channel_analysis.current_bars(market["now"], market, closed_mn1)
+    for tf, bar in bars.items():
+        snap = channels.get(tf)
+        if not snap:
+            continue
+        painted = channel_analysis.attach_current_candle(snap, {"candles": snap.get("candles") or [], "lines": snap.get("lines") or []}, bar)
+        snap["candles"] = painted["candles"]
+        snap["lines"] = painted["lines"]
+        snap["live"] = channel_analysis.live_view(snap, price)
+    return price
+
+
+def cmd_channel_live(symbol: str) -> dict[str, Any]:
+    """Tick-level price, open candle and live channel position. Safe to poll every second; it does not recalculate structure."""
+    market = _channel_market(symbol)
+    if not market:
+        return {"ok": False, "message": "No live quote"}
+    price = (market["bid"] + market["ask"]) / 2
+    closed = _closed_months(symbol, market["now"])
+    bars = channel_analysis.current_bars(market["now"], market, closed)
+    channels = CHANNELS._cache.get(symbol) or {}
+    payload: dict[str, Any] = {}
+    views: dict[str, Any] = {}
+    for tf, bar in bars.items():
+        snap = channels.get(tf) or {}
+        payload[tf] = channel_analysis.current_bar_payload(snap, bar)
+        if snap:
+            views[tf] = channel_analysis.live_view(snap, price)
+    age = max(0, int(time.time()) - int(market["tickUtc"]))
+    return {
+        "ok": True, "instrument": symbol, "price": price, "at": int(time.time() * 1000), "ageSec": age,
+        "bars": payload, "views": views,
+    }
+
+
 def cmd_channel_snapshot(symbol: str) -> dict[str, Any]:
     """One coherent instrument read: the seven persisted timeframe channels of the latest run, their hierarchy and
     interpretation, chart candles from Stage 1 with the channel projected from the stored definition, and live position."""
@@ -883,15 +977,22 @@ def cmd_channel_snapshot(symbol: str) -> dict[str, Any]:
         snap["candles"] = chart["candles"]
         snap["lines"] = chart["lines"]
         channels[tf] = snap
+    market = _channel_market(symbol)
+    if market:
+        live_price = _paint_current_candles(channels, market, _closed_months(symbol, market["now"]))
     h1 = channels["H1"]
     price = live_price if live_price is not None else h1.get("currentPrice")
     fresh = [c["freshnessSeconds"] for c in channels.values() if c.get("freshnessSeconds") is not None]
+    if market:
+        fresh_tick = max(0, int(time.time()) - int(market["tickUtc"]))
+    else:
+        fresh_tick = None
     stale = any(c.get("dataStatus") == "STALE" for c in channels.values())
     selected = {
         "instrument": symbol, "price": price, "priceSource": "LIVE" if live_price is not None else "LAST_H1_CLOSE",
-        "liveAt": int(live["at"] * 1000) if live else None, "digits": h1.get("digits"),
+        "liveAt": int(time.time() * 1000) if market else (int(live["at"] * 1000) if live else None), "digits": h1.get("digits"),
         "analysedAt": max(int(c.get("analysedAt") or 0) for c in channels.values()),
-        "freshnessSeconds": min(fresh) if fresh else None,
+        "freshnessSeconds": fresh_tick if fresh_tick is not None else (min(fresh) if fresh else None),
         "sourceHealth": "STALE" if stale else health,
         "runId": h["runId"], "stateVersion": h["stateVersion"], "trigger": h["trigger"],
         "channels": channels, "hierarchy": h["hierarchy"], "interpretation": h["interpretation"],
@@ -1226,6 +1327,12 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/autonomy/state":
                 self._json(200, ORCHESTRATOR.state() if ORCHESTRATOR else autonomy_store.state())
                 return
+            if parsed.path == "/economic/snapshot":
+                self._json(200, economic_service.store.snapshot())
+                return
+            if parsed.path == "/economic/audit":
+                self._json(200, {"ok": True, "audit": economic_service.store.recent_audit(120)})
+                return
             if parsed.path == "/learning/state":
                 self._json(200, LEARNING.snapshot(parse_qs(parsed.query)))
                 return
@@ -1347,6 +1454,9 @@ class Handler(BaseHTTPRequestHandler):
                 if symbol not in regime.SYMBOLS:
                     self._json(400, {"ok": False, "message": f"Unknown instrument {symbol}"})
                     return
+                if parsed.path == "/channels/live":
+                    self._json(200, cmd_channel_live(symbol))
+                    return
                 if parsed.path == "/channels/snapshot":
                     self._json(200, cmd_channel_snapshot(symbol))
                     return
@@ -1414,6 +1524,15 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             body = self._read_json()
+            if parsed.path == "/economic/refresh":
+                self._json(202, ECONOMIC.refresh())
+                return
+            if parsed.path == "/economic/policy":
+                self._json(200, ECONOMIC.set_policy(body))
+                return
+            if parsed.path == "/economic/revalidate":
+                self._json(200, ECONOMIC.revalidate(str(body.get("symbol") or "")))
+                return
             if parsed.path == "/autonomy/run":
                 if not ORCHESTRATOR:
                     self._json(503, {"ok": False, "message": "Autonomous orchestrator not started"})
@@ -1706,6 +1825,8 @@ def main() -> None:
         print("[mt5-bridge] Stage 10 Performance & Learning engine started")
         ORCHESTRATOR.start()
         print("[mt5-bridge] persistent Autonomous Orchestrator + Event Bus + World Model started")
+    ECONOMIC.start()
+    print("[mt5-bridge] Economic Intelligence engine started")
     print("[mt5-bridge] keep MetaTrader 5 running; Ctrl+C to stop")
     try:
         server.serve_forever()

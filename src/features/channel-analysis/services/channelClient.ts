@@ -1,4 +1,25 @@
-import type { ChannelAnalysisSnapshot, ChannelTimeframe, ChannelUniverseItem } from '../types';
+import type { ChannelAnalysisSnapshot, ChannelTimeframe, ChannelUniverseItem, LiveView } from '../types';
+
+export interface ChannelLiveBar {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  complete: false;
+  line?: { time: number; upper: number; lower: number; mid: number };
+}
+
+export interface ChannelLiveQuote {
+  ok: boolean;
+  instrument: string;
+  price: number;
+  at: number;
+  ageSec: number;
+  bars: Partial<Record<ChannelTimeframe, ChannelLiveBar>>;
+  views: Partial<Record<ChannelTimeframe, LiveView>>;
+  message?: string;
+}
 
 const BASE = (import.meta.env.VITE_MT5_BRIDGE_URL as string | undefined)?.replace(/\/$/, '') || '/mt5-bridge';
 
@@ -19,6 +40,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const fetchChannelSnapshot = (instrument: string) =>
   request<ChannelAnalysisSnapshot>(`/channels/snapshot?instrument=${encodeURIComponent(instrument)}`);
+
+export const fetchChannelLive = (instrument: string) =>
+  request<ChannelLiveQuote>(`/channels/live?instrument=${encodeURIComponent(instrument)}`);
 
 export const fetchChannelInstruments = () => request<{ ok: boolean; instruments: ChannelUniverseItem[] }>('/channels/instruments');
 

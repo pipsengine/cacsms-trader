@@ -39,6 +39,20 @@ CONFIG: dict[str, Any] = {
 }
 
 
+def _economic_gate() -> dict[str, dict[str, Any]]:
+    """Stage 8 always asks the economic engine. If that state cannot be read, new entries fail closed."""
+    try:
+        import economic
+        import economic_store
+    except ImportError:  # pragma: no cover
+        from bridge.mt5 import economic, economic_store  # type: ignore
+    try:
+        return economic_store.gate_map()
+    except Exception as exc:
+        return {symbol: {"blocks": True, "code": "ECON_UNKNOWN", "reason": f"Economic risk state cannot be determined ({exc})", "factor": 1.0}
+                for symbol in economic.UNIVERSE}
+
+
 def _bucket(x: float | None, step_pct: float) -> int | None:
     if x is None or x <= 0:
         return None
@@ -262,7 +276,8 @@ class RiskService:
             ctx = {"now": inp["now"], "auto": inp["auto"], "corr": inp["corr"], "pending": inp["pending"], "attempts": inp["attempts"],
                    "approvals": inp["approvals"], "brokerMargin": inp["brokerMargin"],
                    "inflight": inp.get("inflight") or [], "handedOff": inp.get("handedOff") or {},
-                   "terminalCurrency": (inp.get("live") or {}).get("currency"), "configHash": risk.config_hash(cfg)}
+                   "terminalCurrency": (inp.get("live") or {}).get("currency"), "configHash": risk.config_hash(cfg),
+                   "economic": _economic_gate()}
             result = risk.evaluate(inp["handoffs"], inp["accounts"], inp["market"], inp["fx"], cfg, ctx)
             if self._prev is None:
                 try:

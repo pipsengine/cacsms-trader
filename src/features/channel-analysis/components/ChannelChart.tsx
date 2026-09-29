@@ -17,6 +17,16 @@ function useWidth(fallback: number) {
   return [ref, width] as const;
 }
 
+const AXIS_MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function cardAxisTime(ms: number, tf: ChannelSnapshot['timeframe']): string {
+  const d = new Date(ms);
+  const mon = AXIS_MON[d.getUTCMonth()];
+  if (tf === 'Y' || tf === 'Q') return String(d.getUTCFullYear());
+  if (tf === 'MN') return `${mon} ${d.getUTCFullYear()}`;
+  if (tf === 'H8' || tf === 'H1') return `${d.getUTCDate()} ${mon}`;
+  return `${d.getUTCDate()} ${mon}`;
+}
+
 const ROLE_COLOR: Record<TouchRole, string> = {
   ANCHOR: '#ffd468',
   CANDIDATE: '#ffa94d',
@@ -29,21 +39,24 @@ type Props = {
   channel: ChannelSnapshot;
   height?: number;
   detail?: boolean;
+  /** Price and time axes on the summary card, matching the Channel Analysis design. */
+  axes?: boolean;
 };
 
 /** Candles from Stage 1 with the channel boundaries recomputed from the persisted definition (sloped, per bar). */
-export function ChannelChart({ channel, height = 155, detail = false }: Props) {
+export function ChannelChart({ channel, height = 155, detail = false, axes = false }: Props) {
   const [wrapRef, W] = useWidth(detail ? 1100 : 320);
   return (
     <div className="ca-chart-wrap" ref={wrapRef}>
-      <ChartSvg channel={channel} height={height} detail={detail} W={W} />
+      <ChartSvg channel={channel} height={height} detail={detail} axes={axes} W={W} />
     </div>
   );
 }
 
-function ChartSvg({ channel, height = 155, detail = false, W }: Props & { W: number }) {
+function ChartSvg({ channel, height = 155, detail = false, axes = false, W }: Props & { W: number }) {
   const H = height;
-  const pad = { l: 4, r: detail ? 64 : 4, t: 8, b: detail ? 20 : 6 };
+  const framed = detail || axes;
+  const pad = { l: 6, r: detail ? 64 : axes ? 52 : 4, t: 8, b: detail ? 20 : axes ? 16 : 6 };
   const candles = channel.candles;
   const valid = isValid(channel);
   const drawLines = channel.lines.length > 0 && (valid || channel.status === 'FORMING');
@@ -104,25 +117,28 @@ function ChartSvg({ channel, height = 155, detail = false, W }: Props & { W: num
   const last = candles[candles.length - 1];
   const priceLine = livePrice ?? last.close;
   const digits = channel.digits;
-  const grid = detail ? [0.2, 0.4, 0.6, 0.8].map((f) => lo + (hi - lo) * f) : [];
+  const grid = framed ? [0.25, 0.5, 0.75].map((f) => lo + (hi - lo) * f) : [];
   const breakoutAt = channel.breakout?.time;
+  const timeIdx = framed
+    ? [0, Math.floor((candles.length - 1) / 2), candles.length - 1].filter((v, i, a) => a.indexOf(v) === i)
+    : [];
 
   return (
     <svg
-      className={`ca-chart${detail ? ' detail' : ''}`}
+      className={`ca-chart${detail ? ' detail' : ''}${axes && !detail ? ' card' : ''}`}
       viewBox={`0 0 ${W} ${H}`}
       width={W}
       height={H}
       role="img"
       aria-label={`${channel.timeframe} candles ${valid ? 'with channel boundaries' : '— no valid channel'}`}
     >
-      {detail && (
+      {framed && (
         <g className="ca-grid">
           {grid.map((p) => (
             <g key={p}>
               <line x1={pad.l} x2={W - pad.r} y1={y(p)} y2={y(p)} />
               <text x={W - pad.r + 4} y={y(p) + 3}>
-                {num(p, digits)}
+                {num(p, Math.min(digits, detail ? digits : 4))}
               </text>
             </g>
           ))}
@@ -147,7 +163,7 @@ function ChartSvg({ channel, height = 155, detail = false, W }: Props & { W: num
           <path className="mid" d={path('mid')} fill="none" />
         </g>
       )}
-      <line className="price" x1={pad.l} x2={W - pad.r} y1={y(priceLine)} y2={y(priceLine)} />
+      {detail && <line className="price" x1={pad.l} x2={W - pad.r} y1={y(priceLine)} y2={y(priceLine)} />}
       {detail && (
         <text className="price-label" x={W - pad.r + 4} y={y(priceLine) + 3}>
           {num(priceLine, digits)}
@@ -161,7 +177,8 @@ function ChartSvg({ channel, height = 155, detail = false, W }: Props & { W: num
           <title>{`${s.kind === 'HIGH' ? 'Swing high' : 'Swing low'} ${num(s.price, digits)} · ${barTime(s.time, channel.timeframe)}`}</title>
         </circle>
       ))}
-      {drawLines &&
+      {detail &&
+        drawLines &&
         touches.map((t) => (
           <circle key={t.id} cx={x(idx.get(t.time)!)} cy={y(t.price)} r={detail ? 5 : 3.2} fill={ROLE_COLOR[t.role]} className="touch">
             <title>{`${t.label} · ${t.boundary.toLowerCase()} · ${num(t.price, digits)} · ${barTime(t.time, channel.timeframe)}`}</title>
@@ -174,14 +191,13 @@ function ChartSvg({ channel, height = 155, detail = false, W }: Props & { W: num
             {t.role === 'OPPOSITE' ? 'Opp' : `#${t.label.match(/#(\d+)/)?.[1] ?? ''}`}
           </text>
         ))}
-      {detail && (
+      {framed && (
         <g className="ca-axis">
-          <text x={pad.l} y={H - 5}>
-            {barTime(candles[0].time, channel.timeframe)}
-          </text>
-          <text x={W - pad.r} y={H - 5} textAnchor="end">
-            {barTime(last.time, channel.timeframe)}
-          </text>
+          {timeIdx.map((i) => (
+            <text key={candles[i].time} x={x(i)} y={H - 3} textAnchor={i === 0 ? 'start' : i === candles.length - 1 ? 'end' : 'middle'}>
+              {detail ? barTime(candles[i].time, channel.timeframe) : cardAxisTime(candles[i].time, channel.timeframe)}
+            </text>
+          ))}
         </g>
       )}
     </svg>

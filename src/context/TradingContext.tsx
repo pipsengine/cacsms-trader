@@ -21,6 +21,7 @@ import { executionStageStatus, getExecutionSnapshot, setControlNow, startExecuti
 import { startLearningStore } from '../features/performance/services/learningStore';
 import { publishStage9 } from '../features/execution/services/executionStage';
 import { startAutonomyStore } from '../features/workflow-engine/services/autonomyStore';
+import { startEconomicStore } from '../features/economic-intelligence';
 import { eventBus } from '../services/eventBus';
 import type { CurrencyStrength, Instrument, Position } from '../types';
 
@@ -311,6 +312,12 @@ export function TradingProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!ready) return;
     return startAutonomyStore();
+  }, [ready]);
+
+  /** Economic Intelligence runs on the bridge. This poll only observes the snapshot and forwards audit rows. */
+  useEffect(() => {
+    if (!ready) return;
+    return startEconomicStore();
   }, [ready]);
 
   /** Stage 3 regime engine owns strength trajectories; the bridge persists them, so no client write-back. */

@@ -195,5 +195,62 @@ class ChangeAndLive(unittest.TestCase):
         self.assertIsNone(ca.zone(empty("D1"), 1.0))
 
 
+class CurrentCandle(unittest.TestCase):
+    def test_open_year_and_quarter_include_the_forming_month(self):
+        closed = [(month(2026, m), 1.0 + m, 1.2 + m, 0.8 + m, 1.1 + m) for m in range(1, 9)]
+        forming = (month(2026, 9), 1.3, 1.5, 1.2, 1.4)
+        now = month(2026, 9) + 10 * DAY
+        year = ca.forming_macro("Y", closed, forming, now)
+        self.assertEqual(year[0], month(2026, 1))
+        self.assertEqual(year[1], closed[0][1])
+        self.assertEqual(year[4], forming[4])
+        self.assertEqual(year[2], max(forming[2], max(r[2] for r in closed)))
+        quarter = ca.forming_macro("Q", closed, forming, now)
+        self.assertEqual(quarter[0], month(2026, 7))
+        self.assertEqual(quarter[4], forming[4])
+
+    def test_h8_bucket_uses_the_open_hour(self):
+        start = 1_700_000_000 // 28800 * 28800
+        h1 = [(start + i * 3600, 1.1, 1.2 + i * 0.01, 1.0, 1.15) for i in range(3)]
+        bar = ca.forming_bucket(h1, start + 3 * 3600, 28800)
+        self.assertEqual(bar[0], start)
+        self.assertEqual(bar[4], h1[-1][4])
+        self.assertEqual(bar[2], h1[-1][2])
+
+    def test_current_bars_cover_every_timeframe(self):
+        now = month(2026, 9) + 15 * DAY
+        h1_open = now // 3600 * 3600
+        rates = {
+            "H1": [(h1_open - 3600, 1.1, 1.2, 1.0, 1.11), (h1_open, 1.11, 1.25, 1.08, 1.2)],
+            "D1": [(now // 86400 * 86400, 1.1, 1.3, 1.0, 1.2)],
+            "W1": [(now // (7 * 86400) * 7 * 86400, 1.0, 1.4, 0.9, 1.2)],
+            "MN1": [(month(2026, 9), 1.0, 1.4, 0.9, 1.2)],
+        }
+        closed = [(month(2026, m), 1.0, 1.1, 0.9, 1.05) for m in range(1, 9)]
+        bars = ca.current_bars(now, rates, closed)
+        self.assertEqual(set(bars), set(ca.TIMEFRAMES))
+        self.assertEqual(bars["H1"][0], h1_open)
+        self.assertEqual(bars["MN"][4], 1.2)
+        self.assertEqual(bars["Y"][0], month(2026, 1))
+
+    def test_open_candle_is_appended_and_then_updated(self):
+        bars = bars_from_closes(channel_closes(300, 0.02, 7), STEP["D1"])
+        s = ca.analyse_timeframe("EURUSD", "D1", bars, READY)
+        chart = ca.chart_payload(s, bars)
+        last = bars[-1][0]
+        forming = (last + STEP["D1"], 1.2, 1.4, 1.1, 1.3)
+        painted = ca.attach_current_candle(s, chart, forming)
+        self.assertEqual(painted["candles"][-1]["time"], forming[0] * 1000)
+        self.assertFalse(painted["candles"][-1]["complete"])
+        self.assertEqual(painted["lines"][-1]["time"], forming[0] * 1000)
+        self.assertGreater(painted["lines"][-1]["upper"], painted["lines"][-1]["lower"])
+        moved = (forming[0], 1.2, 1.6, 1.05, 1.55)
+        again = ca.attach_current_candle(s, painted, moved)
+        self.assertEqual(len(again["candles"]), len(painted["candles"]))
+        self.assertEqual(again["candles"][-1]["high"], 1.6)
+        self.assertEqual(again["candles"][-1]["close"], 1.55)
+        self.assertTrue(chart["candles"][-1]["complete"])
+
+
 if __name__ == "__main__":
     unittest.main()

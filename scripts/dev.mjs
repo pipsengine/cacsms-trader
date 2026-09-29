@@ -9,7 +9,7 @@ let stopping = false;
 function start(command, args, label, { restart = false } = {}) {
   const child = spawn(command, args, {
     cwd: root,
-    env: process.env,
+    env: { ...process.env, CACSMS_ENV: process.env.CACSMS_ENV || 'development' },
     stdio: 'inherit',
     shell: false,
   });

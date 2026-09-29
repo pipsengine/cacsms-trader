@@ -840,6 +840,21 @@ def evaluate_account(opp: dict[str, Any], acct: dict[str, Any], ps: dict[str, An
     else:
         gates["prop"] = _g("N/A", "Not a prop-firm account")
 
+    # Economic Intelligence is a cross-cutting gate. The Stage 8 runner always supplies it.
+    # A missing map means this call is the pure evaluator (unit tests), not a live authorization path.
+    econ_row = None if ctx.get("economic") is None else (ctx["economic"].get(sym) or {
+        "blocks": True, "code": "ECON_UNKNOWN", "reason": "Economic risk state cannot be determined — new entries fail closed", "factor": 1.0,
+    })
+    if econ_row is not None:
+        if econ_row.get("blocks"):
+            gates["economic"] = _g("FAIL", econ_row.get("reason") or "Economic event gate")
+            fail("RISK_BLOCKED", str(econ_row.get("code") or "ECON_EVENT_GATE"), str(econ_row.get("reason") or "Economic event gate"))
+        else:
+            factor = float(econ_row.get("factor") or 1)
+            if econ_row.get("action") == "REDUCE_RISK" and 0 < factor < 1:
+                target *= factor
+            gates["economic"] = _g("PASS", econ_row.get("reason") or "Economic window clear")
+
     need = target * cfg["minRiskFraction"]
     binding = min(cons, key=lambda c: c["headroomPct"]) if cons else None
     risk_pct = max(0.0, min([target] + [c["headroomPct"] for c in cons]))
@@ -1040,6 +1055,10 @@ def evaluate(handoffs: list[dict[str, Any]], accounts: list[dict[str, Any]], mar
             revocations.append({"executionId": a["executionId"], "reason": "Stage 7 no longer confirms the setup"})
         elif o["setupState"] != "QUALIFIED":
             revocations.append({"executionId": a["executionId"], "reason": f"Setup {o['setupState']}: {o['setupReason']}"})
+        elif ctx.get("economic") is not None:
+            gate = ctx["economic"].get(a.get("instrument") or "") or {}
+            if gate.get("blocks"):
+                revocations.append({"executionId": a["executionId"], "reason": gate.get("reason") or "Economic event invalidated the unconsumed authorization"})
     accts = [_account_summary(a, states[a["id"]], cfg) for a in accounts]
     return {"opportunities": opps, "accounts": accts, "authorizations": authorizations, "revocations": revocations, "counters": counters(opps, accts)}
 

@@ -39,6 +39,7 @@ export type InstrumentContext = {
   queued: Map<string, Execution[]>;
   control: { newEntries: boolean; state: string | null; reason: string };
   accountOpenRiskPct: number | null;
+  economic?: Map<string, { state: string; activeEvent: string | null; activeEventId?: string | null; affectedCurrency: string | null; impact: string | null; scheduledAt?: string | null; minutesToEvent: number | null; actual?: string | null; forecast?: string | null; previous?: string | null; surprise: string | null; marketReactionScore?: number | null; spreadCondition: string; volatilityCondition: string; restriction: string; revalidationRequired: boolean; calendarFeedHealth?: string; mt5Health?: string; updatedAt: string | null; blocksNewEntries: boolean; reason: string }>;
 };
 
 type Gate = {
@@ -334,6 +335,16 @@ export function buildTrace(i: Instrument, ctx: InstrumentContext): InstrumentTra
     since: null,
     ageSec: null,
   };
+  const econ = ctx.economic?.get(sym);
+  if (econ?.blocksNewEntries && !open && trace.decision === 'READY') {
+    trace.decision = 'BLOCKED';
+    trace.blocker = econ.reason;
+    trace.waitingFor = 'Economic event gate';
+    trace.nextAction = econ.restriction;
+  }
+  if (econ) {
+    trace.risk = { ...trace.risk, detail: `${trace.risk.detail} · Economic ${econ.restriction}: ${econ.reason}` };
+  }
 
   const key = `${currentGate}|${trace.state}|${decision}`;
   const memo = sinceMemo.get(sym);
@@ -450,5 +461,26 @@ export function buildWorld(i: Instrument, t: InstrumentTrace, ctx: InstrumentCon
       evidence: [...open.map((x) => `${x.direction} ${x.positionState} · ${x.openVolume ?? x.authVolume} lots · ${x.accountName ?? x.accountId}`), `New entries ${ctx.control.newEntries ? 'allowed' : 'blocked'} — ${ctx.control.reason}`],
     }),
   ];
-  return { symbol: sym, bid: i.bid, ask: i.ask, spread: i.spread, decision: t.decision, confidence: t.confidence, tiles };
+  const econ = ctx.economic?.get(sym);
+  if (econ) {
+    tiles.push(tile('economic', 'Economic risk', 8, {
+      value: econ.restriction,
+      sub: `${econ.state} · ${econ.affectedCurrency ?? '—'} ${econ.impact ?? ''} · ${econ.minutesToEvent ?? '—'}m`,
+      at: econ.updatedAt,
+      freshness: econ.updatedAt ? 'LIVE' : 'NONE',
+      evidence: [econ.reason, econ.activeEvent || '', `Spread ${econ.spreadCondition} · volatility ${econ.volatilityCondition}`, econ.revalidationRequired ? 'Structure revalidation required' : ''],
+    }));
+  }
+  return {
+    symbol: sym, bid: i.bid, ask: i.ask, spread: i.spread, decision: t.decision, confidence: t.confidence, tiles,
+    economicRisk: econ ? {
+      state: econ.state, activeEvent: econ.activeEvent, activeEventId: econ.activeEventId, affectedCurrency: econ.affectedCurrency,
+      currency: econ.affectedCurrency, impact: econ.impact, scheduledAt: econ.scheduledAt, minutesToEvent: econ.minutesToEvent,
+      actual: econ.actual, forecast: econ.forecast, previous: econ.previous, surprise: econ.surprise,
+      marketReactionScore: econ.marketReactionScore, spreadCondition: econ.spreadCondition, spreadState: econ.spreadCondition,
+      volatilityCondition: econ.volatilityCondition, volatilityState: econ.volatilityCondition, restriction: econ.restriction,
+      revalidationRequired: econ.revalidationRequired, calendarFeedHealth: econ.calendarFeedHealth, mt5Health: econ.mt5Health,
+      updatedAt: econ.updatedAt,
+    } : undefined,
+  };
 }

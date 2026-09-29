@@ -5,6 +5,7 @@ import {
   Bot,
   BrainCircuit,
   BriefcaseBusiness,
+  CalendarDays,
   ChartNoAxesCombined,
   ChevronsLeft,
   ChevronsRight,
@@ -39,6 +40,7 @@ export const nav: NavItem[] = [
   { label: 'Currency & XAU Strength', icon: Coins },
   { label: 'Historical Regime', icon: History },
   { label: 'Market Scanner', icon: Radar },
+  { label: 'Economic Intelligence', icon: CalendarDays },
   { label: 'HTF Market Vision', icon: Telescope, section: 'MARKET VISION', sectionIcon: Aperture },
   { label: 'Channel Analysis', icon: Spline },
   { label: 'Structural Direction', icon: Waypoints },
@@ -63,9 +65,14 @@ export default function Sidebar({
   collapsed: boolean;
   onCollapsedChange: (v: boolean) => void;
 }) {
-  const { auto, setAuto, positions, riskUsed } = useTrading();
+  const trading = useTrading();
   const autonomy = useAutonomyState();
+  const positions = trading?.positions ?? [];
+  const auto = trading?.auto;
+  const setAuto = trading?.setAuto;
+  const riskUsed = trading?.riskUsed ?? 0;
   const openCount = useMemo(() => positions.filter((x) => x.status === 'ACTIVE').length, [positions]);
+  if (!trading || !setAuto) return null;
   const bridgeUp = Boolean(autonomy?.ok && autonomy.orchestrator?.status);
   const engineLabel = !autonomy
     ? 'CHECKING ENGINE'

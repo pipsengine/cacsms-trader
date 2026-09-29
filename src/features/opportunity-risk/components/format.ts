@@ -59,6 +59,7 @@ export const GATE_LABELS: Record<string, string> = {
   margin: 'Margin',
   permission: 'Account permission',
   globalSwitch: 'Global trading switch',
+  economic: 'Economic event gate',
   authorization: 'Authorization',
 };
 

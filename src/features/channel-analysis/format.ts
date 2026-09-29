@@ -10,6 +10,16 @@ export const TF_LABEL: Record<ChannelTimeframe, string> = {
   H8: '8 Hour',
   H1: '1 Hour',
 };
+/** Card titles as shown on the Channel Analysis design. */
+export const TF_TITLE: Record<ChannelTimeframe, string> = {
+  Y: 'Yearly (1Y)',
+  Q: 'Quarterly (3M)',
+  MN: 'Monthly (1M)',
+  W: 'Weekly (1W)',
+  D1: 'Daily (1D)',
+  H8: '8 Hours',
+  H1: '1 Hour',
+};
 export const GROUP_LABEL = { primary: 'Primary (Y–MN)', intermediate: 'Intermediate (W–D1)', current: 'Current (H8–H1)' };
 
 export const VALID_STATUSES: ChannelStatus[] = ['ACTIVE', 'WEAKENING', 'BROKEN', 'RETESTING'];
@@ -28,6 +38,35 @@ export function pct(v: number | null | undefined, d = 0): string {
 
 export function atr(v: number | null | undefined): string {
   return v == null || !Number.isFinite(v) ? '—' : `${v >= 0 ? '' : '−'}${Math.abs(v).toFixed(2)} ATR`;
+}
+
+export function slopeText(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—';
+  const a = Math.abs(v);
+  const d = a >= 100 ? 1 : a >= 10 ? 2 : a >= 1 ? 3 : 4;
+  return v.toFixed(d);
+}
+
+export function signed(v: number, digits: number): string {
+  const n = v.toFixed(digits);
+  return v > 0 ? `+${n}` : n;
+}
+
+const FLAGS: Record<string, string> = {
+  EUR: '🇪🇺',
+  USD: '🇺🇸',
+  GBP: '🇬🇧',
+  JPY: '🇯🇵',
+  AUD: '🇦🇺',
+  NZD: '🇳🇿',
+  CAD: '🇨🇦',
+  CHF: '🇨🇭',
+  XAU: '🥇',
+};
+
+export function instrumentFlag(symbol: string): string {
+  const base = symbol.toUpperCase().startsWith('XAU') ? 'XAU' : symbol.slice(0, 3).toUpperCase();
+  return FLAGS[base] ?? '◆';
 }
 
 export function age(seconds: number | null | undefined): string {
@@ -94,6 +133,67 @@ export function relTone(r: ChannelRelationship): string {
   if (r === 'REVERSAL_CANDIDATE' || r === 'BREAKOUT') return 'bad';
   if (r === 'RANGE_INTERNAL') return 'info';
   return 'muted';
+}
+
+const REL_PHASE: Record<ChannelRelationship, string> = {
+  PRIMARY: 'PRIMARY',
+  ALIGNED: 'CONTINUATION',
+  CORRECTIVE: 'CORRECTION',
+  COUNTER_CORRECTION: 'COUNTER-CORRECTION',
+  NESTED_CORRECTION: 'NESTED CORRECTION',
+  REVERSAL_CANDIDATE: 'REVERSAL',
+  BREAKOUT: 'BREAKOUT',
+  RANGE_INTERNAL: 'RANGE',
+  UNRESOLVED: 'UNRESOLVED',
+};
+
+/** Footer phase: primary keeps the engine phase; extremes read as near resistance/support; otherwise the hierarchy role. */
+export function displayPhase(c: ChannelSnapshot): string {
+  if (!isValid(c)) return c.status === 'FORMING' ? 'FORMING' : 'NONE';
+  if (c.relationship === 'PRIMARY') return human(c.phase).toUpperCase();
+  const pos = currentView(c).position;
+  if (pos != null && c.direction === 'BULLISH' && pos >= 80) return 'NEAR RESISTANCE';
+  if (pos != null && c.direction === 'BEARISH' && pos <= 20) return 'NEAR SUPPORT';
+  return REL_PHASE[c.relationship];
+}
+
+export function phaseTone(label: string): string {
+  const s = label.toUpperCase();
+  if (s === 'NONE' || s === 'FORMING' || s === 'UNKNOWN' || s === 'UNRESOLVED') return 'muted';
+  if (s.includes('COUNTER')) return 'info';
+  if (s.includes('NESTED') || s.includes('CORRECTION') || s.includes('PULLBACK') || s.includes('REVERSAL') || s.includes('BREAK')) return 'bad';
+  if (s.includes('RESIST') || s.includes('SUPPORT') || s.includes('RANGE')) return 'warn';
+  return 'good';
+}
+
+const TREND_CAPTION: Record<ChannelRelationship, string> = {
+  PRIMARY: 'Primary Trend',
+  ALIGNED: 'Continuation',
+  CORRECTIVE: 'Correction',
+  COUNTER_CORRECTION: 'Counter-Corr.',
+  NESTED_CORRECTION: 'Nested Corr.',
+  REVERSAL_CANDIDATE: 'Reversal',
+  BREAKOUT: 'Breakout',
+  RANGE_INTERNAL: 'Range',
+  UNRESOLVED: 'Unresolved',
+};
+
+export function trendCaption(c: ChannelSnapshot): string {
+  if (!isValid(c)) return 'No channel';
+  if (c.relationship === 'PRIMARY') return 'Primary Trend';
+  const pos = currentView(c).position;
+  if (pos != null && c.direction === 'BULLISH' && pos >= 80) return 'Near Resistance';
+  if (pos != null && c.direction === 'BEARISH' && pos <= 20) return 'Near Support';
+  return TREND_CAPTION[c.relationship];
+}
+
+/** Meter and position colour: direction, with amber when price is pressed into the far boundary. */
+export function posTone(direction: ChannelDirection, position: number | null): string {
+  if (position != null && ((direction === 'BULLISH' && position >= 80) || (direction === 'BEARISH' && position <= 20))) return 'warn';
+  if (direction === 'BEARISH') return 'bad';
+  if (direction === 'RANGE') return 'warn';
+  if (direction === 'BULLISH') return 'good';
+  return '';
 }
 
 /** Position and boundary distances from the live price when available, otherwise from the last closed candle. */

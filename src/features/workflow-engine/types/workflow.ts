@@ -150,6 +150,31 @@ export interface WorldTile {
   evidence: string[];
 }
 
+export interface EconomicRiskState {
+  state: string;
+  activeEvent: string | null;
+  activeEventId?: string | null;
+  affectedCurrency: string | null;
+  currency?: string | null;
+  impact: string | null;
+  scheduledAt?: string | null;
+  minutesToEvent: number | null;
+  actual?: string | null;
+  forecast?: string | null;
+  previous?: string | null;
+  surprise: string | null;
+  marketReactionScore?: number | null;
+  spreadCondition: string;
+  spreadState?: string;
+  volatilityCondition: string;
+  volatilityState?: string;
+  restriction: string;
+  revalidationRequired: boolean;
+  calendarFeedHealth?: string;
+  mt5Health?: string;
+  updatedAt: string | null;
+}
+
 export interface WorldModelRecord {
   symbol: string;
   bid: number;
@@ -158,6 +183,7 @@ export interface WorldModelRecord {
   decision: TraceDecision;
   confidence: number | null;
   tiles: WorldTile[];
+  economicRisk?: EconomicRiskState;
 }
 
 export interface WorkflowEvent {

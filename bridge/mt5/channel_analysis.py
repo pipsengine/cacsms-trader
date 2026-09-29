@@ -599,3 +599,96 @@ def chart_payload(snap: dict[str, Any], bars: list[tuple], limit: int | None = N
         "lines": [{"time": int(b[0]) * 1000, "upper": lines[int(b[0])][1], "lower": lines[int(b[0])][0],
                    "mid": (lines[int(b[0])][0] + lines[int(b[0])][1]) / 2} for b in view if int(b[0]) in lines],
     }
+
+
+def _span(rows: list[tuple], open_ts: int | None = None) -> tuple | None:
+    if not rows:
+        return None
+    g = sorted(rows, key=lambda r: int(r[0]))
+    return (
+        int(open_ts if open_ts is not None else g[0][0]),
+        float(g[0][1]),
+        max(float(r[2]) for r in g),
+        min(float(r[3]) for r in g),
+        float(g[-1][4]),
+    )
+
+
+def forming_macro(tf: str, closed_mn1: list[tuple], forming_mn: tuple | None, now: int) -> tuple | None:
+    """The unfinished Y or Q candle: closed months of the current period plus the open month."""
+    months = PERIOD_MONTHS.get(tf)
+    if not months:
+        return None
+    d = _utc(now)
+    key = (d.year, (d.month - 1) // months)
+    rows = [r for r in closed_mn1 if (_utc(r[0]).year, (_utc(r[0]).month - 1) // months) == key]
+    if forming_mn is not None:
+        fd = _utc(forming_mn[0])
+        if (fd.year, (fd.month - 1) // months) == key and all(int(r[0]) != int(forming_mn[0]) for r in rows):
+            rows.append(forming_mn)
+    return _span(rows)
+
+
+def forming_bucket(rows: list[tuple], now: int, seconds: int) -> tuple | None:
+    """Unfinished fixed-width bar (H8) from the source bars that belong to the current window, including the open source bar."""
+    start = int(now) // seconds * seconds
+    chosen = [r for r in rows if int(r[0]) >= start]
+    return _span(chosen, start)
+
+
+def current_bars(now: int, rates: dict[str, list[tuple]], closed_mn1: list[tuple]) -> dict[str, tuple]:
+    """Open candle for each channel timeframe. `rates` values are ascending OHLC tuples and include the provider's current bar."""
+    out: dict[str, tuple] = {}
+    h1 = rates.get("H1") or []
+    if h1:
+        out["H1"] = tuple(h1[-1][:5])
+        h8 = forming_bucket(h1, now, TF_SEC["H8"])
+        if h8:
+            out["H8"] = h8
+    for src, tf in (("D1", "D1"), ("W1", "W"), ("MN1", "MN")):
+        rows = rates.get(src) or []
+        if rows:
+            out[tf] = tuple(rows[-1][:5])
+    mn = out.get("MN")
+    if mn:
+        year = forming_macro("Y", closed_mn1, mn, now)
+        quarter = forming_macro("Q", closed_mn1, mn, now)
+        if year:
+            out["Y"] = year
+        if quarter:
+            out["Q"] = quarter
+    return out
+
+
+def current_bar_payload(snap: dict[str, Any], bar: tuple) -> dict[str, Any]:
+    """Chart candle for the open bar, with the stored channel projected one step onto it. Detection is unchanged."""
+    t = int(bar[0]) * 1000
+    payload: dict[str, Any] = {
+        "time": t, "open": float(bar[1]), "high": float(bar[2]), "low": float(bar[3]), "close": float(bar[4]), "complete": False,
+    }
+    bounds = live_bounds(snap)
+    if bounds:
+        lo, hi = bounds
+        payload["line"] = {"time": t, "lower": lo, "upper": hi, "mid": (lo + hi) / 2}
+    return payload
+
+
+def attach_current_candle(snap: dict[str, Any], chart: dict[str, Any], bar: tuple | None) -> dict[str, Any]:
+    """Place the open bar on a closed-candle chart. A bar already present is updated in place so the candle tracks the tick."""
+    if not bar:
+        return chart
+    payload = current_bar_payload(snap, bar)
+    candles = list(chart.get("candles") or [])
+    lines = list(chart.get("lines") or [])
+    t = payload["time"]
+    if candles and candles[-1]["time"] > t:
+        return chart
+    if candles and candles[-1]["time"] == t:
+        candles[-1] = {k: payload[k] for k in ("time", "open", "high", "low", "close", "complete")}
+    else:
+        candles.append({k: payload[k] for k in ("time", "open", "high", "low", "close", "complete")})
+    point = payload.get("line")
+    if point:
+        lines = [x for x in lines if x["time"] != t]
+        lines.append(point)
+    return {"candles": candles, "lines": lines}

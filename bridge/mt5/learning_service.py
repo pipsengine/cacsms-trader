@@ -93,6 +93,7 @@ class LearningService:
             started = time.time()
             ensure_learning_schema()
             trade_count = self._ingest_trades()
+            econ_count = self._ingest_economic()
             rejection_count = self._ingest_rejections()
             rejection_count += self._ingest_direction()
             rejection_count += self._ingest_h1()
@@ -115,9 +116,12 @@ class LearningService:
                 "autoApplied": False,
                 "productionUnchanged": not self._promoted_live(),
                 "governance": governance(),
+                "economicOutcomes": econ_count,
             }
             if not trades and not rejection_count:
                 summary["message"] = plan["message"]
+            if econ_count:
+                summary["message"] += f" Recorded {econ_count} economic outcome(s) as diagnostics. Live risk parameters were not changed."
             store.learning_run(trigger, status[:16], trade_count, rejection_count, len(plan["proposals"]), duration, summary)
             self.meta.update({
                 "status": status, "message": summary["message"], "runAt": datetime.now(timezone.utc).isoformat(),
@@ -161,6 +165,31 @@ class LearningService:
                 cur = conn.cursor()
                 cur.execute("UPDATE dbo.app_exec_trade SET stage10_status='LEARNED' WHERE execution_id=? AND stage10_status='PUBLISHED'", item_row["executionId"])
                 conn.commit()
+        return count
+
+    def _ingest_economic(self) -> int:
+        """Completed calendar outcomes become learning evidence. Recommendations stay diagnostic."""
+        try:
+            import economic_store
+        except ImportError:  # pragma: no cover
+            from bridge.mt5 import economic_store  # type: ignore
+        count = 0
+        ids: list[int] = []
+        for row in economic_store.unpublished_outcomes():
+            outcome = row["outcome"]
+            surprise = outcome.get("surprise") if isinstance(outcome.get("surprise"), dict) else {}
+            item = {
+                "key": f"econ:{row['eventId']}:{row['symbol']}", "kind": "ECON_EVENT", "symbol": row["symbol"],
+                "decision": "OBSERVED", "outcome": surprise.get("interpretation"),
+                "expected": {"forecast": outcome.get("forecast"), "previous": outcome.get("previous"), "title": outcome.get("title")},
+                "actual": {"actual": outcome.get("actual"), "move5m": outcome.get("move5m"), "move15m": outcome.get("move15m"),
+                           "move30m": outcome.get("move30m"), "move1h": outcome.get("move1h"), "spread": outcome.get("spreadSpikePct")},
+                "evidence": outcome, "recommendation": {"note": "Diagnostic only. Live risk and trading parameters were not changed."},
+            }
+            if store.record_learning(item):
+                count += 1
+            ids.append(int(row["id"]))
+        economic_store.mark_outcomes_published(ids)
         return count
 
     def _ingest_rejections(self) -> int:

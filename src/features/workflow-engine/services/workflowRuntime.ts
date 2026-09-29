@@ -39,6 +39,7 @@ import type {
 import { fmtAge, readStageSources, type StageSource } from './stageSources';
 import { buildQueue, buildTrace, buildWorld, type InstrumentContext } from './instrumentModel';
 import { toWorkflowEvent } from './eventModel';
+import { getEconomicSnapshot, subscribeEconomic } from '../../economic-intelligence/services/economicStore';
 
 /** Resolve an instrument from the persisted market state; a symbol without a quote fails Stage 1 — nothing is invented. */
 export function resolveInstrument(symbol: string): Instrument {
@@ -479,6 +480,29 @@ export function getWorkflowSnapshot(now = Date.now()): WorkflowSnapshot {
     queued: byKey<Execution>(s9.queue, (x) => x.instrument),
     control: { newEntries, state: control?.state ?? null, reason: controlReason },
     accountOpenRiskPct: run?.summary?.openRiskPct ?? null,
+    economic: new Map((getEconomicSnapshot()?.instruments ?? []).map((row) => [row.symbol, {
+      state: row.state,
+      activeEvent: row.detail.title || row.activeEventId,
+      activeEventId: row.activeEventId,
+      affectedCurrency: row.currency,
+      impact: row.impact,
+      scheduledAt: row.detail.scheduledAt || null,
+      minutesToEvent: row.minutesToEvent,
+      actual: row.detail.actual || null,
+      forecast: row.detail.forecast || null,
+      previous: row.detail.previous || null,
+      surprise: row.surprise,
+      marketReactionScore: row.detail.marketReactionScore ?? null,
+      spreadCondition: row.spreadCondition,
+      volatilityCondition: row.volatilityCondition,
+      restriction: row.restriction,
+      revalidationRequired: row.revalidationRequired,
+      calendarFeedHealth: row.detail.calendarFeedHealth,
+      mt5Health: row.detail.mt5Health,
+      updatedAt: row.updatedAt,
+      blocksNewEntries: row.blocksNewEntries,
+      reason: row.reason,
+    }])),
   };
 
   const instrumentsNow = allPairs.map((s) => resolveInstrument(s));
@@ -647,6 +671,7 @@ export const workflowActions = {
 const BUS_TYPES: TradingEventType[] = [
   'TICK', 'H1_CLOSE', 'H8_CLOSE', 'D1_CLOSE', 'W1_CLOSE', 'MN_CLOSE', 'M15_CLOSE', 'M5_CLOSE', 'DATA_EVENT', 'CHANNEL_APPROACH', 'CHANNEL_BREAK',
   'STRENGTH_CHANGE', 'SCANNER_CHANGE', 'STRUCTURE_CHANGE', 'DIRECTION_CHANGE', 'CONFIRMATION_CHANGE', 'RISK_CHANGE', 'SPREAD_SPIKE', 'POSITION_EVENT', 'RISK_EVENT',
+  'ECON_EVENT_UPCOMING', 'ECON_EVENT_WATCH', 'ECON_PRE_EVENT_GATE', 'ECON_RELEASED', 'ECON_RELEASE_WINDOW', 'ECON_ACTUAL_RECEIVED', 'ECON_SURPRISE_CALCULATED', 'ECON_VOLATILITY_SPIKE', 'ECON_MARKET_SHOCK', 'ECON_SPREAD_SPIKE', 'ECON_REVALIDATION_REQUESTED', 'ECON_STRUCTURE_INVALIDATED', 'ECON_NORMALIZED', 'ECON_FEED_SYNCED', 'ECON_FEED_STALE', 'ECON_FEED_FAILED',
 ];
 
 /** Subscribe to every store the snapshot reads plus the event bus; the stores themselves are owned by the app-level runtime. */
@@ -660,6 +685,7 @@ export function subscribeWorkflowSources(cb: () => void): () => void {
     subscribeH1(cb),
     subscribeRisk(cb),
     subscribeExecution(cb),
+    subscribeEconomic(cb),
     subscribeMT5(() => cb()),
     ...BUS_TYPES.map((t) => eventBus.on(t, () => cb())),
   ];

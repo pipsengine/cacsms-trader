@@ -51,6 +51,7 @@ function tagOf(e: TradingEvent, detail: string): EventTag | null {
 
 function classOf(e: TradingEvent, tag: EventTag | null): EventClass {
   const p = e.payload;
+  if (e.type.startsWith('ECON_')) return s(p.severity).toUpperCase() === 'WARNING' ? 'WARNING' : 'INFO';
   const sev = s(p.severity).toUpperCase();
   if (sev === 'ERROR' || tag === 'BROKER_REJECT') return 'CRITICAL';
   if (tag === 'CONTROL') {

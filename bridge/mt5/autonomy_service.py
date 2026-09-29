@@ -189,6 +189,16 @@ class AutonomousOrchestrator:
         elif event_type == "CHANNEL_CHANGE":
             self._enqueue(event_id, 5, "PUBLISH_WORLD", priority=27, version=f"channels:{_version(payload)}",
                           payload={"reason": event_type})
+        elif event_type in ("ECON_REVALIDATION_REQUESTED", "ECON_STRUCTURE_INVALIDATED", "ECON_RELEASED", "ECON_MARKET_SHOCK", "ECON_RELEASE_WINDOW", "ECON_SPREAD_SPIKE"):
+            version = f"{event_type}:{_version(payload)}:{event_id}"
+            self._enqueue(event_id, 5, "MARK_VISION", symbols=symbols, priority=22, version=version, payload={"reason": event_type})
+            if self.channels:
+                self._enqueue(event_id, 5, "MARK_CHANNELS", symbols=symbols, priority=23, version=version, payload={"reason": event_type})
+            self._enqueue(event_id, 6, "MARK_DIRECTION", symbols=symbols, priority=28, version=version, payload={"reason": event_type})
+            self._enqueue(event_id, 7, "MARK_CONFIRM", symbols=symbols, priority=33, version=version, payload={"reason": event_type})
+            self._enqueue(event_id, 8, "MARK_RISK", symbols=symbols, priority=15, version=version, payload={"reason": event_type})
+        elif event_type in ("ECON_EVENT_UPCOMING", "ECON_EVENT_WATCH", "ECON_PRE_EVENT_GATE", "ECON_SURPRISE_CALCULATED", "ECON_VOLATILITY_SPIKE", "ECON_NORMALIZED", "ECON_FEED_SYNCED", "ECON_FEED_STALE", "ECON_FEED_FAILED", "ECON_ACTUAL_RECEIVED"):
+            self._enqueue(event_id, 8, "MARK_RISK", symbols=symbols, priority=18, version=f"{event_type}:{event_id}", payload={"reason": event_type})
         elif event_type in ("MODEL_OUTCOME_AVAILABLE", "PARAMETER_CHANGED"):
             self._enqueue(event_id, 10, "RUN_LEARNING", symbols=symbols, priority=44, version=f"{event_type}:{event_id}",
                           payload={"reason": event_type})
