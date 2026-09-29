@@ -9,7 +9,7 @@ type Tab = 'calendar' | 'risk' | 'currency' | 'exposure' | 'reference' | 'histor
 type Period = 'today' | 'tomorrow' | 'week' | 'next' | 'custom';
 
 const ZONES = [
-  ['Africa/Lagos', 'WAT (GMT+1)'],
+  ['Africa/Lagos', 'Nigeria (WAT, GMT+1)'],
   ['UTC', 'UTC'],
   ['Europe/London', 'London'],
   ['America/New_York', 'New York'],
