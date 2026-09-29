@@ -26,6 +26,9 @@ try:
     import analysis_gate
     import autonomy_service
     import autonomy_store
+    import channel_analysis
+    import channel_service
+    import channel_store
     import confirm
     import confirm_service
     import confirm_store
@@ -68,6 +71,7 @@ try:
 except ImportError:
     from bridge.mt5 import analysis_gate  # type: ignore
     from bridge.mt5 import autonomy_service, autonomy_store  # type: ignore
+    from bridge.mt5 import channel_analysis, channel_service, channel_store  # type: ignore
     from bridge.mt5 import confirm, confirm_service, confirm_store  # type: ignore
     from bridge.mt5 import direction_service, direction_store  # type: ignore
     from bridge.mt5 import execution_mt5, execution_service, execution_store  # type: ignore
@@ -751,6 +755,27 @@ def _vision_change(symbols: list[str]) -> None:
 VISION = vision_service.VisionService(_vision_ticks, on_run=_vision_change)
 
 
+def _channel_change(symbols: list[str], info: dict[str, Any]) -> None:
+    if ORCHESTRATOR:
+        ORCHESTRATOR.publish("CHANNEL_CHANGE", "CHANNELS", stage=5, symbols=symbols, payload={"runId": info.get("runId")})
+
+
+def _channel_events(symbol: str, events: list[dict[str, Any]]) -> None:
+    if not ORCHESTRATOR:
+        return
+    for e in events[:20]:
+        ORCHESTRATOR.publish(
+            "CHANNEL_EVENT", "CHANNELS", stage=5, symbols=[symbol],
+            severity=channel_store.EVENT_SEVERITY.get(e["type"], "INFO"),
+            payload={"timeframe": e["tf"], "event": e["type"], "barTs": e["ts"], "channelId": e.get("channelId"),
+                     "price": e.get("price"), "detail": e.get("detail")},
+        )
+
+
+CHANNELS = channel_service.ChannelService(_vision_ticks, lambda: bool(_mt5_ready), _channel_change, _channel_events,
+                                          server_now_fn=lambda: HISTORY.server_now())
+
+
 def _scanner_context() -> dict[str, Any]:
     return {"providerOk": bool(HISTORY.provider_ok), "marketOpen": history.fx_market_open(datetime.now(timezone.utc))}
 
@@ -781,6 +806,7 @@ def _on_candles(timeframe: str, symbols: list[str], kind: str = "INCREMENTAL") -
             _regime_trigger_pending.set()
         SCANNER.on_candles(timeframe, symbols, kind)
         VISION.on_candles(timeframe, symbols, kind)
+        CHANNELS.on_candles(timeframe, symbols, kind)
         DIRECTION.on_candles(timeframe, symbols, kind)
         CONFIRM.on_candles(timeframe, symbols, kind)
         RISK.on_candles(timeframe, symbols, kind)
@@ -790,7 +816,7 @@ HISTORY = history.HistoryService(history.MT5Provider(mt5, _MT5_LOCK, _ensure_ter
 
 ORCHESTRATOR = autonomy_service.AutonomousOrchestrator(
     list(regime.SYMBOLS), cmd_regime_run, SCANNER, VISION, DIRECTION, CONFIRM, RISK, EXECUTION, LEARNING,
-    connected_fn=lambda: bool(_mt5_ready),
+    connected_fn=lambda: bool(_mt5_ready), channels=CHANNELS,
 )
 
 
@@ -813,6 +839,66 @@ def cmd_vision_chart(symbol: str, timeframe: str, bars: int) -> dict[str, Any]:
         "lines": [x for x in lines if x["ts"] >= first],
         "channel": ch,
     }
+
+
+def _channel_engine_state() -> tuple[str, str]:
+    health = "CONNECTED" if _mt5_ready else "DISCONNECTED"
+    if analysis_gate.paused():
+        return health, "PAUSED"
+    status = str(CHANNELS.meta.get("status") or "")
+    return health, "RUNNING" if status in ("HEALTHY", "STARTING") else "DEGRADED" if status == "DEGRADED" else "ERROR" if status == "ERROR" else "RUNNING"
+
+
+def _channel_universe() -> list[dict[str, Any]]:
+    return [{**item, "enabled": True, "availableTimeframes": list(channel_analysis.TIMEFRAMES)} for item in CHANNELS.instruments()]
+
+
+def cmd_channel_snapshot(symbol: str) -> dict[str, Any]:
+    """One coherent instrument read: the seven persisted timeframe channels of the latest run, their hierarchy and
+    interpretation, chart candles from Stage 1 with the channel projected from the stored definition, and live position."""
+    started = time.time()
+    health, engine = _channel_engine_state()
+    base = {"ok": True, "generatedAt": int(started * 1000), "health": health, "engineState": engine,
+            "universe": _channel_universe(), "service": {k: CHANNELS.meta.get(k) for k in
+                                                         ("status", "message", "runAt", "runs", "errors", "lastError", "configVersion", "durationMs")}}
+    h = channel_store.hierarchy(symbol)
+    if not h:
+        return {**base, "selected": None, "events": [], "latencyMs": int((time.time() - started) * 1000),
+                "message": f"{symbol} has not completed its first autonomous channel analysis yet"}
+    now = CHANNELS.server_now()
+    series = history_store.series_all()
+    live = CHANNELS.live_price(symbol)
+    live_price = live["price"] if live and live.get("fresh") else None
+    mn1 = history_store.candle_tail(symbol, "MN1", channel_service.CONFIG["mn1History"])
+    channels: dict[str, Any] = {}
+    for tf in channel_analysis.TIMEFRAMES:
+        snap = dict(h["channels"][tf])
+        bars = CHANNELS.load_bars(symbol, tf, mn1)
+        chart = channel_analysis.chart_payload(snap, bars)
+        row = series.get((symbol, channel_analysis.SOURCE_TF[tf]))
+        close_ms = snap.get("lastCandleClose")
+        snap["freshnessSeconds"] = max(0, now - int(close_ms / 1000)) if close_ms else None
+        snap["pendingRecalculation"] = bool(row and row.get("latest_ts") != snap.get("sourceBarTs"))
+        snap["live"] = channel_analysis.live_view(snap, live_price) if live_price is not None else None
+        snap["candles"] = chart["candles"]
+        snap["lines"] = chart["lines"]
+        channels[tf] = snap
+    h1 = channels["H1"]
+    price = live_price if live_price is not None else h1.get("currentPrice")
+    fresh = [c["freshnessSeconds"] for c in channels.values() if c.get("freshnessSeconds") is not None]
+    stale = any(c.get("dataStatus") == "STALE" for c in channels.values())
+    selected = {
+        "instrument": symbol, "price": price, "priceSource": "LIVE" if live_price is not None else "LAST_H1_CLOSE",
+        "liveAt": int(live["at"] * 1000) if live else None, "digits": h1.get("digits"),
+        "analysedAt": max(int(c.get("analysedAt") or 0) for c in channels.values()),
+        "freshnessSeconds": min(fresh) if fresh else None,
+        "sourceHealth": "STALE" if stale else health,
+        "runId": h["runId"], "stateVersion": h["stateVersion"], "trigger": h["trigger"],
+        "channels": channels, "hierarchy": h["hierarchy"], "interpretation": h["interpretation"],
+        "lifecycle": channel_store.lifecycle(symbol),
+    }
+    return {**base, "selected": selected, "events": channel_store.recent_events(symbol, 80),
+            "latencyMs": int((time.time() - started) * 1000)}
 
 
 def _scanner_state() -> dict[str, Any]:
@@ -1240,6 +1326,33 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json(200, cmd_h1_chart(symbol, int(_q(qs, "bars") or 180)))
                 return
+            if parsed.path.startswith("/channels/"):
+                qs = parse_qs(parsed.query)
+                if parsed.path == "/channels/instruments":
+                    self._json(200, {"ok": True, "instruments": _channel_universe()})
+                    return
+                if parsed.path == "/channels/state":
+                    health, engine = _channel_engine_state()
+                    self._json(200, {"ok": True, "health": health, "engineState": engine, "service": CHANNELS.meta,
+                                     "summary": CHANNELS.summary(), "runs": channel_store.recent_runs(20)})
+                    return
+                if parsed.path == "/channels/world":
+                    self._json(200, {"ok": True, "instruments": channel_store.world_rows()})
+                    return
+                if parsed.path == "/channels/events":
+                    sym = (_q(qs, "instrument") or "").upper() or None
+                    self._json(200, {"ok": True, "events": channel_store.recent_events(sym, int(_q(qs, "limit") or 100))})
+                    return
+                symbol = (_q(qs, "instrument") or _q(qs, "symbol") or "").upper()
+                if symbol not in regime.SYMBOLS:
+                    self._json(400, {"ok": False, "message": f"Unknown instrument {symbol}"})
+                    return
+                if parsed.path == "/channels/snapshot":
+                    self._json(200, cmd_channel_snapshot(symbol))
+                    return
+                if parsed.path == "/channels/hierarchy":
+                    self._json(200, {"ok": True, "hierarchy": channel_store.hierarchy(symbol)})
+                    return
             if parsed.path.startswith("/vision/"):
                 qs = parse_qs(parsed.query)
                 if parsed.path == "/vision/state":
@@ -1329,7 +1442,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = cmd_enrich(body)
                 self._json(200 if result.get("ok") else 400, result)
                 return
-            if parsed.path in ("/scanner/run", "/vision/run", "/direction/run", "/h1/run", "/risk/run") and analysis_gate.paused():
+            if parsed.path in ("/scanner/run", "/vision/run", "/direction/run", "/h1/run", "/risk/run", "/channels/reanalyse") and analysis_gate.paused():
                 self._json(409, {"ok": False, "paused": True, "message": "Analysis PAUSED by the operator — resume analysis before re-running a stage"})
                 return
             if parsed.path == "/regime/run":
@@ -1430,6 +1543,22 @@ class Handler(BaseHTTPRequestHandler):
                 if parsed.path == "/execution/reconcile":
                     self._json(200, EXECUTION.request_reconcile(actor))
                     return
+            if parsed.path == "/channels/reanalyse":
+                symbol = str(body.get("instrument") or body.get("symbol") or "").strip().upper()
+                if symbol and symbol not in regime.SYMBOLS:
+                    self._json(400, {"ok": False, "message": f"Unknown instrument {symbol}"})
+                    return
+                tfs = [t for t in (body.get("timeframes") or []) if t in channel_analysis.TIMEFRAMES] or None
+                reason = f"MANUAL_REANALYSE {str(body.get('reason') or 'operator diagnostic')[:120]}"
+                targets = [symbol] if symbol else None
+                if ORCHESTRATOR:
+                    event_id = ORCHESTRATOR.publish("CHANNEL_REANALYSE_REQUESTED", "OPERATOR", stage=5, symbols=targets,
+                                                    trigger={"reason": reason, "timeframes": tfs}, payload={"reason": reason, "timeframes": tfs})
+                else:
+                    event_id = None
+                    CHANNELS.mark(targets, reason, tfs)
+                self._json(202, {"ok": True, "eventId": event_id, "message": "Channel re-analysis queued on the autonomous engine"})
+                return
             if parsed.path == "/vision/run":
                 symbol = str(body.get("symbol") or "").upper()
                 targets = [symbol] if symbol in regime.SYMBOLS else list(regime.SYMBOLS)
@@ -1525,6 +1654,7 @@ def main() -> None:
         risk_store.ensure_risk_schema()
         execution_store.ensure_schema()
         autonomy_store.ensure_schema()
+        channel_store.ensure_schema()
         print("[mt5-bridge] S1-S10 runtime + autonomy control-plane schema ready")
         history_ready = True
     except Exception as exc:
@@ -1562,6 +1692,8 @@ def main() -> None:
         print("[mt5-bridge] Stage 4 Market Scanner engine started")
         VISION.start()
         print("[mt5-bridge] Stage 5 HTF Market Vision engine started")
+        CHANNELS.start()
+        print("[mt5-bridge] Channel Analysis engine started (Y/Q/MN/W/D1/H8/H1)")
         DIRECTION.start()
         print("[mt5-bridge] Stage 6 Structural Direction engine started")
         CONFIRM.start()

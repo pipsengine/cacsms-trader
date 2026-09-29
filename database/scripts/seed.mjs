@@ -24,7 +24,7 @@ if (instrumentCount !== 29) {
 
 db.prepare(
   `INSERT INTO audit_logs(action, entity_type, entity_id, details_json, severity)
-   VALUES ('SEED','database','cacsms-trader.db', ?, 'INFO')`,
+   VALUES ('SEED','database','db_cacsms-trader.db', ?, 'INFO')`,
 ).run(JSON.stringify({ instruments: instrumentCount, currencies: currencyCount }));
 
 db.close();

@@ -29,6 +29,24 @@ TF_CFG: dict[str, dict[str, Any]] = {
            "invalidBars": 40, "chartBars": 280},
 }
 
+# Channel Analysis macro timeframes (Y/Q are aggregated from closed MN1 candles). Same swing, touch, parallel and
+# breakout rules; pivots, anchor gaps and invalidation windows are scaled to the far smaller bar counts.
+# Kept out of TF_CFG so Stage 5 and its /vision endpoints only ever see D1/H8/H1.
+MACRO_TF_CFG: dict[str, dict[str, Any]] = {
+    "Y": {"lookback": 60, "pivot": 1, "minSwingAtr": 0.5, "minBars": 7, "maxSwings": 12, "minAnchorGap": 2,
+          "invalidBars": 2, "chartBars": 40},
+    "Q": {"lookback": 120, "pivot": 2, "minSwingAtr": 0.75, "minBars": 16, "maxSwings": 14, "minAnchorGap": 3,
+          "invalidBars": 4, "chartBars": 80},
+    "MN": {"lookback": 180, "pivot": 2, "minSwingAtr": 0.8, "minBars": 36, "maxSwings": 14, "minAnchorGap": 4,
+           "invalidBars": 8, "chartBars": 120},
+    "W": {"lookback": 260, "pivot": 3, "minSwingAtr": 1.0, "minBars": 104, "maxSwings": 14, "minAnchorGap": 5,
+          "invalidBars": 20, "chartBars": 200},
+}
+
+
+def tf_cfg(tf: str) -> dict[str, Any]:
+    return TF_CFG[tf] if tf in TF_CFG else MACRO_TF_CFG[tf]
+
 CONFIG: dict[str, Any] = {
     "atrLen": 14,
     "atrSlowLen": 50,
@@ -162,7 +180,7 @@ def _scan_breaks(s: _Series, line, sgn_out: int, start: int, atr: list[float]) -
 
 
 def _build(tf: str, s: _Series, side: str, A: dict, B: dict, piv: list[dict], atr: list[float]) -> dict[str, Any] | None:
-    C = TF_CFG[tf]
+    C = tf_cfg(tf)
     ia, ib = A["i"], B["i"]
     if ib - ia < C["minAnchorGap"]:
         return None
@@ -190,7 +208,7 @@ def _build(tf: str, s: _Series, side: str, A: dict, B: dict, piv: list[dict], at
         out: list[dict] = []
         for p in piv:
             if p["kind"] == side and ia <= p["i"] < end and abs(p["p"] - line(p["i"])) <= tt * atr[p["i"]]:
-                if out and p["i"] - out[-1]["i"] <= TF_CFG[tf]["pivot"]:
+                if out and p["i"] - out[-1]["i"] <= C["pivot"]:
                     continue
                 out.append(p)
         return out
@@ -227,7 +245,7 @@ def _build(tf: str, s: _Series, side: str, A: dict, B: dict, piv: list[dict], at
     t_o: list[dict] = []
     for p in piv:
         if p["kind"] != side and ia <= p["i"] < end_pre and abs(p["p"] - opp_line(p["i"])) <= tt * atr[p["i"]]:
-            if t_o and p["i"] - t_o[-1]["i"] <= TF_CFG[tf]["pivot"]:
+            if t_o and p["i"] - t_o[-1]["i"] <= C["pivot"]:
                 continue
             t_o.append(p)
 
@@ -255,7 +273,7 @@ def _build(tf: str, s: _Series, side: str, A: dict, B: dict, piv: list[dict], at
 
     invalid_hint = False
     if brk is not None:
-        if (s.n - 1 - brk) > TF_CFG[tf]["invalidBars"]:
+        if (s.n - 1 - brk) > C["invalidBars"]:
             invalid_hint = True
         else:
             up = brk_side_sgn > 0
@@ -297,7 +315,7 @@ def _fmt(p: float) -> str:
 
 def analyse_tf(tf: str, bars: list[tuple]) -> dict[str, Any]:
     """Full structural read for one timeframe. `bars` must be validated closed candles, ascending."""
-    C = TF_CFG[tf]
+    C = tf_cfg(tf)
     s = _Series(bars)
     n = s.n
     atr = wilder_atr(s.h, s.l, s.c, CONFIG["atrLen"])
@@ -619,8 +637,8 @@ def channel_lines(defn: dict[str, Any] | None, ts: list[int], project: int, tf: 
 def swing_points(tf: str, bars: list[tuple]) -> list[dict[str, Any]]:
     s = _Series(bars)
     atr = wilder_atr(s.h, s.l, s.c, CONFIG["atrLen"])
-    piv = pivots(s.h, s.l, TF_CFG[tf]["pivot"])
-    return [{"ts": s.ts[p["i"]], "kind": p["kind"], "price": p["p"]} for p in zigzag(piv, atr, TF_CFG[tf]["minSwingAtr"])]
+    piv = pivots(s.h, s.l, tf_cfg(tf)["pivot"])
+    return [{"ts": s.ts[p["i"]], "kind": p["kind"], "price": p["p"]} for p in zigzag(piv, atr, tf_cfg(tf)["minSwingAtr"])]
 
 
 # ---------------------------------------------------------------- data readiness + instrument synthesis
@@ -630,7 +648,7 @@ DATA_RANK = {"BLOCKED": 0, "INSUFFICIENT_DATA": 1, "WARMING_UP": 2, "STALE": 3, 
 
 def data_status(tf: str, series: dict[str, Any] | None, available: int) -> tuple[str, str]:
     """Map the Stage 1 series checkpoint + stored closed-bar count to a Stage 5 readiness state with the exact reason."""
-    need = TF_CFG[tf]["minBars"]
+    need = tf_cfg(tf)["minBars"]
     if not series:
         return ("INSUFFICIENT_DATA" if available < need else "WARMING_UP"), f"{tf}: no Stage 1 series checkpoint ({available}/{need} bars)"
     st = series.get("status") or "WARMING_UP"

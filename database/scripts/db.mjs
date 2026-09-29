@@ -18,7 +18,7 @@ export function detectRuntimeMode() {
 }
 
 export function resolveDatabasePath() {
-  const url = process.env.DATABASE_URL || 'file:./database/cacsms-trader.db';
+  const url = process.env.DATABASE_URL || 'file:./database/db_cacsms-trader.db';
   const file = url.startsWith('file:') ? url.slice('file:'.length) : url;
   return path.isAbsolute(file) ? file : path.resolve(ROOT, file);
 }

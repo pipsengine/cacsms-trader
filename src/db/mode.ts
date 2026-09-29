@@ -28,7 +28,7 @@ export function isDatabaseWritable(mode = getDatabaseRuntimeMode()) {
   return mode === 'LOCAL_WRITABLE';
 }
 
-export const DATABASE_URL_DEFAULT = 'file:./database/cacsms-trader.db';
+export const DATABASE_URL_DEFAULT = 'file:./database/db_cacsms-trader.db';
 
 export function resolveDatabaseUrl(env: EnvMap = readEnv()) {
   return env.DATABASE_URL || DATABASE_URL_DEFAULT;

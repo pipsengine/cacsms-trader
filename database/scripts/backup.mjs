@@ -7,7 +7,7 @@ console.log(`[db:backup] mode=${mode}`);
 
 fs.mkdirSync(PATHS.backups, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const dest = path.join(PATHS.backups, `cacsms-trader-${stamp}.db`);
+const dest = path.join(PATHS.backups, `db_cacsms-trader-${stamp}.db`);
 
 await db.backup(dest);
 db.close();

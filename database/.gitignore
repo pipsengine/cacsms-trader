@@ -1,7 +1,7 @@
 # Runtime SQLite database (authoritative local/central store)
-database/cacsms-trader.db
-database/cacsms-trader.db-wal
-database/cacsms-trader.db-shm
+database/db_cacsms-trader.db
+database/db_cacsms-trader.db-wal
+database/db_cacsms-trader.db-shm
 
 # Local backups — keep folder, ignore artifacts
 database/backups/*

@@ -17,7 +17,7 @@ database/
 | **Local / central server** | `READ + WRITE` (`LOCAL_WRITABLE`) |
 | **Vercel serverless** | Repository DB file is **NOT** trusted as persistent writable storage (`VERCEL_READONLY`) |
 
-Do not implement workarounds that assume Vercel can permanently mutate `database/cacsms-trader.db`.
+Do not implement workarounds that assume Vercel can permanently mutate `database/db_cacsms-trader.db`.
 The TypeScript data-access ports in `src/db` stay portable so a future managed database can replace SQLite without redesigning Workflow Engine, MT5, Risk, or UI modules.
 
 ## Configure

@@ -20,10 +20,10 @@ from typing import Any, Callable
 try:
     import analysis_gate
     import autonomy_store as store
-    import confirm_store, direction_store, execution_store, risk_store, scanner_store, vision_store
+    import channel_store, confirm_store, direction_store, execution_store, risk_store, scanner_store, vision_store
 except ImportError:  # pragma: no cover
     from bridge.mt5 import analysis_gate, autonomy_store as store  # type: ignore
-    from bridge.mt5 import confirm_store, direction_store, execution_store, risk_store, scanner_store, vision_store  # type: ignore
+    from bridge.mt5 import channel_store, confirm_store, direction_store, execution_store, risk_store, scanner_store, vision_store  # type: ignore
 
 SERVICE = {"loopSec": 1, "heartbeatSec": 5, "worldRefreshSec": 15, "regimeRefreshSec": 60}
 # Vision marks are symbol-scoped. One symbol's failure retries only that symbol.
@@ -54,9 +54,11 @@ def _engine_health(meta: dict[str, Any] | None, *, fallback: str = "OFFLINE") ->
 class AutonomousOrchestrator:
     def __init__(self, symbols: list[str], regime_run: Callable[[dict[str, Any]], dict[str, Any]], scanner: Any, vision: Any,
                  direction: Any, confirm: Any, risk: Any, execution: Any, learning: Any,
-                 connected_fn: Callable[[], bool], world_reader: Callable[[], dict[str, Any]] | None = None):
+                 connected_fn: Callable[[], bool], world_reader: Callable[[], dict[str, Any]] | None = None,
+                 channels: Any = None):
         self.symbols = symbols
         self.regime_run = regime_run
+        self.channels = channels
         self.scanner, self.vision, self.direction = scanner, vision, direction
         self.confirm, self.risk, self.execution, self.learning = confirm, risk, execution, learning
         self.connected_fn = connected_fn
@@ -114,6 +116,8 @@ class AutonomousOrchestrator:
             self._enqueue(event_id, 2, "RUN_REGIME", priority=10, version=version, payload={"reason": event_type})
             self._enqueue(event_id, 4, "MARK_SCANNER", priority=20, version=version, payload={"reason": event_type})
             self._enqueue(event_id, 5, "MARK_VISION", symbols=self.symbols, priority=25, version=version, payload={"reason": event_type})
+            if self.channels:
+                self._enqueue(event_id, 5, "MARK_CHANNELS", priority=26, version=version, payload={"reason": event_type})
             self._enqueue(event_id, 6, "MARK_DIRECTION", priority=30, version=version, payload={"reason": event_type})
             self._enqueue(event_id, 7, "MARK_CONFIRM", symbols=self.symbols, priority=35, version=version, payload={"reason": event_type})
             self._enqueue(event_id, 8, "MARK_RISK", priority=40, version=version, payload={"reason": event_type})
@@ -131,6 +135,9 @@ class AutonomousOrchestrator:
             if tf in ("D1", "H8"):
                 self._enqueue(event_id, 5, "MARK_VISION", symbols=symbols, priority=25, version=ident,
                               payload={"reason": f"{payload.get('kind')} {tf}"})
+            if self.channels and tf in ("MN1", "W1", "D1", "H8", "H1"):
+                self._enqueue(event_id, 5, "MARK_CHANNELS", symbols=symbols, priority=26, version=ident,
+                              payload={"reason": f"{'HISTORY_REPAIR' if payload.get('kind') == 'REPAIR' else 'NEW_CANDLE'} {tf}", "timeframe": tf})
             if tf in ("D1", "H8", "H1"):
                 self._enqueue(event_id, 6, "MARK_DIRECTION", symbols=symbols, priority=30, version=ident,
                               payload={"reason": f"{payload.get('kind')} {tf}"})
@@ -176,6 +183,12 @@ class AutonomousOrchestrator:
             else:
                 self._enqueue(event_id, 10, "RUN_LEARNING", symbols=symbols, priority=48, version=f"managed:{payload.get('what')}:{event_id}",
                               payload={"reason": "POSITION_MANAGED"})
+        elif event_type == "CHANNEL_REANALYSE_REQUESTED" and self.channels:
+            self._enqueue(event_id, 5, "MARK_CHANNELS", symbols=symbols or None, priority=24,
+                          payload={"reason": str(payload.get("reason") or "MANUAL_REANALYSE"), "timeframes": payload.get("timeframes")})
+        elif event_type == "CHANNEL_CHANGE":
+            self._enqueue(event_id, 5, "PUBLISH_WORLD", priority=27, version=f"channels:{_version(payload)}",
+                          payload={"reason": event_type})
         elif event_type in ("MODEL_OUTCOME_AVAILABLE", "PARAMETER_CHANGED"):
             self._enqueue(event_id, 10, "RUN_LEARNING", symbols=symbols, priority=44, version=f"{event_type}:{event_id}",
                           payload={"reason": event_type})
@@ -195,6 +208,8 @@ class AutonomousOrchestrator:
         self._enqueue(event_id, 2, "RUN_REGIME", priority=10, version=f"{version}:{event_id}", payload={"reason": reason})
         self._enqueue(event_id, 4, "MARK_SCANNER", symbols=symbols or None, priority=20, payload={"reason": reason})
         self._enqueue(event_id, 5, "MARK_VISION", symbols=symbols or self.symbols, priority=25, payload={"reason": reason})
+        if self.channels:
+            self._enqueue(event_id, 5, "MARK_CHANNELS", symbols=symbols or None, priority=26, payload={"reason": f"DIAGNOSTIC {reason}"})
         self._enqueue(event_id, 6, "MARK_DIRECTION", priority=30, payload={"reason": reason})
         self._enqueue(event_id, 7, "MARK_CONFIRM", symbols=symbols or self.symbols, priority=35, payload={"reason": reason})
         self._enqueue(event_id, 8, "MARK_RISK", symbols=symbols or None, priority=40, payload={"reason": reason})
@@ -286,6 +301,10 @@ class AutonomousOrchestrator:
                 self.scanner.mark(reason)
             elif action == "MARK_VISION":
                 self.vision.mark(symbols, reason)
+            elif action == "MARK_CHANNELS":
+                self.channels.mark(symbols, reason, payload.get("timeframes") or self.channels.derived(payload.get("timeframe")))
+            elif action == "PUBLISH_WORLD":
+                self.refresh_world(reason)
             elif action == "MARK_DIRECTION":
                 self.direction.mark(reason)
             elif action == "MARK_CONFIRM":
@@ -355,7 +374,9 @@ class AutonomousOrchestrator:
         except Exception:
             control = {**control, "tradingEnabled": False}
         regime = safe("regime", scanner_store.regime_meta, {}) or {}
+        channel_rows = safe("channels", channel_store.world_rows, []) if self.channels else []
         return {
+            "channels": channel_rows,
             "connected": bool(self.connected_fn()),
             "engines": {
                 "S1": "HEALTHY" if self.connected_fn() else "DEGRADED",
@@ -363,6 +384,7 @@ class AutonomousOrchestrator:
                 "S3": _engine_health({"status": regime.get("status")}, fallback="OFFLINE"),
                 "S4": _engine_health(self.scanner.meta),
                 "S5": _engine_health(self.vision.meta),
+                "CHANNELS": _engine_health(self.channels.meta) if self.channels else "OFFLINE",
                 "S6": _engine_health(self.direction.meta),
                 "S7": _engine_health(self.confirm.meta),
                 "S8": _engine_health(self.risk.meta),
@@ -390,6 +412,7 @@ class AutonomousOrchestrator:
         regime = snap.get("regime") or {}
         rows = {r["symbol"]: r for r in snap.get("scanner") or []}
         vision = {r["symbol"]: r for r in snap.get("vision") or []}
+        channels = {r["symbol"]: {k: v for k, v in r.items() if k != "narrative"} for r in snap.get("channels") or []}
         direction = {r["symbol"]: r for r in snap.get("direction") or []}
         confirm = {r["symbol"]: r for r in snap.get("confirm") or []}
         opportunities: dict[str, list[dict[str, Any]]] = {}
@@ -441,6 +464,10 @@ class AutonomousOrchestrator:
             s5 = vision.get(symbol) or {"status": "WAITING", "reason": "Awaiting Stage 4 qualification", "reasonCode": "AWAITING_PROMOTION"}
             if not promoted and s5.get("status") == "READY":
                 s5 = {**s5, "status": "STALE", "reason": "Stage 5 output kept as last-known — Stage 4 is not a current promotion", "reasonCode": "UPSTREAM_NOT_CURRENT"}
+            hierarchy = channels.get(symbol)
+            if hierarchy:
+                deps = s5.get("upstream") or s5.get("stage1") or s5.get("dependencies")
+                s5 = {**s5, "upstream": {**(deps if isinstance(deps, dict) else {"stage": deps} if deps else {}), "channelHierarchy": hierarchy}}
             self._put(symbol, 5, {**s5, "trigger": trigger}, engine_health=engines.get("S5", "OFFLINE"), state_key="status",
                       passed=promoted and s5.get("status") == "READY", next_action="React to the next D1/H8 close or channel event")
             s6 = direction.get(symbol) or {"state": "WAITING", "reason": "Awaiting Stage 5 structure", "reasonCode": "AWAITING_STRUCTURE"}
@@ -509,7 +536,7 @@ class AutonomousOrchestrator:
         out["orchestrator"] = self.meta
         out["engines"] = {
             "S1": {"health": "HEALTHY" if self.connected_fn() else "DEGRADED"},
-            "S4": self.scanner.meta, "S5": self.vision.meta, "S6": self.direction.meta,
+            "S4": self.scanner.meta, "S5": self.vision.meta, "CHANNELS": self.channels.meta if self.channels else None, "S6": self.direction.meta,
             "S7": self.confirm.meta, "S8": self.risk.meta, "S9": self.execution.meta, "S10": self.learning.meta,
         }
         return out
