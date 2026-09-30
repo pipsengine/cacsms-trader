@@ -25,11 +25,14 @@ except ImportError:  # pragma: no cover
     from bridge.mt5 import vision  # type: ignore
 
 TIMEFRAMES: tuple[str, ...] = ("Y", "Q", "MN", "W", "D1", "H8", "H1")
-SOURCE_TF = {"Y": "MN1", "Q": "MN1", "MN": "MN1", "W": "W1", "D1": "D1", "H8": "H8", "H1": "H1"}
-DERIVED: dict[str, tuple[str, ...]] = {"MN1": ("Y", "Q", "MN"), "W1": ("W",), "D1": ("D1",), "H8": ("H8",), "H1": ("H1",)}
-TF_LABEL = {"Y": "Yearly", "Q": "Quarterly", "MN": "Monthly", "W": "Weekly", "D1": "Daily", "H8": "8 Hour", "H1": "1 Hour"}
+SOURCE_TF = {"Y": "MN1", "Q": "MN1", "MN": "MN1", "W": "W1", "D1": "D1", "H8": "H8", "H1": "H1", "M15": "M15", "M5": "M5"}
+DERIVED: dict[str, tuple[str, ...]] = {"MN1": ("Y", "Q", "MN"), "W1": ("W",), "D1": ("D1",), "H8": ("H8",), "H1": ("H1",), "M15": ("M15",), "M5": ("M5",)}
+TF_LABEL = {"Y": "Yearly", "Q": "Quarterly", "MN": "Monthly", "W": "Weekly", "D1": "Daily", "H8": "8 Hour", "H1": "1 Hour",
+            "M15": "15 Minute", "M5": "5 Minute"}
 PERIOD_MONTHS = {"Y": 12, "Q": 3}
-TF_SEC = {"W": 7 * 86400, "D1": 86400, "H8": 8 * 3600, "H1": 3600}
+TF_SEC = {"W": 7 * 86400, "D1": 86400, "H8": 8 * 3600, "H1": 3600, "M15": 900, "M5": 300}
+# M15/M5 are execution channels. They are analysed on demand and are not part of the Y–H1 hierarchy publication.
+EXECUTION_TIMEFRAMES: tuple[str, ...] = ("M15", "M5")
 GROUPS = {"primary": ("Y", "Q", "MN"), "intermediate": ("W", "D1"), "current": ("H8", "H1")}
 
 CONFIG: dict[str, Any] = {

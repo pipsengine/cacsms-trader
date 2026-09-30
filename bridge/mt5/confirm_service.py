@@ -33,7 +33,7 @@ CONFIG: dict[str, Any] = {
     "staleRunSec": 1800,   # Stage 6 older than this is treated as stale upstream
 }
 
-ACTIVE = ("MONITORING", "PULLBACK", "SETUP_FORMING", "CONFIRMING", "CONFIRMED")
+ACTIVE = ("MONITORING", "PULLBACK", "SETUP_FORMING", "CONFIRMING", "BREAKOUT_CONFIRMED_WAIT_RETEST", "CONFIRMED")
 
 
 def _s6_sig(o: dict[str, Any]) -> tuple:
@@ -54,6 +54,7 @@ class ConfirmService:
         self._seen: dict[str, Any] | None = None
         self._decisions: dict[str, dict[str, Any]] | None = None
         self._last_full = 0.0
+        self._last_h1: dict[str, int] = {}
         self.meta: dict[str, Any] = {"status": "STARTING", "message": "Stage 7 starting", "runs": 0, "errors": 0}
         self.thread: threading.Thread | None = None
 
@@ -150,6 +151,19 @@ class ConfirmService:
         return out
 
     # ------------------------------------------------------------ run
+    def _gap(self, symbol: str, series: dict[str, Any] | None) -> int:
+        """Closed H1 bars skipped since the last evaluation of this symbol. One new candle is not a miss."""
+        latest = (series or {}).get("latest_ts")
+        if latest is None:
+            return 0
+        prev = self._last_h1.get(symbol)
+        if prev is None:
+            stored = ((self._decisions or {}).get(symbol) or {}).get("h1") or {}
+            prev = stored.get("lastTs")
+        if prev is None:
+            return 0
+        return max(0, (int(latest) - int(prev)) // 3600 - 1)
+
     def _evaluate(self, inp: dict[str, Any], live: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         cands = set(self.candidates(inp))
         now = time.time()
@@ -167,11 +181,48 @@ class ConfirmService:
             if s6 is not None and stale_s6 and s6.get("state") == "READY_FOR_H1":
                 s6 = {**s6, "state": "STALE", "reasonCode": "STAGE6_RUN_STALE", "reason": f"Stage 6 last ran at {run_at}"}
             bars = cs.h1_bars(s, confirm.CONFIG["lookback"]) if s in cands else None
-            rows.append(confirm.evaluate(s, s6, inp["series"].get(s), bars, now, live=live.get(s)))
-        order = {st: i for i, st in enumerate(("CONFIRMED", "CONFIRMING", "SETUP_FORMING", "PULLBACK", "MONITORING", "REJECTED",
+            missed = self._gap(s, inp["series"].get(s)) if s in cands else 0
+            rows.append(self._evaluate_symbol(s, s6, inp["series"].get(s), bars, now, live.get(s), missed))
+        order = {st: i for i, st in enumerate(("CONFIRMED", "BREAKOUT_CONFIRMED_WAIT_RETEST", "CONFIRMING", "SETUP_FORMING", "PULLBACK", "MONITORING", "REJECTED",
                                                 "INVALIDATED", "WARMING_UP", "STALE", "BLOCKED", "WAITING_FOR_STAGE6"))}
         rows.sort(key=lambda r: (order.get(r["state"], 99), -float(r["score"]), r["symbol"]))
         return rows
+
+    def _evaluate_symbol(self, symbol: str, s6: dict[str, Any] | None, series: dict[str, Any] | None,
+                         bars: list | None, now: float, live: dict[str, Any] | None, missed: int) -> dict[str, Any]:
+        """Replay missed closed H1 bars for the audit, then decide only on the current bar."""
+        events: list[str] = []
+        if missed > 0 and bars:
+            window = min(missed, 16)
+            for end in range(max(1, len(bars) - window), len(bars)):
+                chunk = bars[:end]
+                past_series = {**(series or {}), "latest_ts": int(chunk[-1][0]), "candle_count": len(chunk)}
+                past = confirm.evaluate(symbol, s6, past_series, chunk, now, live=None, missed_bars=0)
+                if past.get("confirmed"):
+                    events.append("MISSED_CONFIRMATION")
+                elif past.get("state") == "BREAKOUT_CONFIRMED_WAIT_RETEST":
+                    events.append("MISSED_BREAKOUT")
+                elif (past.get("entry") or {}).get("timing") == "RETEST_CONFIRMED":
+                    events.append("MISSED_RETEST")
+                elif past.get("state") in ("REJECTED", "INVALIDATED"):
+                    events.append("MISSED_INVALIDATION")
+            events = list(dict.fromkeys(events))
+        row = confirm.evaluate(symbol, s6, series, bars, now, live=live, missed_bars=missed)
+        if missed > 0:
+            timing = (row.get("entry") or {}).get("timing")
+            outcome = "CURRENTLY_ACTIONABLE" if row.get("confirmed") else (
+                "WAIT_RETEST" if timing == "WAIT_RETEST" else
+                "WAIT_NEW_CONFIRMATION" if timing in ("WAIT_NEW_CONFIRMATION", "NONE") or row.get("reasonCode") == "MISSED_CONFIRMATION" else
+                "INVALIDATED" if row.get("state") in ("REJECTED", "INVALIDATED") else
+                "EXPIRED" if row.get("state") in ("STALE", "MONITORING") and not row.get("setup", {}) else
+                "WAIT_NEW_CONFIRMATION"
+            )
+            row["reconciliation"] = {"missedBars": missed, "events": events, "outcome": outcome, "executable": bool(row.get("confirmed"))}
+            if events:
+                row.setdefault("reasoning", []).append(
+                    "Historical structure discovered during reconnect (" + ", ".join(events) + ") — not executable retrospectively. Current outcome: " + outcome + "."
+                )
+        return row
 
     def tick(self) -> dict[str, Any]:
         inp = cs.upstream()
@@ -194,13 +245,13 @@ class ConfirmService:
         with self._run_lock:
             started = time.time()
             inp = inp or cs.upstream()
-            live = live if live is not None else self._live(self.candidates(inp))
-            rows = self._evaluate(inp, live)
             if self._decisions is None:
                 try:
                     self._decisions = cs.previous_decisions()
                 except Exception:
                     self._decisions = {}
+            live = live if live is not None else self._live(self.candidates(inp))
+            rows = self._evaluate(inp, live)
             changed: dict[str, dict[str, Any]] = {}
             for r in rows:
                 p = self._decisions.get(r["symbol"])
@@ -209,19 +260,28 @@ class ConfirmService:
             c = confirm.counters(rows)
             drun = inp.get("directionRun") or {}
             upstream_ok = drun.get("status") in ("HEALTHY", "DEGRADED")
+            missed = [s for s in self.candidates(inp) if self._gap(s, inp["series"].get(s)) > 0]
             confirmed_now = sorted(r["symbol"] for r in rows if r["confirmed"])
             confirmed_before = sorted(s for s, o in self._decisions.items() if o.get("confirmed"))
             self.meta.update({
-                "status": "HEALTHY" if upstream_ok else "DEGRADED",
+                "status": "HEALTHY" if upstream_ok and not missed else "DEGRADED",
                 "message": f"{c['candidates']} Stage 6 candidates · {c['monitoring']} monitoring · {c['confirmed']} confirmed · "
                            f"{c['rejected']} rejected · {c['invalidated']} invalidated"
-                           + ("" if upstream_ok else f" · upstream Stage 6 {drun.get('status') or 'not run'}"),
+                           + ("" if upstream_ok else f" · upstream Stage 6 {drun.get('status') or 'not run'}")
+                           + (" · H1 PROCESSING LATE" if missed else ""),
                 "runAt": datetime.now(timezone.utc).isoformat(),
                 "triggers": triggers[:14],
                 "runs": self.meta.get("runs", 0) + 1,
                 "counters": c,
                 "confirmedNow": confirmed_now,
                 "candidates": self.candidates(inp),
+                "missedCandles": missed[:20],
+                "processing": {
+                    "stage7StartedAt": datetime.fromtimestamp(started, timezone.utc).isoformat(),
+                    "stage7CompletedAt": datetime.now(timezone.utc).isoformat(),
+                    "processingLatencyMs": int((time.time() - started) * 1000),
+                    "missed": missed[:20],
+                },
                 "changes": [{"symbol": s, "from": v.get("state"), "to": next(r["state"] for r in rows if r["symbol"] == s)}
                             for s, v in list(changed.items())[:40]],
                 "upstream": {"directionRunAt": drun.get("runAt"), "directionStatus": drun.get("status"),
@@ -237,6 +297,10 @@ class ConfirmService:
             self.meta["changed"] = len(changed)
             cs.save_meta(self.meta)
             self._decisions = {r["symbol"]: r for r in rows}
+            for s in self.candidates(inp):
+                ts = (inp["series"].get(s) or {}).get("latest_ts")
+                if ts is not None:
+                    self._last_h1[s] = int(ts)
             if confirmed_now != confirmed_before and self.on_confirm_change:
                 try:
                     self.on_confirm_change(sorted(set(confirmed_now) ^ set(confirmed_before)))

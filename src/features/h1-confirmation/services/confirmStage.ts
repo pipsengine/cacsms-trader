@@ -29,7 +29,7 @@ export function stage7Output(now = Date.now()): Stage7Output {
 export const h1Tone = (s?: H1State | string | null) =>
   s === 'CONFIRMED'
     ? 'green'
-    : s === 'CONFIRMING' || s === 'SETUP_FORMING'
+    : s === 'CONFIRMING' || s === 'SETUP_FORMING' || s === 'BREAKOUT_CONFIRMED_WAIT_RETEST'
       ? 'blue'
       : s === 'MONITORING' || s === 'PULLBACK' || s === 'WARMING_UP' || s === 'STALE' || s === 'WAITING_FOR_STAGE6'
         ? 'amber'

@@ -7,6 +7,7 @@ import { DealsTable, OpenPositionsTable, OrdersTable, QueueTable, Reconciliation
 import { LifecycleDrawer } from './components/LifecycleDrawer';
 import { human, money, pct, signed } from './components/format';
 import { controlTone, IN_FLIGHT_STATES, OPEN_POSITION_STATES, PRE_SUBMIT_STATES } from './services/executionStage';
+import { startAutonomyStore, useAutonomyState } from '../workflow-engine/services/autonomyStore';
 import { executionRunAgeMs, executionStageStatus, loadExecution, startExecutionStore, useExecutionStore } from './services/executionStore';
 import type { Execution } from './types';
 import '../historical-regime/historical-regime.css';
@@ -28,6 +29,8 @@ export function ExecutionPositionsPage() {
   const [drawer, setDrawer] = useState<string | null>(null);
 
   useEffect(() => startExecutionStore(), []);
+  useEffect(() => startAutonomyStore(), []);
+  const campaigns = useAutonomyState()?.opportunity?.qualified ?? [];
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 5_000);
     return () => clearInterval(t);
@@ -139,6 +142,38 @@ export function ExecutionPositionsPage() {
           sub={summary ? `${summary.stage9Positions} Stage 9 · ${summary.externalPositions} external · ${summary.queue} in queue` : 'No engine state'}
         />
       </div>
+
+      <Card>
+        <div className="card-head">
+          <div>
+            <h3>Campaigns</h3>
+            <p>{open.length} open {open.length === 1 ? 'position' : 'positions'} · {campaigns.length} {campaigns.length === 1 ? 'campaign' : 'campaigns'}. Campaign risk is not added again to the position total.</p>
+          </div>
+          <Badge tone={campaigns.length ? 'amber' : 'gray'}>{campaigns.length} campaigns</Badge>
+        </div>
+        {!campaigns.length ? (
+          <p className="hr-reason">No active campaign. Open positions above stay the broker book. A flat campaign list is valid.</p>
+        ) : (
+          <div className="table-wrap">
+            <table className="cs-table">
+              <thead>
+                <tr><th>Instrument</th><th>Family</th><th>P1</th><th>P2</th><th>Remaining risk</th></tr>
+              </thead>
+              <tbody>
+                {campaigns.slice(0, 20).map((c) => (
+                  <tr key={`${c.instrument}-${c.TiTLevel ?? c.opportunityFamily}`}>
+                    <td><b>{c.instrument}</b><br /><small>{c.direction}</small></td>
+                    <td><small>{c.opportunityFamily}{c.TiTLevel ? ` · ${c.TiTLevel}` : ''}</small></td>
+                    <td><small>{c.p1?.state}</small></td>
+                    <td><small>{c.p2?.state}</small></td>
+                    <td><small>{c.remainingRisk != null ? `${c.remainingRisk.toFixed(2)}%` : '—'}</small></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
 
       <div className="funnel ms-funnel h1-flow ex-flow">
         {[

@@ -42,6 +42,7 @@ try:
     import history
     import history_store
     import learning_service
+    import opportunity_service
     import regime
     import risk_mt5
     import risk_service
@@ -813,6 +814,7 @@ def _on_candles(timeframe: str, symbols: list[str], kind: str = "INCREMENTAL") -
         DIRECTION.on_candles(timeframe, symbols, kind)
         CONFIRM.on_candles(timeframe, symbols, kind)
         RISK.on_candles(timeframe, symbols, kind)
+        OPPORTUNITY.on_candles(timeframe, symbols, kind)
 
 
 HISTORY = history.HistoryService(history.MT5Provider(mt5, _MT5_LOCK, _ensure_terminal), on_candles=_on_candles)
@@ -837,6 +839,7 @@ def _econ_quotes(symbols: list[str]) -> dict[str, dict[str, float]]:
 
 ECONOMIC = economic_service.EconomicService()
 ECONOMIC.bind(publish=ORCHESTRATOR.publish, wake_risk=RISK.mark, wake_learning=LEARNING.mark, quotes=_econ_quotes)
+OPPORTUNITY = opportunity_service.OpportunityService()
 
 
 def cmd_vision_chart(symbol: str, timeframe: str, bars: int) -> dict[str, Any]:
@@ -1329,6 +1332,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/economic/snapshot":
                 self._json(200, economic_service.store.snapshot())
+                return
+            if parsed.path == "/opportunity/state":
+                self._json(200, OPPORTUNITY.snapshot())
                 return
             if parsed.path == "/economic/audit":
                 self._json(200, {"ok": True, "audit": economic_service.store.recent_audit(120)})
@@ -1823,6 +1829,8 @@ def main() -> None:
         print("[mt5-bridge] Stage 9 Execution & Positions engine started")
         LEARNING.start()
         print("[mt5-bridge] Stage 10 Performance & Learning engine started")
+        OPPORTUNITY.start()
+        print("[mt5-bridge] multi-resolution opportunity scan started (normal continuation + TiT L1–L4, all 29 instruments)")
         ORCHESTRATOR.start()
         print("[mt5-bridge] persistent Autonomous Orchestrator + Event Bus + World Model started")
     ECONOMIC.start()

@@ -313,6 +313,21 @@ export type AutonomyDecision = {
   createdAt: string | null;
 };
 
+export type OpportunityHypothesis = {
+  instrument?: string;
+  opportunityFamily?: string;
+  TiTLevel?: string | null;
+  direction?: string;
+  status?: string;
+  actionable?: boolean;
+  blocker?: string;
+  parentChannelPosition?: number | null;
+  location?: { price?: number | null; zoneLow?: number | null; zoneHigh?: number | null; distance?: number | null; distanceAtr?: number | null; inside?: boolean | null };
+  expectedRetracementZone?: { reasons?: string[] };
+  p1?: { state?: string; reason?: string; riskPct?: number };
+  p2?: { state?: string; reason?: string; riskPct?: number };
+};
+
 export type AutonomyState = {
   ok: boolean;
   message?: string;
@@ -336,6 +351,30 @@ export type AutonomyState = {
     rejectionsEvaluated?: number;
     recommendations?: number;
     summary?: { message?: string; autoApplied?: boolean; productionUnchanged?: boolean };
+  } | null;
+  opportunity?: {
+    run?: { status?: string; message?: string };
+    summary?: {
+      scanned?: number; universe?: number; normal?: number; tit?: number; L1?: number; L2?: number; L3?: number; L4?: number; xau?: string;
+      detected?: number;
+      funnel?: { scanned?: number; hypotheses?: number; watching?: number; confirming?: number; erzActive?: number; p1Ready?: number; p2Ready?: number; waitRetest?: number; stage8Authorized?: number; activeCampaigns?: number; actionable?: number };
+      blockers?: Record<string, number>;
+      legs?: { p1?: Record<string, number>; p2?: Record<string, number> };
+    };
+    instruments?: { symbol: string; hypotheses?: OpportunityHypothesis[]; execution?: Record<string, { direction?: string; status?: string; phase?: string; position?: number | null; confidence?: number; touchCount?: number; upper?: number; lower?: number; mid?: number }> }[];
+    qualified?: {
+      instrument: string;
+      direction?: string;
+      opportunityFamily?: string;
+      TiTLevel?: string | null;
+      parentTimeframe?: string;
+      childTimeframe?: string;
+      executionTimeframe?: string;
+      p1?: { state?: string; riskPct?: number };
+      p2?: { state?: string; riskPct?: number };
+      remainingRisk?: number;
+      reasons?: string[];
+    }[];
   } | null;
   decisions?: AutonomyDecision[];
   events?: { id: number; type: string; stage: number | null; symbol: string | null; severity: string; createdAt: string | null }[];

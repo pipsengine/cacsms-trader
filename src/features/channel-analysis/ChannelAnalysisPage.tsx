@@ -8,6 +8,7 @@ import {
   startChannelStore,
   useChannelStore,
 } from './services/channelStore';
+import { startAutonomyStore, useAutonomyState } from '../workflow-engine/services/autonomyStore';
 import { ChannelCard } from './components/ChannelCard';
 import { ChannelDetailModal } from './components/ChannelDetailModal';
 import { ChannelAnalysisSkeleton, ChannelMasthead, StructureInterpretationPanel, TrendMap } from './components/Panels';
@@ -29,7 +30,9 @@ function useModalKeys(selected: ChannelTimeframe | null, onSelect: (tf: ChannelT
 
 export default function ChannelAnalysisPage() {
   useEffect(() => startChannelStore(), []);
+  useEffect(() => startAutonomyStore(), []);
   const vm = useChannelStore();
+  const execution = useAutonomyState()?.opportunity?.instruments?.find((row) => row.symbol === vm.instrument)?.execution;
   const [selected, setSelected] = useState<ChannelTimeframe | null>(null);
   const close = useCallback(() => setSelected(null), []);
   useModalKeys(selected, setSelected);
@@ -76,6 +79,18 @@ export default function ChannelAnalysisPage() {
           {vm.notice}
         </div>
       )}
+
+      <section className="ca-notice" aria-label="M15 and M5 execution structure">
+        <b>M15 / M5 execution structure</b>
+        <span>
+          {execution && (execution.M15 || execution.M5)
+            ? ['M15', 'M5'].filter((tf) => execution[tf]).map((tf) => {
+                const row = execution[tf];
+                return `${tf} ${row.direction ?? '—'} ${row.status ?? '—'} · phase ${row.phase ?? '—'} · position ${row.position ?? '—'}% · touches ${row.touchCount ?? '—'} · confidence ${row.confidence ?? '—'}`;
+              }).join(' · ')
+            : 'M15 and M5 are calculated on the bridge for XAUUSD and for corrections. This instrument has no execution-timeframe channel on the latest sweep. The Y–H1 hierarchy above is unchanged.'}
+        </span>
+      </section>
 
       <ChannelMasthead
         items={universe}

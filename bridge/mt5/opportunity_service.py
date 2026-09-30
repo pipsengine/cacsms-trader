@@ -1,0 +1,248 @@
+"""Background multi-resolution scan. The browser is not required. Stage 8 still authorizes execution."""
+
+from __future__ import annotations
+
+import threading
+import time
+import traceback
+from datetime import datetime, timezone
+from typing import Any
+
+try:
+    import channel_analysis as ca
+    import channel_store
+    import direction_store
+    import history_store as hs
+    import opportunity
+    import opportunity_store as store
+    import regime
+    import scanner_store
+except ImportError:  # pragma: no cover
+    from bridge.mt5 import channel_analysis as ca  # type: ignore
+    from bridge.mt5 import channel_store  # type: ignore
+    from bridge.mt5 import direction_store  # type: ignore
+    from bridge.mt5 import history_store as hs  # type: ignore
+    from bridge.mt5 import opportunity  # type: ignore
+    from bridge.mt5 import opportunity_store as store  # type: ignore
+    from bridge.mt5 import regime  # type: ignore
+    from bridge.mt5 import scanner_store  # type: ignore
+
+SYMBOLS: list[str] = list(regime.SYMBOLS)
+DEEP_TFS = ("M15", "M5")
+CURRENT: OpportunityService | None = None
+
+
+def _overlay_atr(channels: dict[str, dict[str, dict[str, Any]]]) -> None:
+    """ATR lives in the channel snapshot. Distance is left blank when it cannot be read."""
+    try:
+        from db import connect
+    except ImportError:
+        from bridge.mt5.db import connect  # type: ignore
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT symbol, timeframe, json_extract(snapshot_json, '$.evidence.atr') FROM dbo.app_channel_state")
+        for symbol, tf, atr in cur.fetchall():
+            pack = channels.get(symbol)
+            if pack and tf in pack and atr is not None:
+                pack[tf]["atr"] = float(atr)
+
+
+def _close_from(pack: dict[str, dict[str, Any]]) -> float | None:
+    """Last structural price already on a channel. A missing price is left unknown."""
+    for tf in ("M5", "M15", "H1", "H8", "D1", "W"):
+        channel = pack.get(tf) or {}
+        if channel.get("currentPrice") is not None:
+            return float(channel["currentPrice"])
+        position, low, high = channel.get("position"), channel.get("lower"), channel.get("upper")
+        if position is None or low is None or high is None:
+            continue
+        return float(low) + float(position) / 100.0 * (float(high) - float(low))
+    return None
+
+
+def _confirmation_from_decision(decision: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not decision:
+        return None
+    entry = decision.get("entry") or {}
+    return {"direction": decision.get("expectedDirection") or decision.get("direction"), "state": decision.get("state"),
+            "timing": entry.get("timing"), "extension": entry.get("extensionATR")}
+
+
+def _execution_confirmations(channels: dict[str, dict[str, dict[str, Any]]]) -> dict[str, dict[str, dict[str, Any]]]:
+    """H1 uses the existing Stage 7 decision. M15/M5 use a break already present on a channel analysed this sweep."""
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    try:
+        import confirm_store
+        rows = confirm_store.load_state().get("instruments") or []
+    except Exception:
+        rows = []
+    for row in rows:
+        found = _confirmation_from_decision(row)
+        if found and row.get("symbol"):
+            out.setdefault(row["symbol"], {})["H1"] = found
+    return out
+
+
+def _confirmation_from_engine(direction: str | None, decision: dict[str, Any]) -> dict[str, Any] | None:
+    state = str(decision.get("state") or "")
+    if state not in ("CONFIRMED", "BREAKOUT_CONFIRMED_WAIT_RETEST"):
+        return None
+    entry = decision.get("entry") or {}
+    return {"direction": direction, "state": state, "timing": entry.get("timing"), "extension": entry.get("extensionATR")}
+
+
+def current() -> dict[str, Any]:
+    return CURRENT.snapshot() if CURRENT else {"ok": True, "summary": {}, "instruments": [], "qualified": []}
+
+CONFIG = {"loopSec": 15, "fullEverySec": 300}
+
+
+class OpportunityService:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._pending: set[str] = set()
+        self._last_full = 0.0
+        self._last_ts: dict[str, int] = {}
+        self.snapshot_data: dict[str, Any] = {"summary": {}, "instruments": [], "qualified": []}
+        self.meta: dict[str, Any] = {"status": "STARTING", "message": "Opportunity scan starting"}
+        self._thread: threading.Thread | None = None
+        global CURRENT
+        CURRENT = self
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, name="opportunity", daemon=True)
+        self._thread.start()
+
+    def mark(self, reason: str) -> None:
+        with self._lock:
+            self._pending.add(reason)
+
+    def on_candles(self, timeframe: str, symbols: list[str], kind: str = "INCREMENTAL") -> None:
+        if timeframe in ("D1", "H8", "H1", "M15", "M5", "W1", "MN1"):
+            self.mark(f"CANDLE {timeframe}")
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"ok": True, "run": self.meta, **self.snapshot_data}
+
+    def _loop(self) -> None:
+        time.sleep(8)
+        self.mark("STARTUP")
+        while True:
+            time.sleep(CONFIG["loopSec"])
+            with self._lock:
+                reasons, self._pending = self._pending, set()
+            if time.time() - self._last_full >= CONFIG["fullEverySec"]:
+                reasons.add("PERIODIC")
+                self._last_full = time.time()
+            if reasons:
+                try:
+                    self.run(sorted(reasons))
+                except Exception as exc:
+                    self.meta["status"] = "DEGRADED"
+                    self.meta["lastError"] = f"{type(exc).__name__}: {exc}"
+                    traceback.print_exc()
+
+    def _execution_channels(self, symbol: str, deep: bool) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+        if not deep:
+            return {}, {}
+        try:
+            import confirm_engine
+        except ImportError:
+            from bridge.mt5 import confirm_engine  # type: ignore
+        out: dict[str, dict[str, Any]] = {}
+        confirmed: dict[str, dict[str, Any]] = {}
+        for tf in DEEP_TFS:
+            try:
+                bars = hs.candle_tail(symbol, tf, 400)
+            except Exception:
+                continue
+            if len(bars or []) < 80:
+                continue
+            try:
+                snap = ca.analyse_timeframe(symbol, tf, bars, ("READY", f"{tf} closed candles"), int(time.time()))
+            except Exception:
+                continue
+            out[tf] = snap
+            try:
+                decision = confirm_engine.ConfirmationEngine(tf).evaluate(symbol, bars, str(snap.get("direction") or "NEUTRAL"), now_ts=time.time())
+                found = _confirmation_from_engine(snap.get("direction"), decision)
+                if found:
+                    confirmed[tf] = found
+            except Exception:
+                continue
+        return out, confirmed
+
+    def run(self, triggers: list[str]) -> dict[str, Any]:
+        started = time.time()
+        try:
+            worlds = channel_store.world_rows()
+        except Exception:
+            worlds = []
+        channels = {row["symbol"]: row.get("timeframes") or {} for row in worlds}
+        try:
+            _overlay_atr(channels)
+        except Exception:
+            pass
+        try:
+            directions = {row["symbol"]: row for row in (direction_store.load_state().get("instruments") or [])}
+        except Exception:
+            directions = {}
+        try:
+            scanner = scanner_store.load_state().get("instruments") or []
+            ranks = {row["symbol"]: row.get("rank") for row in scanner}
+        except Exception:
+            ranks = {}
+        # Deep M15/M5 structure for XAUUSD always, and for any instrument whose H1/H8 child is already a correction.
+        live_confirmed: dict[str, dict[str, dict[str, Any]]] = {}
+        for symbol in SYMBOLS:
+            existing = channels.get(symbol) or {}
+            h1 = existing.get("H1") or {}
+            d1 = existing.get("D1") or {}
+            deep = symbol == opportunity.XAU or (
+                h1.get("direction") and d1.get("direction") and h1.get("direction") != d1.get("direction")
+            )
+            extra, deep_confirmed = self._execution_channels(symbol, deep)
+            if extra:
+                channels[symbol] = {**existing, **extra}
+            if deep_confirmed:
+                live_confirmed.setdefault(symbol, {}).update(deep_confirmed)
+        prices = {symbol: px for symbol, px in ((s, _close_from(channels.get(s) or {})) for s in SYMBOLS) if px is not None}
+        confirmations = _execution_confirmations(channels)
+        for symbol, pack in live_confirmed.items():
+            confirmations.setdefault(symbol, {}).update(pack)
+        missed = False
+        for symbol, pack in channels.items():
+            latest = max((int(c.get("lastBarTs") or 0) for c in pack.values()), default=0)
+            prev = self._last_ts.get(symbol)
+            if prev and latest and latest - prev > 3600:
+                missed = True
+            if latest:
+                self._last_ts[symbol] = latest
+        result = opportunity.scan(SYMBOLS, channels, directions, ranks, prices=prices, confirmations=confirmations, missed=missed, data_ok=True)
+        for row in result["instruments"]:
+            pack = channels.get(row["symbol"]) or {}
+            row["execution"] = {
+                tf: {k: (pack[tf] or {}).get(k) for k in ("timeframe", "direction", "status", "phase", "position", "confidence", "touchCount", "upper", "lower", "mid", "channelId")}
+                for tf in ("M15", "M5") if pack.get(tf)
+            }
+        result["triggers"] = triggers
+        result["audits"] = [reason for row in result["instruments"] for h in row["hypotheses"] for reason in (h.get("reasons") or [])][:40]
+        self.snapshot_data = result
+        self.meta.update({
+            "status": "DEGRADED" if missed else "HEALTHY",
+            "message": (
+                f"{result['summary']['scanned']}/{result['summary']['universe']} scanned · "
+                f"normal {result['summary']['normal']} · TiT {result['summary']['tit']} · XAU {result['summary']['xau']}"
+                + (" · RECONNECT RECONCILIATION" if missed else "")
+            ),
+            "runAt": datetime.now(timezone.utc).isoformat(),
+            "durationMs": int((time.time() - started) * 1000),
+            "triggers": triggers[:12],
+        })
+        try:
+            store.save({"summary": result["summary"], "qualified": result["qualified"], "audits": result["audits"], "run": self.meta})
+        except Exception as exc:
+            self.meta["lastError"] = f"persist: {exc}"
+        return result

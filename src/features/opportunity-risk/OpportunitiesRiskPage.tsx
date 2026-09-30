@@ -4,6 +4,7 @@ import { Badge, Card, Metric, PageHeader } from '../../components/UI';
 import { useTrading } from '../../context/TradingContext';
 import { ageText } from '../htf-vision';
 import { h1StageStatus, useH1Store } from '../h1-confirmation';
+import { startAutonomyStore, useAutonomyState } from '../workflow-engine/services/autonomyStore';
 import { AuthorizationTable, HistoryTable, SetupDrawer } from './components/SetupDrawer';
 import { RiskControls } from './components/RiskControls';
 import { classTone, dirTone, human, lots, money, num, pct, px, until } from './components/format';
@@ -39,6 +40,11 @@ function Stage7Handoff({ onOpen, opps }: { onOpen: (symbol: string) => void; opp
   const h1Status = h1StageStatus(h1store);
   const usable = h1Status === 'HEALTHY' || h1Status === 'DEGRADED';
   const confirmed = (h1store.state?.instruments ?? []).filter((d) => d.state === 'CONFIRMED' && d.confirmed && d.handoff);
+  const held = (h1store.state?.instruments ?? []).filter(
+    (d) =>
+      !d.confirmed &&
+      (d.state === 'BREAKOUT_CONFIRMED_WAIT_RETEST' || d.entry?.timing === 'WAIT_RETEST' || d.entry?.timing === 'WAIT_PULLBACK' || d.entry?.classification === 'EXTENDED'),
+  );
   return (
     <Card>
       <div className="card-head">
@@ -46,8 +52,50 @@ function Stage7Handoff({ onOpen, opps }: { onOpen: (symbol: string) => void; opp
           <h3>Stage 7 Hand-off</h3>
           <p>H1-confirmed candidates published by H1 Confirmation — the only input Stage 8 accepts. Scanner scores never create an opportunity.</p>
         </div>
-        <Badge tone={!usable ? 'amber' : confirmed.length ? 'green' : 'gray'}>{usable ? `${confirmed.length} confirmed` : `STAGE 7 ${h1Status}`}</Badge>
+        <Badge tone={!usable ? 'amber' : confirmed.length ? 'green' : held.length ? 'amber' : 'gray'}>
+          {usable ? `${confirmed.length} confirmed${held.length ? ` · ${held.length} entry not ready` : ''}` : `STAGE 7 ${h1Status}`}
+        </Badge>
       </div>
+      {usable && held.length > 0 && (
+        <div className="table-wrap">
+          <table className="cs-table">
+            <thead>
+              <tr>
+                <th>Instrument</th>
+                <th>Structure</th>
+                <th>Confirmation</th>
+                <th>Entry</th>
+                <th>Stage 8</th>
+              </tr>
+            </thead>
+            <tbody>
+              {held.map((d) => (
+                <tr key={`held-${d.symbol}`}>
+                  <td>
+                    <b className={d.symbol === 'XAUUSD' ? 'hr-gold' : undefined}>{d.symbol}</b>
+                  </td>
+                  <td>
+                    <Badge tone={dirTone(d.expectedDirection)}>{d.expectedDirection}</Badge>
+                  </td>
+                  <td>
+                    <small>{human(d.state)} · {human(d.entry?.breakoutQuality)}</small>
+                  </td>
+                  <td>
+                    <small>
+                      {human(d.entry?.timing)}
+                      {d.entry?.extensionATR != null ? ` · ${d.entry.extensionATR.toFixed(1)} ATR` : ''}
+                      {d.entry?.channelPosition != null ? ` · ${d.entry.channelPosition.toFixed(0)}%` : ''}
+                    </small>
+                  </td>
+                  <td>
+                    <Badge tone="amber">STRUCTURE CONFIRMED · ENTRY NOT READY</Badge>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
       {!confirmed.length || !usable ? (
         <div className="empty-block">
           <b>{h1store.loading ? 'Loading Stage 7 decisions…' : h1Status === 'STALE' ? 'Stage 7 output is stale' : 'No H1-confirmed candidate'}</b>
@@ -445,6 +493,7 @@ export function OpportunitiesRiskPage() {
   const [showClosed, setShowClosed] = useState(false);
 
   useEffect(() => startRiskStore(), []);
+  useEffect(() => startAutonomyStore(), []);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 10_000);
     return () => clearInterval(t);
@@ -461,6 +510,9 @@ export function OpportunitiesRiskPage() {
   const primary = accounts.find((a) => a.accountId === run?.terminal?.accountId) ?? accounts.find((a) => a.tradingEnabled) ?? accounts[0];
   const pending = (s?.authorizations ?? []).filter((a) => a.status === 'PENDING' && Date.parse(a.expiresAt) > now);
   const paused = run ? !run.auto : !auto;
+  const opportunity = useAutonomyState()?.opportunity;
+  const campaigns = opportunity?.qualified ?? [];
+  const blockers = opportunity?.summary?.blockers;
 
   const rows = useMemo(
     () =>
@@ -520,6 +572,48 @@ export function OpportunitiesRiskPage() {
       )}
 
       <Stage7Handoff onOpen={openBySymbol} opps={opps} />
+      <Card>
+        <div className="card-head">
+          <div>
+            <h3>Campaign hypotheses</h3>
+            <p>Normal continuation and TiT L1–L4. P1 and P2 share one campaign budget. Stage 8 still authorizes every order.</p>
+          </div>
+          <Badge tone={campaigns.length ? 'amber' : 'gray'}>{campaigns.length} actionable</Badge>
+        </div>
+        {!campaigns.length ? (
+          <p className="hr-reason">
+            No actionable campaign. A flat book is valid. XAUUSD stays under independent watch when it has no campaign.
+            {blockers && Object.keys(blockers).length ? ` Not actionable: ${Object.entries(blockers).map(([k, n]) => `${k} ${n}`).join(' · ')}.` : ''}
+          </p>
+        ) : (
+          <div className="table-wrap">
+            <table className="cs-table">
+              <thead>
+                <tr>
+                  <th>Instrument</th>
+                  <th>Family</th>
+                  <th>Structure</th>
+                  <th>P1</th>
+                  <th>P2</th>
+                  <th>Campaign risk</th>
+                </tr>
+              </thead>
+              <tbody>
+                {campaigns.slice(0, 12).map((c) => (
+                  <tr key={`${c.instrument}-${c.TiTLevel ?? c.opportunityFamily}`}>
+                    <td><b>{c.instrument}</b></td>
+                    <td><small>{human(c.opportunityFamily)}{c.TiTLevel ? ` · ${c.TiTLevel}` : ''}</small></td>
+                    <td><small>{c.parentTimeframe ?? '—'} / {c.childTimeframe ?? '—'} / {c.executionTimeframe ?? '—'}</small></td>
+                    <td><small>{human(c.p1?.state)}{c.p1?.riskPct ? ` · ${c.p1.riskPct.toFixed(2)}%` : ''}</small></td>
+                    <td><small>{human(c.p2?.state)}{c.p2?.riskPct ? ` · ${c.p2.riskPct.toFixed(2)}%` : ''}</small></td>
+                    <td><small>{c.remainingRisk != null ? `${c.remainingRisk.toFixed(2)}%` : '—'}</small></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
 
       <div className="metrics">
         <Metric

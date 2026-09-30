@@ -76,6 +76,11 @@ export function stageCardLines(stage: StageRuntime, focus: string): string[] {
           : `${pair} · not ranked`,
       );
       lines.push(c ? `Promoted ${c.promoted} · qualified ${s4.qualified} · directional ${c.directional}/${c.universe}` : `Promoted ${s4.promoted.length}`);
+      const scan = getAutonomySnapshot()?.opportunity?.summary;
+      if (scan) {
+        lines.push(`${scan.scanned ?? '—'}/${scan.universe ?? 29} scanned · normal ${scan.normal ?? 0} · TiT ${scan.tit ?? 0}`);
+        lines.push(`L1 ${scan.L1 ?? 0} · L2 ${scan.L2 ?? 0} · L3 ${scan.L3 ?? 0} · L4 ${scan.L4 ?? 0} · XAU ${scan.xau ?? '—'}`);
+      }
       if (row && row.state !== 'PROMOTED') lines.push(brief(row.reason));
       break;
     }
@@ -108,6 +113,9 @@ export function stageCardLines(stage: StageRuntime, focus: string): string[] {
       lines.push(row ? `${pair} · ${human(row.state)} · score ${n1(row.score)}` : `${pair} · no H1 evaluation`);
       lines.push(c ? `Confirmed ${c.confirmed} · monitoring ${c.monitoring} · rejected ${c.rejected}` : `Confirmed ${s7.confirmed.length}`);
       if (row && row.state !== 'CONFIRMED') lines.push(brief(row.reason));
+      if (row?.entry?.timing && ['WAIT_RETEST', 'WAIT_PULLBACK', 'WAIT_NEW_CONFIRMATION'].includes(row.entry.timing)) {
+        lines.push(`Entry ${human(row.entry.timing)} · ${human(row.entry.breakoutQuality)}`);
+      }
       break;
     }
     case 8: {

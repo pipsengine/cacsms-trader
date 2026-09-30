@@ -5,9 +5,11 @@ import { allPairs } from '../../data/market';
 import { useTrading } from '../../context/TradingContext';
 import { gatedState } from '../market-data/services/stage1Gate';
 import { ageText, startVisionStore, useVisionStore } from '../htf-vision';
+import { startAutonomyStore, useAutonomyState } from '../workflow-engine/services/autonomyStore';
 import { fetchScannerDetail } from './services/scannerClient';
 import { applyScannerConfig, runScannerNow, scannerRunAgeMs, scannerStageStatus, startScannerStore, useScannerStore } from './services/scannerStore';
 import { directionTone } from './services/scannerStage';
+import type { OpportunityHypothesis } from '../mt5-connection/services/mt5BridgeClient';
 import type { AssetLeg, ScannerDetail, ScannerInstrument, ScannerRun, ScannerState, Stage1Readiness } from './types';
 import './market-scanner.css';
 
@@ -37,6 +39,59 @@ function RankPager({ page, pages, total, onPage }: { page: number; pages: number
 
 const human = (s?: string | null) => (s ? s.replace(/_/g, ' ') : '—');
 const num = (v: number | null | undefined, d = 2) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(d));
+
+function locatedPrice(symbol: string, value?: number | null) {
+  if (value == null || !Number.isFinite(value)) return '—';
+  const digits = symbol === 'XAUUSD' || value >= 50 ? 2 : value >= 10 ? 3 : 5;
+  return value.toFixed(digits);
+}
+
+function HypothesisLocations({ rows }: { rows?: { symbol: string; hypotheses?: OpportunityHypothesis[] }[] }) {
+  const detected = (rows ?? []).flatMap((row) =>
+    (row.hypotheses ?? []).filter((item) => item.status && item.status !== 'NOT_DETECTED' && item.opportunityFamily),
+  );
+  if (!detected.length) return <p className="hr-reason">No detected hypothesis has a location yet.</p>;
+  return (
+    <div className="table-wrap">
+      <table className="cs-table ms-table">
+        <thead>
+          <tr>
+            <th>Instrument</th>
+            <th>Level</th>
+            <th>Direction</th>
+            <th>Current</th>
+            <th>ERZ</th>
+            <th>Distance</th>
+            <th>Parent</th>
+            <th>ERZ basis</th>
+            <th>P1</th>
+            <th>P2</th>
+          </tr>
+        </thead>
+        <tbody>
+          {detected.map((item) => {
+            const symbol = item.instrument ?? '—';
+            const zone = item.location;
+            return (
+              <tr key={`${symbol}-${item.TiTLevel ?? 'NORMAL'}-${item.opportunityFamily}-${item.direction}`}>
+                <td>{symbol}</td>
+                <td>{item.TiTLevel ?? 'NORMAL'}</td>
+                <td>{human(item.direction)}</td>
+                <td>{locatedPrice(symbol, zone?.price)}</td>
+                <td>{zone?.zoneLow == null ? '—' : `${locatedPrice(symbol, zone.zoneLow)}–${locatedPrice(symbol, zone.zoneHigh)}`}</td>
+                <td>{zone?.distanceAtr == null ? '—' : `${zone.distanceAtr.toFixed(2)} ATR`}</td>
+                <td>{item.parentChannelPosition == null ? '—' : `${item.parentChannelPosition.toFixed(0)}%`}</td>
+                <td title={(item.expectedRetracementZone?.reasons ?? []).join('; ')}>{(item.expectedRetracementZone?.reasons ?? []).slice(0, 2).join('; ') || '—'}</td>
+                <td>{human(item.p1?.reason ?? item.p1?.state)}</td>
+                <td>{human(item.p2?.reason ?? item.p2?.state)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 const signed = (v: number | null | undefined, d = 2) => (v == null || !Number.isFinite(v) ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(d)}`);
 
 export const stateTone = (s?: ScannerState | string | null) =>
@@ -550,6 +605,7 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
   const { instruments, selected, setSelected } = useTrading();
   const store = useScannerStore();
   const vision = useVisionStore();
+  const autonomy = useAutonomyState();
   const [now, setNow] = useState(Date.now());
   const [query, setQuery] = useState('');
   const [stateF, setStateF] = useState<(typeof STATE_FILTERS)[number]>('All');
@@ -563,6 +619,7 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
 
   useEffect(() => startScannerStore(), []);
   useEffect(() => startVisionStore(), []);
+  useEffect(() => startAutonomyStore(), []);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 15_000);
     return () => clearInterval(t);
@@ -648,6 +705,36 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
           {store.running ? 'Ranking…' : 'Re-rank now'}
         </button>
       </div>
+      <Card>
+        <div className="card-head">
+          <div>
+            <h3>Multi-resolution scan</h3>
+            <p>Every instrument is assessed for normal continuation and Trend-in-Trend. Rank still prioritises attention. It does not hide a nested structure.</p>
+          </div>
+          <Badge tone={autonomy?.opportunity?.summary ? 'green' : 'gray'}>{autonomy?.opportunity?.run?.status ?? 'WAITING'}</Badge>
+        </div>
+        <p className="hr-reason">
+          {autonomy?.opportunity?.summary
+            ? `${autonomy.opportunity.summary.scanned}/${autonomy.opportunity.summary.universe} scanned · normal ${autonomy.opportunity.summary.normal} · TiT ${autonomy.opportunity.summary.tit} · L1 ${autonomy.opportunity.summary.L1} · L2 ${autonomy.opportunity.summary.L2} · L3 ${autonomy.opportunity.summary.L3} · L4 ${autonomy.opportunity.summary.L4} · XAU ${autonomy.opportunity.summary.xau}`
+            : 'The opportunity engine has not published a scan yet. It runs on the bridge, not in this page.'}
+        </p>
+        <p className="hr-reason">
+          {autonomy?.opportunity?.summary?.funnel
+            ? `Scanned ${autonomy.opportunity.summary.funnel.scanned} · hypotheses ${autonomy.opportunity.summary.funnel.hypotheses} · watching ${autonomy.opportunity.summary.funnel.watching} · ERZ ${autonomy.opportunity.summary.funnel.erzActive} · P1 ready ${autonomy.opportunity.summary.funnel.p1Ready} · P2 ready ${autonomy.opportunity.summary.funnel.p2Ready} · wait retest ${autonomy.opportunity.summary.funnel.waitRetest} · actionable ${autonomy.opportunity.summary.funnel.actionable}`
+            : 'Funnel counts appear after the first bridge scan.'}
+        </p>
+        <p className="hr-reason">
+          {autonomy?.opportunity?.summary?.blockers && Object.keys(autonomy.opportunity.summary.blockers).length
+            ? `Campaign reason ${Object.entries(autonomy.opportunity.summary.blockers).map(([k, n]) => `${k} ${n}`).join(' · ')}`
+            : 'No blocker counts yet. A hypothesis that is not an entry keeps its campaign reason. P1 and P2 are listed separately below.'}
+        </p>
+        <p className="hr-reason">
+          {autonomy?.opportunity?.summary?.legs
+            ? `P1 ${Object.entries(autonomy.opportunity.summary.legs.p1 ?? {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—'} · P2 ${Object.entries(autonomy.opportunity.summary.legs.p2 ?? {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—'}`
+            : 'P1 and P2 reasons appear after the next bridge scan.'}
+        </p>
+        <HypothesisLocations rows={autonomy?.opportunity?.instruments} />
+      </Card>
       {store.error && (
         <div className="hr-banner err">
           <AlertTriangle size={14} />

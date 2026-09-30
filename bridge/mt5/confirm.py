@@ -16,8 +16,8 @@ try:
 except ImportError:  # pragma: no cover
     from bridge.mt5 import vision, leg_model  # type: ignore
 
-STATES = ("WAITING_FOR_STAGE6", "WARMING_UP", "MONITORING", "PULLBACK", "SETUP_FORMING", "CONFIRMING", "CONFIRMED",
-          "REJECTED", "INVALIDATED", "STALE", "BLOCKED")
+STATES = ("WAITING_FOR_STAGE6", "WARMING_UP", "MONITORING", "PULLBACK", "SETUP_FORMING", "CONFIRMING",
+          "BREAKOUT_CONFIRMED_WAIT_RETEST", "CONFIRMED", "REJECTED", "INVALIDATED", "STALE", "BLOCKED")
 GATE_STATUSES = ("PASS", "WAIT", "FAIL", "STALE", "N/A")
 H1_SEC = 3600
 
@@ -44,6 +44,12 @@ CONFIG: dict[str, Any] = {
     "maxRiskAtr": 6.0,
     "h8OverheadPct": 90,        # trend-relative H8 position at which the H8 boundary blocks the entry location
     "confirmScore": 65,
+    # Immediate entry is withheld when the close has run away from the broken level.
+    # Distances are ATR-normalized. Channel position (0 = origin, 100 = destination) is a second factor, not a lone rule.
+    "extensionChaseAtr": 2.5,
+    "extensionLateAtr": 1.2,
+    "lateChannelPct": 78.0,
+    "noRoomPct": 92.0,
 }
 
 BREAKOUT_MODEL_PHASES = ("BREAKOUT", "RETEST", "REVERSAL")
@@ -371,7 +377,8 @@ def _counter_trend(out: dict[str, Any], s6: dict[str, Any], st: dict[str, Any], 
 
 
 def evaluate(symbol: str, s6: dict[str, Any] | None, series: dict[str, Any] | None, bars: list[tuple] | None,
-             now_ts: float, cfg: dict[str, Any] | None = None, live: dict[str, Any] | None = None) -> dict[str, Any]:
+             now_ts: float, cfg: dict[str, Any] | None = None, live: dict[str, Any] | None = None,
+             missed_bars: int = 0) -> dict[str, Any]:
     cfg = cfg or CONFIG
     out = _blank(symbol, s6)
     g = out["gates"]
@@ -624,12 +631,113 @@ def evaluate(symbol: str, s6: dict[str, Any] | None, series: dict[str, Any] | No
                 f"Market leg {leg.get('dominantTrend')} dominant · {leg.get('currentLeg')} · "
                 f"{leg.get('tradeType')} · reversal {leg.get('reversalState')} — {leg.get('reason')}"
             )
+    trade_sign = -d if str((out.get("marketLeg") or {}).get("tradeType") or "").startswith("COUNTER_TREND") else d
+    entry = assess_entry(st, su, s6, trade_sign, cfg, missed_bars=missed_bars) if st is not None else None
+    if entry and state == "CONFIRMED" and entry["timing"] == "WAIT_RETEST":
+        state, code = "BREAKOUT_CONFIRMED_WAIT_RETEST", "WAIT_RETEST"
+        reason = "Breakout confirmed; " + "; ".join(entry["reasons"]) + "."
+    elif entry and state == "CONFIRMED" and entry["timing"] == "WAIT_NEW_CONFIRMATION":
+        state, code = "MONITORING", "MISSED_CONFIRMATION"
+        reason = "Historical confirmation discovered during reconnect; not executable retrospectively."
+    elif entry and state == "CONFIRMED" and entry["timing"] == "RETEST_CONFIRMED":
+        code = "CONFIRMED_RETEST"
+        reason = "Retest held; " + (reason if "retest" in reason.lower() else "bullish continuation confirmation received." if trade_sign > 0 else "bearish continuation confirmation received.")
+    if entry:
+        out["entry"] = entry
+        out["reasoning"].append(
+            f"Entry {entry['timing']}: {entry['classification']} · breakout {entry['breakoutQuality']}"
+            + (f" · {entry['extensionATR']} ATR beyond structure" if entry.get("extensionATR") is not None else "")
+            + (f" · channel {entry['channelPosition']:.0f}%" if entry.get("channelPosition") is not None else "")
+        )
     out["confirmed"] = state == "CONFIRMED"
     out["live"] = intrabar(out, live, d if not str((out.get("marketLeg") or {}).get("tradeType") or "").startswith("COUNTER_TREND") else -d)
     _finish(out, state, code, reason)
     if out["confirmed"]:
         out["handoff"] = handoff(out)
     return out
+
+
+def _dir_pos(position: float | None, trade_sign: int) -> float | None:
+    """0 = room at the origin of the trade, 100 = price already at the destination boundary."""
+    if position is None or trade_sign == 0:
+        return None
+    return float(position) if trade_sign > 0 else 100.0 - float(position)
+
+
+def assess_entry(st: dict[str, Any], su: dict[str, Any], s6: dict[str, Any], trade_sign: int,
+                 cfg: dict[str, Any], *, missed_bars: int = 0) -> dict[str, Any]:
+    """Separate entry quality from structural confirmation. A valid break is not permission to enter."""
+    atr = float(st.get("atr") or 0) or 1e-9
+    close = st.get("lastClose")
+    trig = su.get("trigger") or None
+    pos = _dir_pos((s6.get("position") or {}).get("d1"), trade_sign)
+    extension = None
+    penetration = None
+    close_loc = None
+    quality = "ACCEPTABLE"
+    if trig and close is not None:
+        extension = trade_sign * (float(close) - float(trig["level"])) / atr
+        i = trig.get("i")
+        if isinstance(i, int) and 0 <= i < int(st.get("bars") or 0):
+            rng = float(st["high"][i]) - float(st["low"][i])
+            penetration = trade_sign * (float(st["close"][i]) - float(trig["level"])) / atr
+            if rng > 0:
+                close_loc = (float(st["close"][i]) - float(st["low"][i])) / rng if trade_sign > 0 else (float(st["high"][i]) - float(st["close"][i])) / rng
+    retest_held = bool(su.get("retest")) and not su.get("falseBreakout")
+    reasons: list[str] = []
+    late = pos is not None and pos >= cfg["lateChannelPct"]
+    no_room = pos is not None and pos >= cfg["noRoomPct"]
+    chased = extension is not None and extension >= cfg["extensionChaseAtr"]
+    late_and_extended = extension is not None and extension >= cfg["extensionLateAtr"] and late
+    if su.get("falseBreakout"):
+        quality = "SUSPECTED_FALSE_BREAK"
+    elif chased or late_and_extended:
+        quality = "OVEREXTENDED"
+    elif penetration is not None and penetration < 0.08:
+        quality = "WEAK"
+    elif penetration is not None and penetration >= 0.25 and (close_loc or 0) >= 0.55 and not late:
+        quality = "STRONG"
+    held = retest_held and not su.get("invalidated")
+    timing = "ENTER_NOW"
+    classification = "ACCEPTABLE"
+    if su.get("falseBreakout") or su.get("invalidated"):
+        classification, timing = "INVALID", "REJECT"
+    elif not trig:
+        timing = "NONE"
+        reasons.append("no current H1 break to enter")
+    elif held:
+        classification, timing = "GOOD", "RETEST_CONFIRMED"
+        reasons.append("Broken structure was retested and held")
+    elif chased or late_and_extended or (no_room and not held):
+        classification, timing = "EXTENDED", "WAIT_RETEST"
+        if extension is not None:
+            reasons.append(f"price is {extension:.1f} ATR beyond the broken structure")
+        if pos is not None and (late or no_room):
+            reasons.append(f"parent-channel position is {pos:.0f}% toward the destination")
+        reasons.append("controlled retest required")
+    elif pos is not None and pos <= 55:
+        classification = "GOOD"
+        reasons.append(f"parent-channel position {pos:.0f}% still leaves room in the trade direction")
+    age = su.get("triggerAgeBars")
+    discovered_late = missed_bars > 0 and trig is not None and age not in (0, None) and not (held and (su.get("retest") or {}).get("ts") == st.get("lastTs"))
+    if discovered_late and timing == "ENTER_NOW":
+        timing = "WAIT_NEW_CONFIRMATION"
+        classification = "POOR"
+        reasons.append("historical confirmation discovered during reconnect; not executable retrospectively")
+    if not reasons and timing == "ENTER_NOW":
+        reasons.append("break is fresh and location is not extended")
+    return {
+        "classification": classification,
+        "breakoutQuality": quality,
+        "extensionATR": None if extension is None else round(extension, 2),
+        "channelPosition": None if pos is None else round(pos, 1),
+        "distanceToObstacle": None,
+        "availableRoomATR": None,
+        "retestRequired": timing == "WAIT_RETEST",
+        "stale": bool(discovered_late),
+        "timing": timing,
+        "reasons": reasons,
+    }
 
 
 def explain(o: dict[str, Any]) -> str:
@@ -644,6 +752,9 @@ def explain(o: dict[str, Any]) -> str:
         bits.append(f"Invalidation {_fmt(o['invalidationLevel'])}.")
     if o.get("components"):
         bits.append(f"Confirmation score {o['score']:.1f}.")
+    entry = o.get("entry") or {}
+    if entry.get("timing") and entry.get("timing") != "ENTER_NOW":
+        bits.append(f"Entry {entry['timing'].replace('_', ' ').lower()}: {'; '.join(entry.get('reasons') or [])}.")
     if (o.get("live") or {}).get("note"):
         bits.append(o["live"]["note"] + ".")
     return " ".join(bits)
@@ -665,21 +776,37 @@ def handoff(o: dict[str, Any]) -> dict[str, Any]:
         "freshness": (o.get("data") or {}).get("status"), "h1LastTs": h.get("lastTs"), "reasoning": o["reasoning"],
         "tradeType": o.get("tradeType") or (o.get("marketLeg") or {}).get("tradeType"),
         "marketLeg": o.get("marketLeg"),
+        "entry": o.get("entry"),
+        "structure": {
+            "parentTrend": (o.get("marketLeg") or {}).get("dominantTrend") or o.get("direction"),
+            "h1Phase": o.get("phase"),
+            "bos": (o.get("gates") or {}).get("bos", {}).get("status") == "PASS",
+            "choch": (o.get("gates") or {}).get("choch", {}).get("status") == "PASS",
+        },
+        "confirmation": {
+            "state": o.get("state"),
+            "level": trig.get("level"),
+            "candleClose": h.get("lastClose"),
+            "confirmedAt": trig.get("ts"),
+        },
+        "validity": {"current": True, "stale": bool((o.get("entry") or {}).get("stale")), "invalidationLevel": o.get("invalidationLevel")},
         "executes": False,
     }
 
 
 def decision_signature(o: dict[str, Any]) -> tuple:
     trig = ((o.get("setup") or {}).get("trigger") or {})
+    entry = o.get("entry") or {}
     return (o["state"], o["reasonCode"], o.get("phase"), int(float(o.get("score") or 0) // 5), trig.get("ts"),
-            o.get("invalidationLevel"), (o.get("h1") or {}).get("lastTs"), ((o.get("live") or {}).get("event")))
+            o.get("invalidationLevel"), (o.get("h1") or {}).get("lastTs"), ((o.get("live") or {}).get("event")),
+            entry.get("timing"))
 
 
 def counters(rows: list[dict[str, Any]]) -> dict[str, Any]:
     cand = [r for r in rows if (r.get("stage6") or {}).get("state") == "READY_FOR_H1"]
     return {
         "universe": len(rows), "candidates": len(cand),
-        "monitoring": sum(1 for r in rows if r["state"] in ("MONITORING", "PULLBACK", "SETUP_FORMING", "CONFIRMING")),
+        "monitoring": sum(1 for r in rows if r["state"] in ("MONITORING", "PULLBACK", "SETUP_FORMING", "CONFIRMING", "BREAKOUT_CONFIRMED_WAIT_RETEST")),
         "confirmed": sum(1 for r in rows if r["state"] == "CONFIRMED"),
         "rejected": sum(1 for r in rows if r["state"] == "REJECTED"),
         "invalidated": sum(1 for r in rows if r["state"] == "INVALIDATED"),

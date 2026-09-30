@@ -544,6 +544,16 @@ class AutonomousOrchestrator:
     def state(self) -> dict[str, Any]:
         out = store.state()
         out["orchestrator"] = self.meta
+        try:
+            import opportunity_service
+            out["opportunity"] = opportunity_service.current()
+        except Exception:
+            out["opportunity"] = None
+        try:
+            import campaign_service
+            out["campaign"] = campaign_service.snapshot()
+        except Exception:
+            out["campaign"] = None
         out["engines"] = {
             "S1": {"health": "HEALTHY" if self.connected_fn() else "DEGRADED"},
             "S4": self.scanner.meta, "S5": self.vision.meta, "CHANNELS": self.channels.meta if self.channels else None, "S6": self.direction.meta,

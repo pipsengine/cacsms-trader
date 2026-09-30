@@ -41,8 +41,12 @@ CONFIG: dict[str, Any] = {
     "maxClusterRiskPct": 2.0,        # risk of positions correlated with the proposal (incl. proposal)
     "correlationThreshold": 0.7,     # signed D1-return correlation that makes two exposures one cluster
     "correlationLookback": 60,       # D1 returns
-    "maxConcurrentPositions": 3,     # per account (the account's own maxConcurrentTrades also applies)
+    "maxConcurrentPositions": 3,     # operator limit; the account's own maxConcurrentTrades also applies. Raise this when portfolio risk, not trade count, permits more.
+    "positionCeiling": 20,           # technical capacity. Not a target.
     "allowSameSymbol": False,
+    "xauReservePct": 0.0,            # portfolio risk kept available for XAUUSD. 0 leaves existing FX capacity unchanged.
+    "xauReservePolicy": "STRICT_RESERVE",  # STRICT_RESERVE | PARTIAL_BORROW | DYNAMIC_RESERVE
+    "xauBorrowFraction": 0.5,        # fraction of the reserve PARTIAL_BORROW may lend to FX. The rest stays with XAUUSD.
     # system safety
     "maxDailyLossPct": 3.0,          # realized + floating loss today, plus open risk, vs day-start equity
     "maxDrawdownPct": 10.0,          # from peak equity, plus open risk
@@ -80,7 +84,8 @@ CONFIG: dict[str, Any] = {
 BOUNDS: dict[str, tuple[float, float]] = {
     "riskPerTradePct": (0.05, 5.0), "minRiskFraction": (0.1, 1.0), "maxPortfolioRiskPct": (0.1, 20.0),
     "maxCurrencyRiskPct": (0.1, 20.0), "maxClusterRiskPct": (0.1, 20.0), "correlationThreshold": (0.3, 0.99),
-    "correlationLookback": (20, 250), "maxConcurrentPositions": (1, 50), "maxDailyLossPct": (0.1, 50.0),
+    "correlationLookback": (20, 250), "maxConcurrentPositions": (1, 50), "positionCeiling": (1, 50), "maxDailyLossPct": (0.1, 50.0),
+    "xauReservePct": (0.0, 10.0), "xauBorrowFraction": (0.0, 1.0),
     "maxDrawdownPct": (0.5, 90.0), "minMarginLevelPct": (100.0, 5000.0), "maxMarginUsePct": (1.0, 100.0),
     "marginFormulaBuffer": (1.0, 5.0), "propSafetyPct": (0.0, 50.0), "minConfidence": (0.0, 100.0),
     "minSetupScore": (0.0, 100.0), "minRR": (0.5, 10.0), "minStopAtr": (0.05, 5.0), "maxStopAtr": (0.5, 20.0),
@@ -90,8 +95,9 @@ BOUNDS: dict[str, tuple[float, float]] = {
     "authTtlSec": (30, 3600), "maxEntryDeviationAtr": (0.01, 2.0), "weekendCutoffHours": (0.0, 24.0),
     "overnightCutoffUtcHour": (0, 23), "newsWindowMin": (0, 240),
 }
-ENUMS = {"riskBasis": ("EQUITY", "BALANCE", "MIN_BALANCE_EQUITY")}
-INT_KEYS = {"correlationLookback", "maxConcurrentPositions", "setupTtlMin", "h1MaxAgeMin", "maxTickAgeSec", "fxMaxAgeSec",
+ENUMS = {"riskBasis": ("EQUITY", "BALANCE", "MIN_BALANCE_EQUITY"),
+         "xauReservePolicy": ("STRICT_RESERVE", "PARTIAL_BORROW", "DYNAMIC_RESERVE")}
+INT_KEYS = {"correlationLookback", "maxConcurrentPositions", "positionCeiling", "setupTtlMin", "h1MaxAgeMin", "maxTickAgeSec", "fxMaxAgeSec",
             "accountMaxAgeSec", "authTtlSec", "overnightCutoffUtcHour", "newsWindowMin"}
 CRITICAL_KEYS = {"riskPerTradePct", "maxPortfolioRiskPct", "maxCurrencyRiskPct", "maxClusterRiskPct", "maxConcurrentPositions",
                  "maxDailyLossPct", "maxDrawdownPct", "minMarginLevelPct", "minRR", "riskBasis", "allowSameSymbol"}
@@ -201,7 +207,26 @@ def signed_legs(symbol: str, d: int) -> dict[str, int]:
     return {base: d, quote: -d}
 
 
+def _xau_holdback(symbol: str, cfg: dict[str, Any], ctx: dict[str, Any] | None = None) -> float:
+    """FX room given up so a later valid XAUUSD trade still has capacity. Default reserve is 0 until configured."""
+    reserve = float(cfg.get("xauReservePct") or 0)
+    if symbol == "XAUUSD" or reserve <= 0:
+        return 0.0
+    policy = str(cfg.get("xauReservePolicy") or "STRICT_RESERVE")
+    if policy == "PARTIAL_BORROW":
+        borrow = min(1.0, max(0.0, float(cfg.get("xauBorrowFraction", 0.5))))
+        return reserve * (1.0 - borrow)
+    if policy == "DYNAMIC_RESERVE":
+        state = str((ctx or {}).get("xauWatchState") or "WATCHING").upper()
+        if state in ("NONE", "INACTIVE"):
+            return 0.0
+        return reserve
+    return reserve
+
+
 def setup_key(h: dict[str, Any]) -> str:
+    if h.get("handoffKind") == "CAMPAIGN":
+        return f"{h.get('campaignId')}|{h.get('legType')}|{h.get('setupRevision')}"
     ec = h.get("entryContext") or {}
     anchor = ec.get("triggerTs") or h.get("h1LastTs") or h.get("confirmedSince") or ""
     return f"{h.get('instrument')}|{str(h.get('direction') or '').upper()}|{anchor}"
@@ -293,6 +318,13 @@ def evaluate_setup(h: dict[str, Any], market: dict[str, dict[str, Any]], cfg: di
     else:
         gates["stage7"] = _g("PASS", f"Stage 7 CONFIRMED {h.get('direction')} · {ec.get('model', '').replace('_', ' ').lower()} · "
                                      f"{'CHoCH' if ec.get('trigger') == 'CHOCH' else 'BOS'} through {ec.get('triggerLevel')}")
+    entry = h.get("entry") or {}
+    timing = str(entry.get("timing") or "")
+    if timing in ("WAIT_RETEST", "WAIT_PULLBACK", "WAIT_NEW_CONFIRMATION") or entry.get("classification") in ("EXTENDED", "POOR", "INVALID"):
+        gates["entry"] = _g("FAIL", f"Stage 7 entry {timing or entry.get('classification')} — structure is not permission to enter")
+        fail("WAITING", "ENTRY_NOT_READY", "Stage 7 held the entry: " + "; ".join(entry.get("reasons") or [timing or "entry not ready"]))
+    elif entry:
+        gates["entry"] = _g("PASS", f"Entry {timing or 'ENTER_NOW'} · {entry.get('classification')} · {entry.get('breakoutQuality')}")
     # confirmation confidence
     gates["confidence"] = _g("PASS" if conf >= cfg["minConfidence"] else "FAIL",
                              f"Stage 7 confidence {conf:.1f} (min {cfg['minConfidence']:.0f})", value=conf, limit=cfg["minConfidence"])
@@ -477,6 +509,7 @@ def evaluate_setup(h: dict[str, Any], market: dict[str, dict[str, Any]], cfg: di
                    "currentLeg": (h.get("marketLeg") or {}).get("currentLeg"),
                    "reversalState": (h.get("marketLeg") or {}).get("reversalState"),
                    "expectedDestination": (h.get("marketLeg") or {}).get("expectedDestination")},
+        "campaign": h.get("campaign"),
     }
 
 
@@ -768,7 +801,10 @@ def evaluate_account(opp: dict[str, Any], acct: dict[str, Any], ps: dict[str, An
         gates["dailyLoss"] = _g("FAIL", "Day-start equity unknown")
         fail("RISK_BLOCKED", "DAILY_BASELINE_UNKNOWN", "Day-start equity unknown — daily-loss limit cannot be verified")
     # concurrency + same symbol
-    max_pos = min(int(cfg["maxConcurrentPositions"]), int(acct.get("maxConcurrentTrades") or cfg["maxConcurrentPositions"]))
+    technical = int(cfg.get("positionCeiling") or 20)
+    operator = int(cfg["maxConcurrentPositions"])
+    account_cap = int(acct.get("maxConcurrentTrades") or operator)
+    max_pos = min(operator, technical, account_cap)
     busy = ps["positionCount"] + ps["pendingCount"]
     if busy >= max_pos:
         gates["concurrency"] = _g("FAIL", f"{busy} open/pending of {max_pos} allowed")
@@ -784,6 +820,16 @@ def evaluate_account(opp: dict[str, Any], acct: dict[str, Any], ps: dict[str, An
     committed = ps["openRiskPct"] + ps["pendingRiskPct"]
     cons.append({"key": "portfolio", "label": "Portfolio risk", "headroomPct": cfg["maxPortfolioRiskPct"] - committed, "state": "EXPOSURE_BLOCKED",
                  "code": "PORTFOLIO_RISK_LIMIT", "detail": f"{committed:.2f}% committed of {cfg['maxPortfolioRiskPct']:.2f}%"})
+    held = _xau_holdback(sym, cfg, ctx)
+    if held > 0:
+        cons.append({"key": "xauReserve", "label": "XAUUSD reserved risk", "headroomPct": cfg["maxPortfolioRiskPct"] - committed - held,
+                     "state": "EXPOSURE_BLOCKED", "code": "XAU_RESERVE",
+                     "detail": f"{held:.2f}% held for XAUUSD under {cfg.get('xauReservePolicy')} · {committed:.2f}% already committed"})
+    campaign = opp.get("campaign") or {}
+    remaining = campaign.get("remainingRisk")
+    if remaining is not None and float(remaining) >= 0:
+        cons.append({"key": "campaign", "label": "Campaign risk", "headroomPct": float(remaining), "state": "EXPOSURE_BLOCKED",
+                     "code": "CAMPAIGN_RISK", "detail": f"Campaign remaining risk {float(remaining):.2f}%"})
     cur_rows = []
     for c, s in signed_legs(sym, d).items():
         net = ps["currency_exposure"].get(c, 0.0)
@@ -991,8 +1037,9 @@ def _authorization(opp: dict[str, Any], acct: dict[str, Any], ps: dict[str, Any]
         "riskAmount": round(float(sizing["riskMoney"]), 2), "riskCurrency": ps["currency"], "riskPct": round(float(sizing["riskPct"]), 4),
         "rewardRisk": geo.get("rewardRisk"), "marginRequired": round(float(sizing.get("marginRequired") or 0), 2),
         "expiresAt": iso(now + cfg["authTtlSec"]), "authorizedAt": iso(now), "configHash": ctx.get("configHash"),
-        "source": {"stage": 7, "symbol": opp["symbol"], "direction": opp["direction"], "confirmedSince": opp["confirmedSince"],
-                   "tradeType": opp.get("tradeType"), **opp["stage7"]},
+        "source": {"stage": 7 if opp.get("handoffKind") != "CAMPAIGN" else 8, "handoffKind": opp.get("handoffKind") or "STAGE7",
+                   "symbol": opp["symbol"], "direction": opp["direction"], "confirmedSince": opp["confirmedSince"],
+                   "tradeType": opp.get("tradeType"), "executionKey": opp.get("executionKey"), **opp["stage7"]},
         "evidence": {"setupScore": opp["score"], "setupGates": {k: v["status"] for k, v in opp["gates"].items()},
                      "accountGates": {k: v["status"] for k, v in gates.items()}, "sizing": {k: sizing.get(k) for k in
                      ("targetRiskPct", "allowedRiskPct", "lossPerLot", "fxRate", "fxSource", "volumeRaw", "marginRequired", "marginMethod", "marginLevelAfter")}},
@@ -1001,6 +1048,170 @@ def _authorization(opp: dict[str, Any], acct: dict[str, Any], ps: dict[str, Any]
 
 
 # ---------------------------------------------------------------- 4. run: all hand-offs x all accounts
+
+def evaluate_campaign(h: dict[str, Any], market: dict[str, dict[str, Any]], cfg: dict[str, Any], now: float) -> dict[str, Any]:
+    """Stage 8 qualification for a campaign leg. This is not a Stage 7 H1 handoff."""
+    sym = str(h.get("instrument") or "")
+    d = dsign(h.get("direction"))
+    key = setup_key(h)
+    entry = h.get("entry") or {}
+    timing = str(entry.get("timing") or "")
+    atr = float(h.get("atr") or 0)
+    conf = float(h.get("confidence") or 0)
+    inv = h.get("invalidationLevel")
+    m = market.get(sym) or {}
+    spec = m.get("spec") or {}
+    gates: dict[str, dict[str, Any]] = {}
+    fails: list[tuple[str, str, str]] = []
+
+    def fail(state: str, code: str, reason: str) -> None:
+        fails.append((state, code, reason))
+
+    if d == 0 or inv is None:
+        gates["structure"] = _g("FAIL", "Campaign leg has no direction or invalidation")
+        fail("RISK_BLOCKED", "INVALID_HANDOFF", "Campaign handoff is missing its direction or invalidation")
+    else:
+        gates["structure"] = _g("PASS", f"{h.get('opportunityFamily')} {h.get('TiTLevel') or ''} {h.get('legType')} {h.get('direction')}".strip())
+    if timing in ("WAIT_RETEST", "WAIT_PULLBACK", "WAIT_NEW_CONFIRMATION", "REJECT") or entry.get("classification") in ("EXTENDED", "POOR", "INVALID"):
+        gates["entry"] = _g("FAIL", f"Entry {timing or entry.get('classification')} is not an order")
+        fail("WAITING", "ENTRY_NOT_READY", "Breakout is not permission to enter: " + "; ".join(entry.get("reasons") or [timing or "entry not ready"]))
+    elif not h.get("executable"):
+        gates["entry"] = _g("FAIL", "Confirmation has not released this leg")
+        fail("WAITING", "ENTRY_NOT_READY", h.get("reason") or "Confirmation has not released this leg")
+    else:
+        gates["entry"] = _g("PASS", f"Entry {timing or 'REACTION'} · {h.get('legType')}")
+    gates["confidence"] = _g("PASS" if conf >= cfg["minConfidence"] else "FAIL", f"Confirmation {conf:.1f} (min {cfg['minConfidence']:.0f})")
+    if conf < cfg["minConfidence"]:
+        fail("RISK_BLOCKED", "CONFIDENCE_BELOW_MIN", f"Confirmation {conf:.1f} is below the {cfg['minConfidence']:.0f} minimum")
+    confirmed_at = parse_ts(h.get("confirmedSince"))
+    expires_at = None if confirmed_at is None else confirmed_at + cfg["setupTtlMin"] * 60
+    if expires_at is None:
+        gates["expiry"] = _g("FAIL", "Confirmation time unknown")
+        fail("STALE", "CONFIRMATION_TIME_UNKNOWN", "Campaign confirmation time is unknown")
+    elif now > expires_at:
+        gates["expiry"] = _g("FAIL", "Setup lifetime elapsed")
+        fail("EXPIRED", "SETUP_EXPIRED", "Campaign confirmation exceeded its lifetime")
+    else:
+        gates["expiry"] = _g("PASS", f"Confirmed {int((now - confirmed_at) / 60)} min ago")
+    bar_ts = h.get("barTs")
+    bar_sec = float(h.get("barSeconds") or 3600)
+    bar_age = None if bar_ts is None else now - (float(bar_ts) + bar_sec)
+    if bar_age is None or bar_age < -bar_sec or bar_age > bar_sec * 2:
+        gates["freshness"] = _g("FAIL", "Execution-timeframe close is missing or stale")
+        fail("STALE", "STAGE7_STALE", f"{h.get('executionTimeframe') or 'execution'} confirmation is not a fresh closed bar")
+    else:
+        gates["freshness"] = _g("PASS", f"Closed {h.get('executionTimeframe')} bar {max(0, int(bar_age))} s after its close")
+    bid, ask, t_ts = m.get("bid"), m.get("ask"), m.get("time")
+    tick_age = None if t_ts is None else now - float(t_ts)
+    price_ok = bool(bid and ask and ask >= bid and tick_age is not None and tick_age <= cfg["maxTickAgeSec"])
+    if not price_ok:
+        gates["price"] = _g("FAIL", "Live quote unavailable")
+        fail("STALE", "PRICE_STALE", "Current market price is unusable")
+    else:
+        gates["price"] = _g("PASS", f"Bid {bid} / ask {ask}")
+    spec_ok = bool(spec.get("tickSize") and spec.get("contractSize") and spec.get("volumeStep") and spec.get("volumeMin"))
+    if not spec_ok:
+        gates["spec"] = _g("FAIL", "Broker contract specification unavailable")
+        fail("STALE", "SPEC_UNAVAILABLE", "Broker contract specification unavailable")
+    elif int(spec.get("calcMode", 0)) not in LINEAR_CALC:
+        gates["spec"] = _g("FAIL", f"Unsupported profit calculation mode {spec.get('calcMode')}")
+        fail("RISK_BLOCKED", "SPEC_UNSUPPORTED", f"Profit calculation mode {spec.get('calcMode')} is not supported")
+    else:
+        gates["spec"] = _g("PASS", f"Contract {spec['contractSize']:g}")
+    if atr <= 0:
+        gates["atr"] = _g("FAIL", "ATR unavailable")
+        fail("RISK_BLOCKED", "ATR_UNAVAILABLE", "Execution-timeframe ATR is unavailable")
+    geo: dict[str, Any] = {"atr": _r(atr, 6), "bid": bid, "ask": ask}
+    if d and inv is not None and price_ok and atr > 0 and spec_ok:
+        inv = float(inv)
+        tick = float(spec.get("tickSize") or 0)
+        spread = float(ask) - float(bid)
+        mid = (float(ask) + float(bid)) / 2
+        buf = cfg["slBufferAtr"] * atr
+        if d > 0:
+            px = float(ask)
+            sl = _round_price(inv - buf, tick, "down")
+            beyond = float(bid) <= inv
+        else:
+            px = float(bid)
+            sl = _round_price(inv + buf + spread, tick, "up")
+            beyond = float(ask) >= inv
+        stop = (px - sl) * d
+        slip = cfg["slippageAtr"] * atr
+        loss_unit = stop + slip
+        target = h.get("targetPrice")
+        tp = None if target is None else _round_price(float(target), tick, "down" if d > 0 else "up")
+        rr = None if tp is None or loss_unit <= 0 else (float(tp) - px) * d / loss_unit
+        ref = h.get("lastClose")
+        drift = None if ref is None else (mid - float(ref)) * d / atr
+        geo.update({"entry": _r(px, 6), "stopLoss": _r(sl, 6), "takeProfit": _r(tp, 6), "stopDistance": _r(stop, 6),
+                    "lossPerUnit": _r(loss_unit, 6), "spread": _r(spread, 6), "spreadAtr": _r(spread / atr, 3),
+                    "rewardRisk": _r(rr, 2), "driftAtr": _r(drift, 3), "invalidation": inv, "mid": _r(mid, 6)})
+        if beyond or stop <= 0:
+            gates["invalidation"] = _g("FAIL", "Price is beyond invalidation")
+            fail("RISK_BLOCKED", "SL_INVALID", f"Price is already beyond the structural invalidation {inv}")
+        elif stop < cfg["minStopAtr"] * atr or stop > cfg["maxStopAtr"] * atr:
+            gates["stopDistance"] = _g("FAIL", f"Stop {stop / atr:.2f} ATR is outside {cfg['minStopAtr']}–{cfg['maxStopAtr']} ATR")
+            fail("RISK_BLOCKED" if stop < cfg["minStopAtr"] * atr else "WAITING", "STOP_TOO_TIGHT" if stop < cfg["minStopAtr"] * atr else "STOP_TOO_WIDE",
+                 f"Stop distance {stop / atr:.2f} ATR is outside the allowed range")
+        else:
+            gates["invalidation"] = _g("PASS", f"SL {sl}")
+            gates["stopDistance"] = _g("PASS", f"Stop {stop / atr:.2f} ATR")
+        if tp is None or (float(tp) - px) * d <= 0:
+            gates["target"] = _g("FAIL", "No structural target beyond the entry")
+            fail("RISK_BLOCKED", "NO_STRUCTURAL_TARGET", "Campaign leg has no structural target beyond the entry")
+        else:
+            gates["target"] = _g("PASS", f"TP {tp}")
+        if drift is None or drift > cfg["maxDriftAtr"]:
+            gates["drift"] = _g("FAIL", "Price has left the confirmation")
+            fail("WAITING", "SETUP_CHANGED", "Price moved too far from the confirmation close")
+        else:
+            gates["drift"] = _g("PASS", f"Drift {drift:.2f} ATR")
+        if spread > cfg["maxSpreadAtr"] * atr:
+            gates["spread"] = _g("FAIL", f"Spread {spread / atr:.3f} ATR")
+            fail("WAITING", "SPREAD_TOO_WIDE", "Spread exceeds the execution threshold")
+        else:
+            gates["spread"] = _g("PASS", f"Spread {spread / atr:.3f} ATR")
+        if rr is None or rr < cfg["minRR"]:
+            gates["rewardRisk"] = _g("FAIL", f"R:R {rr}")
+            fail("WAITING", "RR_BELOW_MIN", f"Reward:risk {rr} is below {cfg['minRR']}")
+        else:
+            gates["rewardRisk"] = _g("PASS", f"R:R {rr:.2f}")
+    score = round(min(100.0, conf), 1)
+    if score < cfg["minSetupScore"]:
+        gates["score"] = _g("FAIL", f"Score {score:.1f}")
+        fail("WAITING", "SETUP_SCORE_LOW", f"Setup score {score:.1f} is below {cfg['minSetupScore']:.0f}")
+    else:
+        gates["score"] = _g("PASS", f"Score {score:.1f}")
+    priority = {"RISK_BLOCKED": 0, "EXPIRED": 1, "STALE": 2, "WAITING": 3}
+    fails.sort(key=lambda f: priority.get(f[0], 9))
+    if fails:
+        state, code, reason = fails[0]
+    else:
+        state, code = "QUALIFIED", "SETUP_QUALIFIED"
+        reason = f"Campaign {h.get('legType')} qualified for {sym}"
+    campaign = dict(h.get("campaign") or {})
+    leg_risk = h.get("legRisk")
+    if leg_risk is not None:
+        campaign["remainingRisk"] = min(float(campaign.get("remainingRisk") if campaign.get("remainingRisk") is not None else leg_risk), float(leg_risk))
+    return {
+        "setupKey": key, "symbol": sym, "direction": "BULLISH" if d > 0 else "BEARISH" if d < 0 else "NEUTRAL",
+        "side": "BUY" if d > 0 else "SELL", "setupState": state, "setupReasonCode": code, "setupReason": reason,
+        "setupFailures": [{"state": s, "code": c, "reason": r} for s, c, r in fails],
+        "score": score, "components": [], "confidence": conf, "gates": gates, "geometry": geo,
+        "confirmedSince": iso(confirmed_at), "expiresAt": iso(expires_at),
+        "tradeType": h.get("opportunityFamily"), "marketLeg": None, "handoffKind": "CAMPAIGN",
+        "campaignId": h.get("campaignId"), "executionKey": h.get("executionKey"),
+        "campaign": campaign,
+        "stage7": {"confidence": conf, "model": h.get("legType"), "trigger": (h.get("trigger") or {}).get("type"),
+                   "triggerTs": (h.get("trigger") or {}).get("ts"), "invalidationLevel": inv, "freshness": "FRESH",
+                   "campaignId": h.get("campaignId"), "legType": h.get("legType"), "setupRevision": h.get("setupRevision"),
+                   "allocatedRisk": (h.get("campaign") or {}).get("allocatedRisk"), "opportunityFamily": h.get("opportunityFamily"),
+                   "TiTLevel": h.get("TiTLevel"), "executionTimeframe": h.get("executionTimeframe"),
+                   "parentTimeframe": h.get("parentTimeframe"), "childTimeframe": h.get("childTimeframe"),
+                   "executionKey": h.get("executionKey"), "tradeType": h.get("opportunityFamily")},
+    }
+
 
 def evaluate(handoffs: list[dict[str, Any]], accounts: list[dict[str, Any]], market: dict[str, dict[str, Any]], fx: FxFn,
              cfg: dict[str, Any], ctx: dict[str, Any]) -> dict[str, Any]:
@@ -1013,8 +1224,8 @@ def evaluate(handoffs: list[dict[str, Any]], accounts: list[dict[str, Any]], mar
     inflight = list(ctx.get("inflight") or [])
     handed = ctx.get("handedOff") or {}
     states = {a["id"]: account_state(a, market, fx, cfg, now, pending + inflight) for a in accounts}
-    opps = [evaluate_setup(h, market, cfg, now) for h in handoffs]
-    opps.sort(key=lambda o: (0 if o["setupState"] == "QUALIFIED" else 1, -o["score"], o["symbol"]))
+    opps = [evaluate_campaign(h, market, cfg, now) if h.get("handoffKind") == "CAMPAIGN" else evaluate_setup(h, market, cfg, now) for h in handoffs]
+    opps.sort(key=lambda o: (0 if o["setupState"] == "QUALIFIED" else 1, 0 if o.get("symbol") == "XAUUSD" and o.get("handoffKind") == "CAMPAIGN" else 1, -o["score"], o["symbol"]))
     authorizations: list[dict[str, Any]] = []
     pend_keys = {(a["setupKey"], a["accountId"]): a for a in pending}
     for o in opps:
@@ -1031,6 +1242,12 @@ def evaluate(handoffs: list[dict[str, Any]], accounts: list[dict[str, Any]], mar
                 if ev["authorization"]:
                     authorizations.append(ev["authorization"])
                     _allocate(ps, ev["authorization"])
+                    if o.get("handoffKind") == "CAMPAIGN" and o.get("campaignId"):
+                        spent = float(ev["authorization"].get("riskPct") or 0)
+                        for nxt in opps:
+                            camp = nxt.get("campaign") or {}
+                            if nxt is not o and nxt.get("campaignId") == o.get("campaignId") and camp.get("remainingRisk") is not None:
+                                camp["remainingRisk"] = max(0.0, float(camp["remainingRisk"]) - spent)
             evals.append(ev)
         evals.sort(key=lambda e: (STATE_ORDER.index(e["state"]) if e["state"] in STATE_ORDER else 99, str(e["name"])))
         o["accounts"] = evals
@@ -1095,7 +1312,8 @@ def _account_summary(a: dict[str, Any], ps: dict[str, Any], cfg: dict[str, Any])
         "dailyLoss": {"used": ps["dailyLossPct"], "limit": cfg["maxDailyLossPct"]},
         "drawdown": {"used": ps["drawdownPct"], "limit": cfg["maxDrawdownPct"]},
         "positions": {"used": ps["positionCount"] + ps["pendingCount"],
-                      "limit": min(int(cfg["maxConcurrentPositions"]), int(a.get("maxConcurrentTrades") or cfg["maxConcurrentPositions"]))},
+                      "limit": min(int(cfg["maxConcurrentPositions"]), int(cfg.get("positionCeiling") or 20),
+                                   int(a.get("maxConcurrentTrades") or cfg["maxConcurrentPositions"]))},
         "marginLevel": {"used": ps["marginLevel"], "limit": cfg["minMarginLevelPct"]},
     }
     cur = sorted(({"currency": c, "netPct": round(v, 4), "limit": cfg["maxCurrencyRiskPct"]} for c, v in ps["currency_exposure"].items() if abs(v) > 1e-9),

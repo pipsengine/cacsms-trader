@@ -5,7 +5,7 @@
   margin-bottom: 12px;
 }
 .hv-grid {
-  grid-template-columns: minmax(0, 2fr) minmax(300px, 0.9fr);
+  grid-template-columns: minmax(0, 2fr) minmax(0, 0.9fr);
   margin-bottom: 14px;
   align-items: start;
 }

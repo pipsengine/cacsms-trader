@@ -109,6 +109,15 @@ def position(sym, side, volume, entry, sl) -> dict:
 
 
 class SetupQualification(unittest.TestCase):
+    def test_stage7_wait_retest_is_not_authorized(self):
+        held = eur_long(entry={"timing": "WAIT_RETEST", "classification": "EXTENDED", "breakoutQuality": "ACCEPTABLE",
+                               "reasons": ["controlled retest required"]})
+        o, a = only(run([held], [acct()]))
+        self.assertEqual(o["setupState"], "WAITING")
+        self.assertEqual(o["setupReasonCode"], "ENTRY_NOT_READY")
+        self.assertEqual(o["authorizedAccounts"], 0)
+        self.assertNotEqual(a["state"], "AUTHORIZED")
+
     def test_long_geometry_and_score(self):
         o, _ = only(run([eur_long()], [acct()]))
         g = o["geometry"]
@@ -457,6 +466,7 @@ class AutonomousService(unittest.TestCase):
             return {"changed": 1, "created": [a["executionId"] for a in result["authorizations"]], "revoked": revoked, "expired": [], "runId": 1}
 
         self.patches = [
+            mock.patch.object(risk_service, "_economic_gate", lambda: {"EURUSD": {"blocks": False, "reason": "clear", "factor": 1.0}}),
             mock.patch.object(risk_service.rs, "persist", persist),
             mock.patch.object(risk_service.rs, "save_meta", lambda m: None),
             mock.patch.object(risk_service.rs, "previous_opportunities", lambda: {}),

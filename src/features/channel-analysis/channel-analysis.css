@@ -31,7 +31,7 @@
 /* toolbar */
 .ca-toolbar {
   display: grid;
-  grid-template-columns: 250px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 250px) minmax(0, 1fr) minmax(0, auto);
   gap: 12px;
   align-items: stretch;
   margin-bottom: 10px;

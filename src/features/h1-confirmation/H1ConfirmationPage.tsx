@@ -21,8 +21,8 @@ const biasTone = (d?: string | null) => (d?.includes('BULL') ? 'green' : d?.incl
 const signed = (v: number | null | undefined, d = 2) => (v == null || !Number.isFinite(v) ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(d)}`);
 const pct = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? '—' : `${v.toFixed(0)}%`);
 const px = (v: number | null | undefined, ref?: number | null) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(priceDigits(ref ?? v)));
-const ACTIVE: H1State[] = ['MONITORING', 'PULLBACK', 'SETUP_FORMING', 'CONFIRMING', 'CONFIRMED'];
-const STATE_ORDER: H1State[] = ['CONFIRMED', 'CONFIRMING', 'SETUP_FORMING', 'PULLBACK', 'MONITORING', 'REJECTED', 'INVALIDATED', 'WARMING_UP', 'STALE', 'BLOCKED', 'WAITING_FOR_STAGE6'];
+const ACTIVE: H1State[] = ['MONITORING', 'PULLBACK', 'SETUP_FORMING', 'CONFIRMING', 'BREAKOUT_CONFIRMED_WAIT_RETEST', 'CONFIRMED'];
+const STATE_ORDER: H1State[] = ['CONFIRMED', 'BREAKOUT_CONFIRMED_WAIT_RETEST', 'CONFIRMING', 'SETUP_FORMING', 'PULLBACK', 'MONITORING', 'REJECTED', 'INVALIDATED', 'WARMING_UP', 'STALE', 'BLOCKED', 'WAITING_FOR_STAGE6'];
 
 const isCandidate = (d: H1Decision) => d.state !== 'WAITING_FOR_STAGE6' && d.stage6?.state === 'READY_FOR_H1';
 
@@ -115,8 +115,15 @@ function Summary({ d }: { d: H1Decision }) {
         </b>
       </div>
       <div>
-        <span>Last closed H1</span>
-        <b>{d.h1 ? h1Label(d.h1.lastTs) : '—'}</b>
+        <span>Entry</span>
+        <b>{!d.entry || d.entry.timing === 'NONE' ? 'Not ready' : `${human(d.entry.timing)} · ${human(d.entry.breakoutQuality)}`}</b>
+      </div>
+      <div>
+        <span>Extension</span>
+        <b>
+          {d.entry?.extensionATR != null ? `${d.entry.extensionATR.toFixed(1)} ATR` : '—'}
+          {d.entry?.channelPosition != null ? ` · channel ${d.entry.channelPosition.toFixed(0)}%` : ''}
+        </b>
       </div>
     </div>
   );
@@ -304,6 +311,19 @@ function H1Drawer({ symbol, version, onClose }: { symbol: string; version: strin
                   <span>Channel location</span>
                   <b>
                     D1 {pct(s6?.positionD1)} · H8 {pct(s6?.positionH8)} · {human(s6?.zone)}
+                    {d.entry?.channelPosition != null ? <small className="muted"> · trade-direction {pct(d.entry.channelPosition)}</small> : null}
+                  </b>
+                  <span>Entry quality</span>
+                  <b>
+                    {d.entry ? (
+                      <>
+                        {human(d.entry.classification)} · {human(d.entry.breakoutQuality)}
+                        {d.entry.extensionATR != null ? ` · ${d.entry.extensionATR.toFixed(1)} ATR` : ''}
+                        <small className="muted"> · {d.entry.reasons.join('; ') || human(d.entry.timing)}</small>
+                      </>
+                    ) : (
+                      '—'
+                    )}
                   </b>
                   <span>H1 data</span>
                   <b>
@@ -319,6 +339,8 @@ function H1Drawer({ symbol, version, onClose }: { symbol: string; version: strin
                         <Badge tone="green">PUBLISHED TO OPPORTUNITIES &amp; RISK</Badge>
                         {d.confirmedSince ? <small className="muted"> since {new Date(d.confirmedSince).toLocaleString()}</small> : null}
                       </>
+                    ) : d.state === 'BREAKOUT_CONFIRMED_WAIT_RETEST' || d.entry?.timing === 'WAIT_RETEST' || d.entry?.timing === 'WAIT_PULLBACK' ? (
+                      <Badge tone="amber">HELD — ENTRY LOCATION</Badge>
                     ) : (
                       <Badge tone="gray">NOT PUBLISHED</Badge>
                     )}
@@ -494,7 +516,8 @@ export function H1ConfirmationPage() {
     <div className="h1-page">
       <PageHeader title="H1 Confirmation" subtitle="Confirms the Stage 6 direction on closed H1 structure — it never creates a direction (Stage 6 → Stage 7 → Stage 8)" />
       <div className="hr-status">
-        <Badge tone={status === 'HEALTHY' ? 'green' : status === 'DEGRADED' || status === 'STALE' ? 'amber' : status === 'ERROR' ? 'red' : 'gray'}>STAGE 7 {status}</Badge>
+        <Badge tone={status === 'HEALTHY' ? 'green' : status === 'DEGRADED' || status === 'STALE' ? 'amber' : status === 'ERROR' ? 'red' : 'gray'}>ENGINE {status}</Badge>
+        {d ? <Badge tone={h1Tone(d.state)}>TRADING {human(d.state)}</Badge> : null}
         <span>{run?.message ?? (store.loading ? 'Loading persisted Stage 7 decisions…' : 'No Stage 7 decision recorded yet')}</span>
         {age != null && (
           <span className="muted">

@@ -7,6 +7,7 @@ export type H1State =
   | 'PULLBACK'
   | 'SETUP_FORMING'
   | 'CONFIRMING'
+  | 'BREAKOUT_CONFIRMED_WAIT_RETEST'
   | 'CONFIRMED'
   | 'REJECTED'
   | 'INVALIDATED'
@@ -118,6 +119,21 @@ export type Stage8Handoff = {
   reasoning: string[];
   executes: false;
   confirmedSince?: string | null;
+  entry?: {
+    classification: string;
+    breakoutQuality: string;
+    extensionATR: number | null;
+    channelPosition: number | null;
+    distanceToObstacle?: number | null;
+    availableRoomATR?: number | null;
+    retestRequired: boolean;
+    stale: boolean;
+    timing: string;
+    reasons: string[];
+  } | null;
+  structure?: { parentTrend?: string | null; h1Phase?: string | null; bos?: boolean; choch?: boolean };
+  confirmation?: { state?: string | null; level?: number | null; candleClose?: number | null; confirmedAt?: number | null };
+  validity?: { current?: boolean; stale?: boolean; invalidationLevel?: number | null };
 };
 
 /** Stage 7 decision persisted in dbo.app_h1_instrument.decision_json. */
@@ -139,6 +155,7 @@ export type H1Decision = {
   invalidationLevel: number | null;
   confirmed: boolean;
   handoff: Stage8Handoff | null;
+  entry?: Stage8Handoff['entry'];
   stage6: Stage6Context | null;
   data: { status: string; reason: string; available: number; required: number; latestTs: number | null } | null;
   live: { price: number; at: number | null; event: 'BOS_ATTEMPT' | 'INVALIDATION_BREACH' | null; breakLevel: number | null; invalidationLevel: number | null; note: string | null } | null;
@@ -184,6 +201,8 @@ export type H1RunMeta = {
   counters?: H1Counters;
   confirmedNow?: string[];
   candidates?: string[];
+  missedCandles?: string[];
+  processing?: { stage7StartedAt?: string; stage7CompletedAt?: string; processingLatencyMs?: number; missed?: string[] };
   changes?: { symbol: string; from: H1State | null; to: H1State }[];
   upstream?: { directionRunAt: string | null; directionStatus: string | null; ready: number };
   live?: string[];

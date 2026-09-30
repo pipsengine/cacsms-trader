@@ -44,8 +44,21 @@ MACRO_TF_CFG: dict[str, dict[str, Any]] = {
 }
 
 
+# Execution timeframes for Trend-in-Trend L3/L4. Kept out of TF_CFG so Stage 5 still publishes only D1/H8/H1.
+EXEC_TF_CFG: dict[str, dict[str, Any]] = {
+    "M15": {"lookback": 240, "pivot": 3, "minSwingAtr": 1.0, "minBars": 80, "maxSwings": 16, "minAnchorGap": 4,
+            "invalidBars": 24, "chartBars": 240},
+    "M5": {"lookback": 240, "pivot": 3, "minSwingAtr": 1.0, "minBars": 80, "maxSwings": 16, "minAnchorGap": 4,
+           "invalidBars": 24, "chartBars": 240},
+}
+
+
 def tf_cfg(tf: str) -> dict[str, Any]:
-    return TF_CFG[tf] if tf in TF_CFG else MACRO_TF_CFG[tf]
+    if tf in TF_CFG:
+        return TF_CFG[tf]
+    if tf in EXEC_TF_CFG:
+        return EXEC_TF_CFG[tf]
+    return MACRO_TF_CFG[tf]
 
 CONFIG: dict[str, Any] = {
     "atrLen": 14,

@@ -130,6 +130,11 @@ class RiskService:
         now = time.time()
         cfg, _ = rs.load_config()
         handoffs, stage7 = rs.handoffs()
+        try:
+            import campaign_service
+            handoffs = list(handoffs) + campaign_service.pending_handoffs()
+        except Exception:
+            pass
         accounts = rs.accounts()
         day0 = self.day_start(now)
         live = self.provider.account(day0) if self.provider else None
@@ -173,8 +178,15 @@ class RiskService:
         corr_syms = symbols + [p["instrument"] for p in actx["pending"]]
         corr = self._correlations(corr_syms, int(cfg["correlationLookback"])) if handoffs else {}
         h1meta = confirm_store.load_meta() or {}
+        xau = None
+        try:
+            import opportunity_service
+            xau = (opportunity_service.current().get("summary") or {})
+        except Exception:
+            xau = None
         return {"now": now, "cfg": cfg, "handoffs": handoffs, "stage7": stage7, "accounts": accounts, "live": live, "terminalAccount": terminal,
-                "market": market, "fx": fx, "brokerMargin": broker_margin, "corr": corr, "auto": rs.auto_enabled(), "h1Meta": h1meta, **actx}
+                "market": market, "fx": fx, "brokerMargin": broker_margin, "corr": corr, "auto": rs.auto_enabled(), "h1Meta": h1meta,
+                "xauWatch": xau, **actx}
 
     # ------------------------------------------------------------ detection
     def _signatures(self, inp: dict[str, Any]) -> dict[str, Any]:
@@ -277,7 +289,8 @@ class RiskService:
                    "approvals": inp["approvals"], "brokerMargin": inp["brokerMargin"],
                    "inflight": inp.get("inflight") or [], "handedOff": inp.get("handedOff") or {},
                    "terminalCurrency": (inp.get("live") or {}).get("currency"), "configHash": risk.config_hash(cfg),
-                   "economic": _economic_gate()}
+                   "economic": _economic_gate(),
+                   "xauWatchState": ((inp.get("xauWatch") or {}).get("xau") if isinstance(inp.get("xauWatch"), dict) else None)}
             result = risk.evaluate(inp["handoffs"], inp["accounts"], inp["market"], inp["fx"], cfg, ctx)
             if self._prev is None:
                 try:

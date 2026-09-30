@@ -241,6 +241,63 @@ class Confirmation(unittest.TestCase):
         o = confirm.evaluate("EURUSD", dec, series(len(b)), b, NOW, live={"price": base["invalidationLevel"] - 5 * PIP, "time": T0})
         self.assertEqual(o["live"]["event"], "INVALIDATION_BREACH")
 
+    def test_extended_breakout_is_not_an_immediate_entry(self):
+        o = ev(scenario(*[(-20, 5), (12, 3), (40, 1)]))
+        self.assertEqual(o["state"], "BREAKOUT_CONFIRMED_WAIT_RETEST", o["reason"])
+        self.assertEqual(o["entry"]["timing"], "WAIT_RETEST")
+        self.assertEqual(o["entry"]["classification"], "EXTENDED")
+        self.assertFalse(o["confirmed"])
+        self.assertIsNone(o["handoff"])
+        self.assertGreaterEqual(o["entry"]["extensionATR"], 2.5)
+
+    def test_bearish_extension_is_the_mirror(self):
+        o = ev(scenario(*[(-20, 5), (12, 3), (40, 1)], mirror=True), direction="BEARISH")
+        self.assertEqual(o["state"], "BREAKOUT_CONFIRMED_WAIT_RETEST", o["reason"])
+        self.assertIsNone(o["handoff"])
+        self.assertEqual(o["entry"]["timing"], "WAIT_RETEST")
+
+    def test_new_pullback_discards_the_previous_break(self):
+        o = ev(scenario(*BULL_BOS, (-30, 8)))
+        self.assertNotEqual(o["state"], "CONFIRMED", o["reason"])
+        self.assertIsNone(o["handoff"])
+        self.assertNotEqual(o["entry"]["timing"], "ENTER_NOW")
+
+    def test_reconnect_does_not_execute_an_old_break(self):
+        b = scenario(*[(-20, 5), (12, 3), (20, 1), (8, 1)])
+        fresh = confirm.evaluate("EURUSD", s6(), series(len(b)), b, NOW)
+        self.assertTrue(fresh["confirmed"], fresh["reason"])
+        o = confirm.evaluate("EURUSD", s6(), series(len(b)), b, NOW, missed_bars=3)
+        self.assertFalse(o["confirmed"], o["reason"])
+        self.assertIsNone(o["handoff"])
+        self.assertEqual(o["reasonCode"], "MISSED_CONFIRMATION")
+        self.assertEqual(o["entry"]["timing"], "WAIT_NEW_CONFIRMATION")
+
+    def test_breakout_is_not_the_same_as_entry_across_regimes(self):
+        """Structural confirmation and immediate entry are counted separately. One path must not define the rule."""
+        regimes = [
+            ("value", [(-20, 5), (12, 3), (20, 1)], s6(), False),
+            ("extended", [(-20, 5), (12, 3), (40, 1)], s6(), False),
+            ("retest", RETEST, s6(phase="RETEST", zone="EXTENDED"), False),
+            ("false", FALSE_BREAK, s6(), True),
+        ]
+        immediate = wait = failed = 0
+        for name, tail, dec, false_break in regimes:
+            bars_ = scenario(*(FALSE_BREAK if false_break else tail))
+            o = ev(bars_, dec=dec)
+            if o["confirmed"]:
+                immediate += 1
+            elif o["state"] == "BREAKOUT_CONFIRMED_WAIT_RETEST":
+                wait += 1
+            elif o["state"] in ("REJECTED", "INVALIDATED"):
+                failed += 1
+            if o["confirmed"]:
+                self.assertIn(o["entry"]["timing"], ("ENTER_NOW", "RETEST_CONFIRMED"))
+            if o["state"] == "BREAKOUT_CONFIRMED_WAIT_RETEST":
+                self.assertIsNone(o["handoff"])
+        self.assertGreaterEqual(immediate, 1)
+        self.assertGreaterEqual(wait, 1)
+        self.assertGreaterEqual(failed, 1)
+
 
 def iso(offset: float = 0) -> str:
     return datetime.fromtimestamp(NOW + offset, timezone.utc).isoformat()

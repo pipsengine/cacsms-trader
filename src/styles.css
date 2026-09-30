@@ -8,8 +8,8 @@
 .brand{padding:2px 6px 8px;gap:10px;min-width:0;flex:1}
 .brand-mark{width:36px;height:36px;border-radius:10px;display:grid;place-items:center;background:linear-gradient(145deg,#123b61,#0b243c);border:1px solid #1f4d75;color:#59b7ff;flex:0 0 auto;box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
 .brand-copy{min-width:0;overflow:hidden}
-.brand-copy b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.brand-copy small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand-copy b{font-size:15px;letter-spacing:.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.brand-copy small{display:block;white-space:normal;line-height:1.25;overflow:hidden}
 .sidebar-toggle{width:30px;height:30px;border-radius:8px;border:1px solid #1d3a55;background:#0c1f33;color:#8eb0cc;display:grid;place-items:center;cursor:pointer;flex:0 0 auto;transition:background .15s ease,border-color .15s ease,color .15s ease}
 .sidebar-toggle:hover{background:#12324d;border-color:#2d6ea0;color:#dff0ff}
 .sidebar.collapsed .sidebar-top{flex-direction:column;align-items:center;gap:8px}
@@ -39,7 +39,7 @@
 .icon-action{width:40px;height:40px;border:0;border-radius:10px;display:grid;place-items:center;cursor:pointer}
 .icon-action.danger{background:#54252b;color:#ff8f99}
 .icon-action.primary{background:#1266a5;color:#fff}
-.main{margin-left:264px;width:calc(100% - 264px);transition:margin-left .22s ease,width .22s ease}
+.main{margin-left:264px;width:calc(100% - 264px);min-width:0;max-width:100%;transition:margin-left .22s ease,width .22s ease}
 .app.nav-collapsed .main{margin-left:76px;width:calc(100% - 76px)}
 @media(max-width:1100px){
   .sidebar{width:232px}
@@ -56,4 +56,42 @@
   .top-session-copy small{white-space:normal}
 }
 .empty-block{display:flex;flex-direction:column;gap:6px;padding:20px 12px;text-align:center;color:var(--muted,#8395ad)}.empty-block b{color:inherit;opacity:.95;font-size:14px}.empty-block span{font-size:13px;line-height:1.45;max-width:420px;margin:0 auto}.alert{color:#f06b78;padding:8px 0}
+
+/* Laptop shell: the sidebar is fixed, so the content column must stay inside the
+   remaining width. Wide tables scroll inside their card instead of stretching the window. */
+html,body{max-width:100%;overflow-x:hidden}
+.app{width:100%;max-width:100%;overflow-x:hidden}
+.main{container-type:inline-size;container-name:app-main}
+.topbar,main{min-width:0;max-width:100%}
+main{overflow-x:auto}
+.topbar{gap:12px;overflow:hidden}
+.search{width:auto;max-width:320px;min-width:0;flex:1 1 180px}
+.top-actions{min-width:0;flex-shrink:1}
+.top-session{min-width:0}
+.top-session-copy{min-width:0}
+.top-session-copy b,.top-session-copy small{overflow:hidden;text-overflow:ellipsis}
+main>*{min-width:0;max-width:100%}
+.page-head,.card,.card-head,.card-head>div,.metrics,.grid-2,.grid-3,.grid-vision,.funnel,.tabs,.pipeline,.table-wrap{min-width:0;max-width:100%}
+.metrics{grid-template-columns:repeat(4,minmax(0,1fr))}
+.grid-2{grid-template-columns:minmax(0,1.65fr) minmax(260px,1fr)}
+.grid-3{grid-template-columns:repeat(3,minmax(0,1fr))}
+.grid-vision{grid-template-columns:minmax(0,2fr) minmax(240px,.8fr)}
+.grid-2>*,.grid-3>*,.grid-vision>*,.metrics>*{min-width:0}
+.page-head{flex-wrap:wrap;gap:12px}
+.card-head{gap:10px}
+.card-head p,.stage b,.stage small{overflow-wrap:anywhere}
+.stage{min-width:0}
+.stage div{min-width:0}
+.funnel{flex-wrap:wrap}
+.table-wrap,.mt5-table-wrap,.ca-table-wrap,.ei-table-wrap{display:block;width:100%;max-width:100%;overflow-x:auto;overflow-y:auto}
+.table-wrap th:first-child,.table-wrap td:first-child{position:sticky;left:0;z-index:1;background:#0c1a2a}
+.table-wrap thead th:first-child{z-index:2;background:#0d1b2b}
+.table-wrap tbody tr:hover td:first-child,.table-wrap tbody tr.row-selected td:first-child{background:#10283d}
+@container app-main (max-width: 1080px){
+  .grid-2,.grid-vision{grid-template-columns:minmax(0,1fr)}
+  .grid-3,.health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .strength-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+  main{padding:16px 14px 22px}
+  .page-head h1{font-size:22px}
+}
 
