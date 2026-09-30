@@ -46,7 +46,7 @@ function locatedPrice(symbol: string, value?: number | null) {
   return value.toFixed(digits);
 }
 
-function XauWatch({ autonomy }: { autonomy?: { opportunity?: { summary?: { production?: { operatorPositionLimit?: number; xauReservePct?: number }; xau?: string }; instruments?: { symbol: string; hypotheses?: OpportunityHypothesis[]; execution?: Record<string, { direction?: string; status?: string; position?: number | null }> }[] } } }) {
+function XauWatch({ autonomy }: { autonomy?: { opportunity?: { summary?: { production?: { operatorPositionLimit?: number; xauReservePct?: number }; xau?: string }; instruments?: { symbol: string; hypotheses?: OpportunityHypothesis[]; execution?: Record<string, { direction?: string; status?: string; position?: number | null }> }[] } | null } | null }) {
   const book = autonomy?.opportunity?.instruments?.find((row) => row.symbol === 'XAUUSD');
   const live = (book?.hypotheses ?? []).filter((item) => item.status && item.status !== 'NOT_DETECTED' && item.opportunityFamily);
   const production = autonomy?.opportunity?.summary?.production;

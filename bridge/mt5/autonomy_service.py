@@ -550,10 +550,34 @@ class AutonomousOrchestrator:
         except Exception:
             out["opportunity"] = None
         try:
+            import channel_breakout
+            snap = channel_breakout.SCANNER.snapshot()
+            out["channelBreakout"] = {
+                "scanned": snap.get("instrumentsScanned"),
+                "universe": snap.get("universe"),
+                "active": snap.get("activeCount"),
+                "counts": snap.get("counts"),
+                "health": snap.get("health"),
+            }
+        except Exception:
+            out["channelBreakout"] = None
+        try:
             import campaign_service
             out["campaign"] = campaign_service.snapshot()
         except Exception:
             out["campaign"] = None
+        try:
+            import notification_service as notes
+            status = notes.SERVICE.public_status()
+            out["notifications"] = {
+                "health": status.get("health"),
+                "pending": status.get("pending"),
+                "failedToday": status.get("failedToday"),
+                "deadLetter": status.get("deadLetter"),
+                "masterEnabled": status.get("masterEnabled"),
+            }
+        except Exception:
+            out["notifications"] = None
         out["engines"] = {
             "S1": {"health": "HEALTHY" if self.connected_fn() else "DEGRADED"},
             "S4": self.scanner.meta, "S5": self.vision.meta, "CHANNELS": self.channels.meta if self.channels else None, "S6": self.direction.meta,

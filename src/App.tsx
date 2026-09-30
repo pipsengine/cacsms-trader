@@ -45,7 +45,7 @@ const pages: Record<string, React.ComponentType> = {
 const pageBySlug = Object.fromEntries(Object.keys(pages).map((label) => [slug(label), label]));
 
 function pageFromHash(): string {
-  const raw = decodeURIComponent(window.location.hash.replace(/^#\/?/, ''));
+  const raw = decodeURIComponent(window.location.hash.replace(/^#\/?/, '')).split('?')[0];
   if (pages[raw]) return raw;
   return pageBySlug[raw] || 'Overview';
 }

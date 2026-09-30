@@ -134,7 +134,18 @@ class ChannelService:
                 self.meta["lastError"] = f"{type(exc).__name__}: {exc}"
                 self.meta["status"] = "DEGRADED"
                 traceback.print_exc()
-            self._wake.wait(timeout=CONFIG["loopSec"])
+            # Full channel rebuild stays on loopSec. Between those runs, refresh the live tick
+            # and breakout proximity once a second without reloading candle history.
+            deadline = time.monotonic() + CONFIG["loopSec"]
+            while time.monotonic() < deadline:
+                if self._wake.wait(timeout=1):
+                    break
+                if analysis_gate.paused():
+                    continue
+                try:
+                    self._live_pulse()
+                except Exception:
+                    traceback.print_exc()
             self._wake.clear()
 
     def tick(self) -> dict[str, Any]:
@@ -145,9 +156,58 @@ class ChannelService:
             dirty, self._dirty = self._dirty, {}
             reasons, self._reasons = self._reasons, {}
         if dirty:
-            return self.run(dirty, reasons, series)
-        self._idle()
-        return {"analysed": 0}
+            result = self.run(dirty, reasons, series)
+        else:
+            self._idle()
+            result = {"analysed": 0}
+        self._observe_breakouts(series)
+        return result
+
+    def _live_pulse(self) -> None:
+        """Move price, distance and near-break state with the tick. Closed-candle breaks still wait for the scan."""
+        self._live_check()
+        self._observe_breakouts(None, refresh_context=False)
+
+    def _observe_breakouts(self, series: dict[tuple[str, str], dict[str, Any]] | None, refresh_context: bool = True) -> None:
+        """Watchlist from channels already in memory. Failure here does not stop channel analysis."""
+        try:
+            import channel_breakout
+        except ImportError:  # pragma: no cover
+            from bridge.mt5 import channel_breakout  # type: ignore
+        try:
+            if refresh_context:
+                channel_breakout.SCANNER.ensure_execution(series)
+                hypotheses: list[dict[str, Any]] = []
+                try:
+                    import opportunity_service
+                except ImportError:  # pragma: no cover
+                    from bridge.mt5 import opportunity_service  # type: ignore
+                current = opportunity_service.current()
+                for row in current.get("instruments") or []:
+                    hypotheses.extend(row.get("hypotheses") or [])
+                self._breakout_hypotheses = hypotheses
+            channel_breakout.SCANNER.observe(self._cache, self._live, getattr(self, "_breakout_hypotheses", []))
+            fresh = [event for event in channel_breakout.SCANNER.events if not event.get("persisted")]
+            by_symbol: dict[str, list[dict[str, Any]]] = {}
+            for event in fresh:
+                by_symbol.setdefault(str(event.get("symbol") or ""), []).append(event)
+            for symbol, rows in by_symbol.items():
+                if not symbol:
+                    continue
+                try:
+                    cs.add_events(symbol, rows)
+                except Exception:
+                    traceback.print_exc()
+            for event in fresh:
+                event["persisted"] = True
+            try:
+                import notification_service as notes
+                for event in fresh:
+                    notes.SERVICE.ingest_market(event, channel_breakout.SCANNER.candidate(str(event.get("candidateId") or "")))
+            except Exception:
+                traceback.print_exc()
+        except Exception:
+            traceback.print_exc()
 
     def _idle(self) -> None:
         if self.meta.get("status") in ("STARTING", "PAUSED"):

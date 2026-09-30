@@ -1,0 +1,73 @@
+.note-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+.note-groups h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+}
+.note-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 13px;
+}
+.note-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+.note-actions input[type='email'] {
+  min-width: 240px;
+}
+.note-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px 14px;
+  margin-top: 14px;
+}
+.note-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #9fb2c8;
+}
+.note-form input {
+  font-size: 13px;
+}
+.note-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-top: 8px;
+}
+.note-table th,
+.note-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  white-space: nowrap;
+}
+.note-filters {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.note-filters button.on {
+  font-weight: 700;
+}
+.cb-mail p {
+  margin: 4px 0;
+}
+.cb-mail ul {
+  margin: 8px 0 0;
+  padding-left: 16px;
+}

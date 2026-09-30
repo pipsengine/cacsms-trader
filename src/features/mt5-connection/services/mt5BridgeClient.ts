@@ -379,6 +379,13 @@ export type AutonomyState = {
   } | null;
   decisions?: AutonomyDecision[];
   events?: { id: number; type: string; stage: number | null; symbol: string | null; severity: string; createdAt: string | null }[];
+  notifications?: {
+    health?: string;
+    pending?: number;
+    failedToday?: number;
+    deadLetter?: number;
+    masterEnabled?: boolean;
+  } | null;
 };
 
 export async function bridgeAutonomyState(): Promise<AutonomyState> {

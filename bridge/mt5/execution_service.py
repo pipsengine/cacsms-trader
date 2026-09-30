@@ -88,6 +88,14 @@ class ExecutionService:
             except Exception:  # pragma: no cover
                 traceback.print_exc()
 
+    def _email(self, event_type: str, execution: dict[str, Any]) -> None:
+        """Observes a broker outcome. A mail failure does not change the execution record."""
+        try:
+            import notification_service as notes
+            notes.SERVICE.ingest_execution(event_type, execution)
+        except Exception:
+            traceback.print_exc()
+
     def _event(self, x: dict[str, Any] | None, kind: str, state: str | None, detail: str, data: Any = None, account: str | None = None) -> None:
         self.s.event(x["executionId"] if x else None, (x or {}).get("accountId") or account, kind, state, detail, data)
 
@@ -336,6 +344,7 @@ class ExecutionService:
         if deals:
             self.s.deals_upsert(attached["id"], x["executionId"], deals)
         self._event(x, "RECONCILIATION", x["orderState"], x["stateReason"], {"ticket": pos["ticket"], "volume": vol, "price": fill})
+        self._email("ORDER_PARTIALLY_FILLED" if partial else "ORDER_FILLED", x)
         self.s.recon_resolve(None, f"UNKNOWN_OUTCOME|{attached['id']}|{x['executionId']}", "AUTO_LINKED", "stage9", why)
         self._notify("FILLED")
 
@@ -408,6 +417,7 @@ class ExecutionService:
         mg.update({"exitPending": False, "inFlight": False})
         self._save(x)
         self._event(x, "EXIT", "CLOSED", x["stateReason"], {"summary": summ})
+        self._email("POSITION_CLOSED", x)
         rec = ex.trade_record(x, summ, self.s.orders(x["executionId"]), self.s.events(x["executionId"]))
         if self.s.publish_trade(rec):
             x["publishedAt"] = ex.iso(self.clock())
@@ -749,6 +759,7 @@ class ExecutionService:
                       "stateReason": f"Pending order #{r.get('order')} placed — {cls['reason']}"})
             self._save(x)
             self._event(x, "BROKER", "ACKNOWLEDGED", x["stateReason"])
+            self._email("ORDER_SUBMITTED", x)
             return
         if out == "NO_FILL_RETRY":
             x["requotes"] = n
@@ -769,6 +780,7 @@ class ExecutionService:
             x.update({"orderState": "REJECTED", "stateReason": f"Broker rejected: {cls['reason']}"})
             self._save(x)
             self._event(x, "BROKER", "REJECTED", x["stateReason"])
+            self._email("ORDER_REJECTED", x)
             return
         x.update({"orderState": "UNKNOWN", "stateReason": f"Submission outcome unknown ({cls['reason']}) — reconciling by execution ID, never resent"})
         self._save(x)

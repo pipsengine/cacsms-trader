@@ -648,7 +648,7 @@ def current_bars(now: int, rates: dict[str, list[tuple]], closed_mn1: list[tuple
         h8 = forming_bucket(h1, now, TF_SEC["H8"])
         if h8:
             out["H8"] = h8
-    for src, tf in (("D1", "D1"), ("W1", "W"), ("MN1", "MN")):
+    for src, tf in (("D1", "D1"), ("W1", "W"), ("MN1", "MN"), ("M15", "M15"), ("M5", "M5")):
         rows = rates.get(src) or []
         if rows:
             out[tf] = tuple(rows[-1][:5])

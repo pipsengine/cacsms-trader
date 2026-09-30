@@ -902,6 +902,8 @@ def _channel_market(symbol: str) -> dict[str, Any] | None:
         "D1": rates(mt5.TIMEFRAME_D1, 1),
         "W1": rates(mt5.TIMEFRAME_W1, 1),
         "MN1": rates(mt5.TIMEFRAME_MN1, 1),
+        "M15": rates(mt5.TIMEFRAME_M15, 1),
+        "M5": rates(mt5.TIMEFRAME_M5, 1),
     }
 
 
@@ -935,7 +937,11 @@ def cmd_channel_live(symbol: str) -> dict[str, Any]:
     price = (market["bid"] + market["ask"]) / 2
     closed = _closed_months(symbol, market["now"])
     bars = channel_analysis.current_bars(market["now"], market, closed)
-    channels = CHANNELS._cache.get(symbol) or {}
+    try:
+        import channel_breakout
+    except ImportError:  # pragma: no cover
+        from bridge.mt5 import channel_breakout  # type: ignore
+    channels = {**(CHANNELS._cache.get(symbol) or {}), **(channel_breakout.SCANNER._exec.get(symbol) or {})}
     payload: dict[str, Any] = {}
     views: dict[str, Any] = {}
     for tf, bar in bars.items():
@@ -1439,6 +1445,28 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self._json(200, cmd_h1_chart(symbol, int(_q(qs, "bars") or 180)))
                 return
+            if parsed.path == "/notifications/status":
+                import notification_service as notes
+                self._json(200, notes.SERVICE.public_status())
+                return
+            if parsed.path == "/notifications/history":
+                import notification_service as notes
+                qs = parse_qs(parsed.query)
+                self._json(200, {"ok": True, "notifications": notes.SERVICE.history(_q(qs, "status"), _q(qs, "candidateId"), int(_q(qs, "limit") or 40))})
+                return
+            if parsed.path == "/channel-breakouts/state":
+                import channel_breakout
+                self._json(200, {"ok": True, **channel_breakout.SCANNER.snapshot()})
+                return
+            if parsed.path == "/channel-breakouts/candidate":
+                import channel_breakout
+                qs = parse_qs(parsed.query)
+                row = channel_breakout.SCANNER.chart(_q(qs, "id") or "")
+                if not row:
+                    self._json(404, {"ok": False, "message": "Breakout candidate is not on the current watchlist"})
+                    return
+                self._json(200, {"ok": True, **row})
+                return
             if parsed.path.startswith("/channels/"):
                 qs = parse_qs(parsed.query)
                 if parsed.path == "/channels/instruments":
@@ -1534,6 +1562,18 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             body = self._read_json()
+            if parsed.path == "/notifications/settings":
+                import notification_service as notes
+                try:
+                    self._json(200, notes.SERVICE.update_settings(body))
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "message": str(exc)})
+                return
+            if parsed.path == "/notifications/test":
+                import notification_service as notes
+                result = notes.SERVICE.send_test()
+                self._json(int(result.get("httpStatus") or (200 if result.get("ok") else 503)), result)
+                return
             if parsed.path == "/economic/refresh":
                 self._json(202, ECONOMIC.refresh())
                 return
@@ -1814,6 +1854,12 @@ def main() -> None:
         else:
             print(f"[mt5-bridge] MT5 startup warning: {message}")
     # Bound before touching MT5: a terminal busy downloading history can block initialize() for minutes.
+    try:
+        import notification_service as notes
+        notes.SERVICE.start()
+        print("[mt5-bridge] notification email worker started")
+    except Exception as exc:
+        print(f"[mt5-bridge] notification worker warning: {exc}")
     if history_ready:
         HISTORY.start()
         print("[mt5-bridge] autonomous historical synchronizer started")

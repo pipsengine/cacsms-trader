@@ -21,6 +21,57 @@ export interface ChannelLiveQuote {
   message?: string;
 }
 
+export interface BreakoutState {
+  ok?: boolean;
+  health?: string;
+  lastScan?: number | null;
+  instrumentsScanned?: number;
+  universe?: number;
+  activeCount?: number;
+  counts?: Record<string, number>;
+  candidates?: BreakoutCandidate[];
+  history?: BreakoutCandidate[];
+  message?: string;
+}
+
+export interface BreakoutCandidate {
+  candidateId: string;
+  symbol: string;
+  titLevel: string;
+  opportunityFamily?: string;
+  channelRole?: string;
+  confirmationTimeframe?: string;
+  parent?: { timeframe?: string; direction?: string; channelId?: string };
+  channel?: {
+    id?: string; timeframe?: string; role?: string; direction?: string; status?: string;
+    confidence?: number; position?: number | null; upper?: number; mid?: number; lower?: number;
+  };
+  breakout?: {
+    relevantBoundary?: string; expectedDirection?: string; boundaryPrice?: number; currentPrice?: number | null;
+    distancePrice?: number | null; distanceATR?: number | null; state?: string; engineState?: string;
+    detectedAt?: number | null; confirmedAt?: number | null; breakPrice?: number | null; quality?: number | null;
+    penetrationAtr?: number | null;
+  };
+  retest?: {
+    state?: string | null; zoneLow?: number | null; zoneHigh?: number | null;
+    startedAt?: number | null; confirmedAt?: number | null; failureReason?: string | null;
+  };
+  structure?: { bos?: { label?: string } | null; choch?: { label?: string } | null };
+  p1?: { state?: string | null; reason?: string | null };
+  p2?: { state?: string | null; reason?: string | null };
+  freshness?: { state?: string; updatedAt?: number };
+  removedReason?: string;
+  removedAt?: number;
+}
+
+export interface BreakoutChart {
+  candles?: { time: number; open: number; high: number; low: number; close: number }[];
+  lines?: { time: number; upper: number; lower: number; mid: number }[];
+  retest?: { zoneLow?: number | null; zoneHigh?: number | null };
+  boundary?: string;
+  breakPrice?: number | null;
+}
+
 const BASE = (import.meta.env.VITE_MT5_BRIDGE_URL as string | undefined)?.replace(/\/$/, '') || '/mt5-bridge';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -52,3 +103,10 @@ export const requestChannelReanalyse = (instrument: string, timeframes?: Channel
     method: 'POST',
     body: JSON.stringify({ instrument, timeframes, reason: 'operator diagnostic from Channel Analysis' }),
   });
+
+export const fetchBreakoutState = () => request<BreakoutState>('/channel-breakouts/state');
+
+export const fetchBreakoutCandidate = (id: string) =>
+  request<{ ok: boolean; candidate: BreakoutCandidate; chart: BreakoutChart | null }>(
+    `/channel-breakouts/candidate?id=${encodeURIComponent(id)}`,
+  );

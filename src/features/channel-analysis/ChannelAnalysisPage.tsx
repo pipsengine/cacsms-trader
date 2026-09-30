@@ -9,10 +9,18 @@ import {
   useChannelStore,
 } from './services/channelStore';
 import { startAutonomyStore, useAutonomyState } from '../workflow-engine/services/autonomyStore';
+import { BreakoutTab, useBreakoutWatch } from './components/BreakoutTab';
 import { ChannelCard } from './components/ChannelCard';
 import { ChannelDetailModal } from './components/ChannelDetailModal';
 import { ChannelAnalysisSkeleton, ChannelMasthead, StructureInterpretationPanel, TrendMap } from './components/Panels';
 import './channel-analysis.css';
+
+type AnalysisTab = 'channels' | 'breakouts';
+
+function tabFromHash(): AnalysisTab {
+  const query = window.location.hash.split('?')[1] || '';
+  return new URLSearchParams(query).get('tab') === 'breakouts' ? 'breakouts' : 'channels';
+}
 
 function useModalKeys(selected: ChannelTimeframe | null, onSelect: (tf: ChannelTimeframe | null) => void) {
   useEffect(() => {
@@ -34,6 +42,18 @@ export default function ChannelAnalysisPage() {
   const vm = useChannelStore();
   const execution = useAutonomyState()?.opportunity?.instruments?.find((row) => row.symbol === vm.instrument)?.execution;
   const [selected, setSelected] = useState<ChannelTimeframe | null>(null);
+  const [tab, setTab] = useState<AnalysisTab>(tabFromHash);
+  const breakouts = useBreakoutWatch();
+  useEffect(() => {
+    const sync = () => setTab(tabFromHash());
+    window.addEventListener('hashchange', sync);
+    return () => window.removeEventListener('hashchange', sync);
+  }, []);
+  const chooseTab = (next: AnalysisTab) => {
+    setTab(next);
+    const hash = next === 'breakouts' ? '#/channel-analysis?tab=breakouts' : '#/channel-analysis';
+    if (window.location.hash !== hash) history.replaceState(null, '', hash);
+  };
   const close = useCallback(() => setSelected(null), []);
   useModalKeys(selected, setSelected);
 
@@ -43,8 +63,21 @@ export default function ChannelAnalysisPage() {
   const lastOk = vm.lastFetchAt ? age((Date.now() - vm.lastFetchAt) / 1000) : null;
   const universe = data?.universe ?? [];
 
+  const watchCount = breakouts.state?.activeCount ?? 0;
   return (
     <div className="channel-analysis">
+      <div className="ca-tabs" role="tablist" aria-label="Channel Analysis">
+        <button type="button" role="tab" aria-selected={tab === 'channels'} className={tab === 'channels' ? 'on' : ''} onClick={() => chooseTab('channels')}>
+          Channel Analysis
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'breakouts'} className={tab === 'breakouts' ? 'on' : ''} onClick={() => chooseTab('breakouts')}>
+          Channel Breakout & Retest <span className="ca-tab-count">{watchCount}</span>
+        </button>
+      </div>
+      {tab === 'breakouts' ? (
+        <BreakoutTab state={breakouts.state} onRefresh={breakouts.load} />
+      ) : (
+        <>
       {vm.error && (
         <div className="ca-error" role="alert">
           <div>
@@ -134,6 +167,8 @@ export default function ChannelAnalysisPage() {
               canReanalyse={!paused}
             />
           )}
+        </>
+      )}
         </>
       )}
     </div>

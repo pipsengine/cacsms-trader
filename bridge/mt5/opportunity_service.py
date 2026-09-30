@@ -234,6 +234,11 @@ class OpportunityService:
         result["triggers"] = triggers
         result["audits"] = [reason for row in result["instruments"] for h in row["hypotheses"] for reason in (h.get("reasons") or [])][:40]
         self.snapshot_data = result
+        try:
+            import notification_service as notes
+            notes.SERVICE.observe_hypotheses(result)
+        except Exception:
+            traceback.print_exc()
         self.meta.update({
             "status": "DEGRADED" if missed else "HEALTHY",
             "message": (

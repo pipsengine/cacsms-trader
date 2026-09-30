@@ -17,6 +17,7 @@ import { OpportunitiesRiskPage, riskStageStatus, useRiskStore } from '../feature
 import { ExecutionPositionsPage, executionStageStatus, useExecutionStore } from '../features/execution';
 import { PerformancePage } from '../features/performance';
 import { useAutonomyState } from '../features/workflow-engine/services/autonomyStore';
+import { EmailNotificationsPanel } from '../features/notifications/EmailNotificationsPanel';
 
 const dir = (x: string) => (x === 'BULLISH' ? 'green' : x === 'BEARISH' ? 'red' : 'gray');
 const PAGE_SIZE = 15;
@@ -463,6 +464,7 @@ export function SystemControl() {
         </button>
         <small className="muted">{sql.message || db.guidance}</small>
       </Card>
+      <EmailNotificationsPanel />
     </>
   );
 }

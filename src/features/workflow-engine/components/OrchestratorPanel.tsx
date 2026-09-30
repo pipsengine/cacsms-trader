@@ -64,6 +64,12 @@ export function OrchestratorPanel({ d }: { d: WorkflowSnapshot }) {
           <b className={e.failedJobs ? 'bad' : ''}>{e.failedJobs}</b>
         </div>
         <div>
+          <span>Notifications</span>
+          <b title={autonomy?.notifications?.health || 'Email worker'}>
+            {autonomy?.notifications?.health || '—'} · queue {autonomy?.notifications?.pending ?? '—'} · failed {autonomy?.notifications?.failedToday ?? '—'}
+          </b>
+        </div>
+        <div>
           <span>Bus throughput</span>
           <b>{e.throughput}/min</b>
         </div>

@@ -249,6 +249,33 @@ class RiskService:
             out.append("STAGE9_EXECUTION_CHANGE")
         return out
 
+    def _notify_authorizations(self, result: dict[str, Any], res: dict[str, Any]) -> None:
+        """Observes new Stage 8 campaign authorizations. Mail never changes the decision."""
+        try:
+            import notification_service as notes
+            created = set(res.get("created") or [])
+            for auth in result.get("authorizations") or []:
+                if auth.get("executionId") not in created:
+                    continue
+                source = auth.get("source") or {}
+                kind = str(source.get("legType") or "")
+                if kind not in ("P1", "P2"):
+                    continue
+                notes.SERVICE.ingest_authorization(kind, {
+                    "id": auth.get("executionId"),
+                    "symbol": auth.get("instrument"),
+                    "direction": auth.get("direction"),
+                    "titLevel": source.get("TiTLevel"),
+                    "campaignId": source.get("campaignId"),
+                    "riskPct": auth.get("riskPct"),
+                    "entry": (auth.get("entryPolicy") or {}).get("referencePrice"),
+                    "stop": auth.get("stopLoss"),
+                    "target": auth.get("takeProfit"),
+                    "freshness": source.get("freshness") or "CURRENT",
+                })
+        except Exception:
+            traceback.print_exc()
+
     def tick(self) -> dict[str, Any]:
         inp = self.inputs()
         sig = self._signatures(inp)
@@ -335,6 +362,7 @@ class RiskService:
             })
             self.meta["durationMs"] = int((time.time() - started) * 1000)
             res = rs.persist(result, self.meta, triggers, self._prev, inp["stage7"], exp_changed)
+            self._notify_authorizations(result, res)
             self.meta.update({"runId": res["runId"] or self.meta.get("runId"), "created": res["created"], "revoked": res["revoked"],
                               "expired": res["expired"], "changed": res["changed"], "durationMs": int((time.time() - started) * 1000)})
             rs.save_meta(self.meta)
