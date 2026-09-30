@@ -38,6 +38,7 @@ try:
     import execution_mt5
     import execution_service
     import economic_service
+    import execution_smoke
     import execution_store
     import history
     import history_store
@@ -78,7 +79,7 @@ except ImportError:
     from bridge.mt5 import confirm, confirm_service, confirm_store  # type: ignore
     from bridge.mt5 import direction_service, direction_store  # type: ignore
     from bridge.mt5 import economic_service  # type: ignore
-    from bridge.mt5 import execution_mt5, execution_service, execution_store  # type: ignore
+    from bridge.mt5 import execution_mt5, execution_service, execution_smoke, execution_store  # type: ignore
     from bridge.mt5 import history, history_store  # type: ignore
     from bridge.mt5 import learning_service  # type: ignore
     from bridge.mt5 import regime  # type: ignore
@@ -722,6 +723,27 @@ EXECUTION = execution_service.ExecutionService(
     node=os.environ.get("MT5_NODE_ID", "CACSMS-MT5-0001"),
     on_change=_execution_change,
 )
+
+
+def _smoke_test(body: dict[str, Any], actor: str) -> dict[str, Any]:
+    """Demo-only synthetic Stage 8 authorization for exercising the live Stage 9 path (see execution_smoke)."""
+    provider = EXECUTION.p
+    term = provider.terminal()
+    account = None
+    if term:
+        account = next((a for a in execution_store.accounts() if str(a.get("login")) == str(term["login"])
+                        and (not a.get("server") or str(a["server"]).lower() == str(term["server"]).lower())), None)
+    symbol = str(body.get("symbol") or execution_smoke.DEFAULT_SYMBOL).upper()
+    stop_points = body.get("stopPoints")
+    result = execution_smoke.build(account, term, provider.market(symbol), provider.fx(600), time.time(), symbol,
+                                   str(body.get("side") or "BUY"), int(stop_points) if stop_points else None)
+    if not result["ok"]:
+        return result
+    auth = result["authorization"]
+    risk_store.insert_authorization(auth)
+    execution_store.event(auth["executionId"], auth["accountId"], "OPERATOR", "SMOKE_TEST", f"{actor}: {result['message']}")
+    EXECUTION.mark("SMOKE_TEST")
+    return {**result, "executionId": auth["executionId"]}
 
 
 def _confirm_change(symbols: list[str]) -> None:
@@ -1691,6 +1713,10 @@ class Handler(BaseHTTPRequestHandler):
                     result = EXECUTION.request_exit(str(body.get("executionId") or ""), actor, body.get("reason"))
                     self._json(200 if result.get("ok") else 400, result)
                     return
+                if parsed.path == "/execution/smoke-test":
+                    result = _smoke_test(body, actor)
+                    self._json(200 if result.get("ok") else 400, result)
+                    return
                 if parsed.path == "/execution/resolve":
                     try:
                         rid = int(body.get("id"))
@@ -1846,8 +1872,6 @@ def main() -> None:
                         "login": str(account.login),
                         "accountId": str(account.login),
                         "accountClass": account_class,
-                        "tradingMode": "ANALYSIS_ONLY",
-                        "tradingEnabled": False,
                     }
                 )
                 print(f"[mt5-bridge] startup account sync: {synced.get('message', 'unknown result')}")

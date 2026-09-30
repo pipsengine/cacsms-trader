@@ -428,8 +428,12 @@ def _hypothesis(symbol: str, family: str, level: str | None, parent: dict[str, A
 
 def classify_levels(symbol: str, channels: dict[str, dict[str, Any]], price: float | None = None,
                     extension_atr: float | None = None, break_valid: bool = False, scanner_rank: int | None = None,
-                    confirmation_by_tf: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-    """One parent, one child and one execution timeframe per hypothesis. Levels do not nest inside each other."""
+                    confirmation_by_tf: dict[str, dict[str, Any]] | None = None,
+                    level_breaks: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """One parent, one child and one execution timeframe per hypothesis. Levels do not nest inside each other.
+
+    level_breaks: closed-candle breaks of each level's child channel in the parent direction (Breakout & Retest).
+    """
     out = []
     for level, spec in LEVELS.items():
         parent = _pick_parent(channels, spec["parents"])
@@ -454,8 +458,20 @@ def classify_levels(symbol: str, channels: dict[str, dict[str, Any]], price: flo
             continue
         child = {**child, "timeframe": child.get("timeframe") or spec["child"]}
         parent = {**parent, "timeframe": parent.get("timeframe") or parent.get("tf")}
-        out.append(_hypothesis(symbol, family, level, parent, child, spec["execution"], price, extension_atr, break_valid, scanner_rank,
-                               (confirmation_by_tf or {}).get(spec["execution"])))
+        brk = (level_breaks or {}).get(level)
+        if brk and _sign(brk.get("expectedDirection")) != _sign(parent.get("direction")):
+            brk = None
+        level_valid, level_extension = break_valid, extension_atr
+        if brk:
+            level_valid = True
+            if level_extension is None:
+                level_extension = brk.get("extensionAtr")
+        item = _hypothesis(symbol, family, level, parent, child, spec["execution"], price, level_extension, level_valid, scanner_rank,
+                           (confirmation_by_tf or {}).get(spec["execution"]))
+        if brk:
+            item["channelBreak"] = {k: brk.get(k) for k in ("state", "boundary", "expectedDirection", "extensionAtr", "candidateId")}
+            item["reasons"].append(f"{spec['child']} channel {brk.get('state')} {brk.get('boundary')} (Breakout & Retest)")
+        out.append(item)
     return out
 
 
@@ -518,7 +534,8 @@ def scan(symbols: list[str], channels_by_symbol: dict[str, dict[str, dict[str, A
          directions: dict[str, dict[str, Any]] | None = None, ranks: dict[str, int] | None = None,
          prices: dict[str, float] | None = None, extensions: dict[str, float] | None = None,
          breaks: dict[str, bool] | None = None, missed: bool = False, data_ok: bool = True,
-         confirmations: dict[str, dict[str, dict[str, Any]]] | None = None) -> dict[str, Any]:
+         confirmations: dict[str, dict[str, dict[str, Any]]] | None = None,
+         level_breaks: dict[str, dict[str, dict[str, Any]]] | None = None) -> dict[str, Any]:
     """Every supplied symbol is assessed. Ranking prioritises attention. It does not hide a valid nested structure."""
     directions, ranks = directions or {}, ranks or {}
     prices, extensions, breaks = prices or {}, extensions or {}, breaks or {}
@@ -527,7 +544,8 @@ def scan(symbols: list[str], channels_by_symbol: dict[str, dict[str, dict[str, A
         channels = channels_by_symbol.get(symbol) or {}
         rank = ranks.get(symbol)
         symbol_confirmation = (confirmations or {}).get(symbol) or {}
-        hypotheses = classify_levels(symbol, channels, prices.get(symbol), extensions.get(symbol), bool(breaks.get(symbol)), rank, symbol_confirmation)
+        hypotheses = classify_levels(symbol, channels, prices.get(symbol), extensions.get(symbol), bool(breaks.get(symbol)), rank, symbol_confirmation,
+                                     (level_breaks or {}).get(symbol))
         normal = normal_continuation(symbol, directions.get(symbol), channels, prices.get(symbol), extensions.get(symbol), bool(breaks.get(symbol)),
                                      symbol_confirmation.get("H1"))
         if normal:

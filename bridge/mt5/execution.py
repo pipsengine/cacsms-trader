@@ -18,6 +18,7 @@ import math
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+import execution_smoke
 import leg_model
 
 ORDER_STATES = ("AUTHORIZED", "QUEUED", "REVALIDATING", "SUBMITTING", "ACKNOWLEDGED", "PARTIALLY_FILLED", "FILLED", "REJECTED",
@@ -236,12 +237,20 @@ def revalidate(auth: dict[str, Any], ctx: dict[str, Any], cfg: dict[str, Any]) -
 
     # Stage 7 / Stage 8 invalidation
     up = ctx.get("upstream") or {}
-    if not up.get("opportunityActive") or str(up.get("setupState") or "") != "QUALIFIED":
+    if execution_smoke.is_smoke(auth):
+        if klass == "DEMO":
+            checks.append(_chk("stage8", "Stage 8 setup", "PASS", "Smoke test — upstream setup checks waived (DEMO only)"))
+        else:
+            checks.append(_chk("stage8", "Stage 8 setup", "FAIL", f"Smoke test on a {klass or 'unknown'} account"))
+            fail(True, "SMOKE_NOT_DEMO", "Smoke-test authorizations may execute only on a DEMO account")
+    elif not up.get("opportunityActive") or str(up.get("setupState") or "") != "QUALIFIED":
         checks.append(_chk("stage8", "Stage 8 setup", "FAIL", f"Setup {up.get('setupState') or 'withdrawn'}"))
         fail(True, "SETUP_INVALIDATED", f"Stage 8 no longer qualifies the setup ({up.get('setupState') or 'withdrawn'})")
     else:
         checks.append(_chk("stage8", "Stage 8 setup", "PASS", "Setup still QUALIFIED"))
-    if str(up.get("stage7State") or "") != "CONFIRMED" or dsign(up.get("stage7Direction")) != d:
+    if execution_smoke.is_smoke(auth):
+        pass
+    elif str(up.get("stage7State") or "") != "CONFIRMED" or dsign(up.get("stage7Direction")) != d:
         checks.append(_chk("stage7", "Stage 7 confirmation", "FAIL", f"Stage 7 now {up.get('stage7State') or 'unknown'} {up.get('stage7Direction') or ''}".strip()))
         fail(True, "STAGE7_INVALIDATED", f"Stage 7 no longer confirms {auth.get('instrument')} {auth.get('direction')} "
                                          f"(now {up.get('stage7State') or 'unknown'})")

@@ -70,7 +70,7 @@ class LearningService:
                 traceback.print_exc()
 
     def _trades(self, pending_only: bool = False) -> list[tuple]:
-        where = " WHERE stage10_status='PUBLISHED'" if pending_only else ""
+        where = " WHERE setup_key NOT LIKE 'SMOKE-%'" + (" AND stage10_status='PUBLISHED'" if pending_only else "")
         with connect() as conn:
             cur = conn.cursor()
             cur.execute(
@@ -413,7 +413,9 @@ class LearningService:
         symbols = sorted({*(t.get("symbol") or "" for t in trades + decisions)} - {""})
         classes = sorted({t.get("accountClass") or "UNKNOWN" for t in trades} | {d.get("accountClass") or "UNKNOWN" for d in decisions})
         filtered_trades = _filter_rows(trades, query)
-        filtered_decisions = [_with_path(row) for row in _filter_rows(decisions, query)]
+        with connect() as conn:
+            cur = conn.cursor()
+            filtered_decisions = [_with_path(row, cur) for row in _filter_rows(decisions, query)]
         perf = engine.performance(filtered_trades)
         plan_trades = filtered_trades
         production, _ = risk_store.load_config()
@@ -661,18 +663,16 @@ def _epoch(stamp: Any) -> float | None:
     return parsed.timestamp()
 
 
-def _with_path(row: dict[str, Any]) -> dict[str, Any]:
+def _with_path(row: dict[str, Any], cur: Any) -> dict[str, Any]:
     closes: list[float] = []
     symbol, stamp = row.get("symbol"), _epoch(row.get("closedAt"))
     if symbol and stamp is not None:
         try:
-            with connect() as conn:
-                cur = conn.cursor()
-                cur.execute(
-                    "SELECT TOP 24 [close] FROM dbo.app_candles WHERE symbol=? AND timeframe='H1' AND open_ts>=? ORDER BY open_ts ASC",
-                    symbol, stamp,
-                )
-                closes = [float(item[0]) for item in cur.fetchall() if item[0] is not None]
+            cur.execute(
+                "SELECT TOP 24 [close] FROM dbo.app_candles WHERE symbol=? AND timeframe='H1' AND open_ts>=? ORDER BY open_ts ASC",
+                symbol, stamp,
+            )
+            closes = [float(item[0]) for item in cur.fetchall() if item[0] is not None]
         except Exception:
             closes = []
     direction = row.get("direction") if isinstance(row.get("direction"), str) else None

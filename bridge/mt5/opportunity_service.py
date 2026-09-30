@@ -95,6 +95,59 @@ def _confirmation_from_engine(direction: str | None, decision: dict[str, Any]) -
             "reaction": bool(decision.get("reaction")) or timing in ("ENTER_NOW", "RETEST_CONFIRMED")}
 
 
+BREAK_STATES = frozenset(("BREAK_CONFIRMED", "RETESTING", "RETEST_HELD"))
+
+
+def _channel_breaks() -> dict[str, dict[str, dict[str, Any]]]:
+    """Closed-candle child-channel breaks from the Breakout & Retest watchlist, per symbol and TiT level.
+
+    Extension is how far price already sits beyond the broken boundary; a stale tick is not a break.
+    """
+    try:
+        import channel_breakout
+    except ImportError:  # pragma: no cover
+        from bridge.mt5 import channel_breakout  # type: ignore
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in list(channel_breakout.SCANNER.active):
+        brk = row.get("breakout") or {}
+        if brk.get("state") not in BREAK_STATES or (row.get("freshness") or {}).get("state") != "CURRENT":
+            continue
+        dist = brk.get("distanceATR")
+        out.setdefault(str(row["symbol"]), {})[str(row["titLevel"])] = {
+            "state": brk.get("state"),
+            "boundary": brk.get("relevantBoundary"),
+            "expectedDirection": brk.get("expectedDirection"),
+            "extensionAtr": None if dist is None else max(0.0, -float(dist)),
+            "candidateId": row.get("candidateId"),
+        }
+    return out
+
+
+def _break_confirmations(breaks: dict[str, dict[str, dict[str, Any]]], confirmations: dict[str, dict[str, dict[str, Any]]]) -> None:
+    """Confirm each broken level on its execution timeframe in the break direction, from closed bars only."""
+    try:
+        import confirm_engine
+    except ImportError:  # pragma: no cover
+        from bridge.mt5 import confirm_engine  # type: ignore
+    for symbol, levels in breaks.items():
+        for level, brk in levels.items():
+            tf = opportunity.LEVELS[level]["execution"]
+            direction = str(brk.get("expectedDirection") or "")
+            existing = (confirmations.get(symbol) or {}).get(tf)
+            if existing and opportunity._sign(existing.get("direction")) == opportunity._sign(direction):
+                continue
+            try:
+                bars = hs.candle_tail(symbol, tf, 400)
+                if len(bars or []) < 80:
+                    continue
+                decision = confirm_engine.ConfirmationEngine(tf).evaluate(symbol, bars, direction, now_ts=time.time())
+            except Exception:
+                continue
+            found = _confirmation_from_engine(direction, decision)
+            if found:
+                confirmations.setdefault(symbol, {})[tf] = found
+
+
 def current() -> dict[str, Any]:
     return CURRENT.snapshot() if CURRENT else {"ok": True, "summary": {}, "instruments": [], "qualified": []}
 
@@ -198,13 +251,18 @@ class OpportunityService:
             ranks = {row["symbol"]: row.get("rank") for row in scanner}
         except Exception:
             ranks = {}
-        # Deep M15/M5 structure for XAUUSD always, and for any instrument whose H1/H8 child is already a correction.
+        try:
+            level_breaks = _channel_breaks()
+        except Exception:
+            level_breaks = {}
+        # Deep M15/M5 structure for XAUUSD always, for any instrument whose H1/H8 child is already a correction,
+        # and for any instrument with a confirmed channel break.
         live_confirmed: dict[str, dict[str, dict[str, Any]]] = {}
         for symbol in SYMBOLS:
             existing = channels.get(symbol) or {}
             h1 = existing.get("H1") or {}
             d1 = existing.get("D1") or {}
-            deep = symbol == opportunity.XAU or (
+            deep = symbol == opportunity.XAU or symbol in level_breaks or (
                 h1.get("direction") and d1.get("direction") and h1.get("direction") != d1.get("direction")
             )
             extra, deep_confirmed = self._execution_channels(symbol, deep)
@@ -216,6 +274,7 @@ class OpportunityService:
         confirmations = _execution_confirmations(channels)
         for symbol, pack in live_confirmed.items():
             confirmations.setdefault(symbol, {}).update(pack)
+        _break_confirmations(level_breaks, confirmations)
         missed = False
         for symbol, pack in channels.items():
             latest = max((int(c.get("lastBarTs") or 0) for c in pack.values()), default=0)
@@ -224,7 +283,8 @@ class OpportunityService:
                 missed = True
             if latest:
                 self._last_ts[symbol] = latest
-        result = opportunity.scan(SYMBOLS, channels, directions, ranks, prices=prices, confirmations=confirmations, missed=missed, data_ok=True)
+        result = opportunity.scan(SYMBOLS, channels, directions, ranks, prices=prices, confirmations=confirmations, missed=missed, data_ok=True,
+                                  level_breaks=level_breaks)
         for row in result["instruments"]:
             pack = channels.get(row["symbol"]) or {}
             row["execution"] = {

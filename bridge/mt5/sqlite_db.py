@@ -83,6 +83,7 @@ def _translate(sql: str) -> tuple[str, int | None]:
     sql = re.sub(r"\s+WITH\s*\([^)]*\)", "", sql, flags=re.I)
     sql = re.sub(r"\bCOUNT_BIG\s*\(", "COUNT(", sql, flags=re.I)
     sql = re.sub(r"\bISNULL\s*\(", "COALESCE(", sql, flags=re.I)
+    sql = re.sub(r"\bJSON_VALUE\s*\(", "json_extract(", sql, flags=re.I)
     sql = re.sub(r"SYSUTCDATETIME\(\)", "CURRENT_TIMESTAMP", sql, flags=re.I)
     sql = re.sub(r"DATEADD\(\s*SECOND\s*,\s*\?\s*,\s*CURRENT_TIMESTAMP\s*\)", "datetime(CURRENT_TIMESTAMP, (? || ' seconds'))", sql, flags=re.I)
     sql = re.sub(r"DATEADD\(\s*SECOND\s*,\s*(-?\d+)\s*,\s*CURRENT_TIMESTAMP\s*\)", r"datetime(CURRENT_TIMESTAMP, '\1 seconds')", sql, flags=re.I)

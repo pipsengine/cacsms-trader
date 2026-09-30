@@ -1268,6 +1268,8 @@ def evaluate(handoffs: list[dict[str, Any]], accounts: list[dict[str, Any]], mar
         o = live.get(a["setupKey"])
         if not ctx.get("auto"):
             revocations.append({"executionId": a["executionId"], "reason": "Global trading PAUSED before Stage 9 consumed the authorization"})
+        elif str(a.get("setupKey") or "").startswith("SMOKE-"):
+            continue
         elif o is None:
             revocations.append({"executionId": a["executionId"], "reason": "Stage 7 no longer confirms the setup"})
         elif o["setupState"] != "QUALIFIED":

@@ -270,6 +270,35 @@ def _auth_event(cur: Any, eid: str, status: str, reason: str) -> None:
     cur.execute("INSERT INTO dbo.app_risk_authorization_event (execution_id, status, reason) VALUES (?,?,?)", eid, status, (reason or "")[:400])
 
 
+def _insert_authorization(cur: Any, a: dict[str, Any], now: str) -> bool:
+    cur.execute("SELECT 1 FROM dbo.app_risk_authorization WHERE execution_id=?", a["executionId"])
+    if cur.fetchone():
+        return False
+    cur.execute(
+        """
+        INSERT INTO dbo.app_risk_authorization (execution_id, setup_key, attempt, account_id, symbol, broker_symbol, direction, volume,
+          entry_policy_json, stop_loss, take_profit, risk_amount, risk_currency, risk_pct, expires_at, source_json, evidence_json,
+          authorization_json, config_hash, authorized_at, status, status_reason, status_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        a["executionId"], a["setupKey"], a["attempt"], a["accountId"], a["instrument"], a["brokerSymbol"], a["direction"], a["volume"],
+        json.dumps(a["entryPolicy"]), a["stopLoss"], a["takeProfit"], a["riskAmount"], a["riskCurrency"], a["riskPct"], _ts(a["expiresAt"]),
+        json.dumps(a["source"], default=str), json.dumps(a["evidence"], default=str), json.dumps(a, default=str), a["configHash"] or "",
+        _ts(a["authorizedAt"]), "PENDING", "Awaiting Stage 9", now,
+    )
+    _auth_event(cur, a["executionId"], "PENDING", f"Authorized {a['direction']} {a['volume']} {a['instrument']} for {a['accountId']}")
+    return True
+
+
+def insert_authorization(a: dict[str, Any]) -> bool:
+    ensure_risk_schema()
+    with connect() as conn:
+        cur = conn.cursor()
+        ok = _insert_authorization(cur, a, _ts(a["authorizedAt"]))
+        conn.commit()
+        return ok
+
+
 def persist(result: dict[str, Any], meta: dict[str, Any], triggers: list[str], prev: dict[str, dict[str, Any]],
             stage7: dict[str, dict[str, Any]], exposure_changed: list[str]) -> dict[str, Any]:
     """Upsert opportunities + account evaluations, close withdrawn setups, insert new authorizations, revoke / expire pending ones,
@@ -299,23 +328,8 @@ def persist(result: dict[str, Any], meta: dict[str, Any], triggers: list[str], p
                 _auth_event(cur, r["executionId"], "REVOKED", r["reason"])
                 revoked.append(r["executionId"])
         for a in result.get("authorizations") or []:
-            cur.execute("SELECT 1 FROM dbo.app_risk_authorization WHERE execution_id=?", a["executionId"])
-            if cur.fetchone():
-                continue
-            cur.execute(
-                """
-                INSERT INTO dbo.app_risk_authorization (execution_id, setup_key, attempt, account_id, symbol, broker_symbol, direction, volume,
-                  entry_policy_json, stop_loss, take_profit, risk_amount, risk_currency, risk_pct, expires_at, source_json, evidence_json,
-                  authorization_json, config_hash, authorized_at, status, status_reason, status_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                a["executionId"], a["setupKey"], a["attempt"], a["accountId"], a["instrument"], a["brokerSymbol"], a["direction"], a["volume"],
-                json.dumps(a["entryPolicy"]), a["stopLoss"], a["takeProfit"], a["riskAmount"], a["riskCurrency"], a["riskPct"], _ts(a["expiresAt"]),
-                json.dumps(a["source"], default=str), json.dumps(a["evidence"], default=str), json.dumps(a, default=str), a["configHash"] or "",
-                _ts(a["authorizedAt"]), "PENDING", "Awaiting Stage 9", now,
-            )
-            _auth_event(cur, a["executionId"], "PENDING", f"Authorized {a['direction']} {a['volume']} {a['instrument']} for {a['accountId']}")
-            created.append(a["executionId"])
+            if _insert_authorization(cur, a, now):
+                created.append(a["executionId"])
         # opportunities
         for o in opps:
             key = o["setupKey"]

@@ -172,6 +172,41 @@ class Discovery(unittest.TestCase):
         self.assertEqual(l2["opportunityFamily"], "TIT_CORRECTION_END")
         self.assertEqual(l2["direction"], "BULLISH")
 
+    def test_channel_break_releases_p2_only_after_execution_confirmation(self):
+        channels = pack(D1=ch("D1", "BULLISH"), H8=ch("H8", "BULLISH"), H1=ch("H1", "BULLISH", status="BROKEN"))
+        brk = {"L3": {"state": "BREAK_CONFIRMED", "boundary": "UPPER", "expectedDirection": "BULLISH", "extensionAtr": 0.3, "candidateId": "c1"}}
+        waiting = next(h for h in opportunity.scan(["GBPAUD"], {"GBPAUD": channels}, level_breaks={"GBPAUD": brk})["instruments"][0]["hypotheses"]
+                       if h.get("TiTLevel") == "L3")
+        self.assertEqual(waiting["p2"]["state"], "P2_BREAK_DETECTED")
+        self.assertFalse(waiting["actionable"])
+        self.assertEqual(waiting["channelBreak"]["state"], "BREAK_CONFIRMED")
+        confirmed = opportunity.scan(
+            ["GBPAUD"], {"GBPAUD": channels}, level_breaks={"GBPAUD": brk},
+            confirmations={"GBPAUD": {"M15": {"direction": "BULLISH", "state": "CONFIRMED", "timing": "RETEST_CONFIRMED", "extension": 0.3}}},
+        )
+        l3 = next(h for h in confirmed["instruments"][0]["hypotheses"] if h.get("TiTLevel") == "L3")
+        self.assertEqual(l3["p2"]["state"], "P2_READY_FOR_RISK")
+        self.assertTrue(l3["actionable"])
+        self.assertIn(l3, confirmed["qualified"])
+
+    def test_extended_channel_break_waits_for_retest(self):
+        channels = pack(D1=ch("D1", "BULLISH"), H8=ch("H8", "BULLISH"), H1=ch("H1", "BULLISH", status="BROKEN"))
+        brk = {"L3": {"state": "BREAK_CONFIRMED", "boundary": "UPPER", "expectedDirection": "BULLISH", "extensionAtr": 2.69}}
+        rows = opportunity.classify_levels(
+            "GBPAUD", channels, level_breaks=brk,
+            confirmation_by_tf={"M15": {"direction": "BULLISH", "state": "CONFIRMED", "timing": "ENTER_NOW", "extension": None}},
+        )
+        l3 = next(h for h in rows if h.get("TiTLevel") == "L3")
+        self.assertEqual(l3["p2"]["state"], "P2_WAIT_RETEST")
+        self.assertFalse(l3["actionable"])
+
+    def test_channel_break_against_the_parent_is_ignored(self):
+        channels = pack(D1=ch("D1", "BULLISH"), H8=ch("H8", "BULLISH"), H1=ch("H1", "BULLISH"))
+        brk = {"L3": {"state": "BREAK_CONFIRMED", "boundary": "LOWER", "expectedDirection": "BEARISH", "extensionAtr": 0.2}}
+        l3 = next(h for h in opportunity.classify_levels("GBPAUD", channels, level_breaks=brk) if h.get("TiTLevel") == "L3")
+        self.assertEqual(l3["p2"]["state"], "P2_WAITING_FOR_BREAK")
+        self.assertNotIn("channelBreak", l3)
+
     def test_portfolio_allows_many_small_positions_and_blocks_concentration(self):
         small = [{"instrument": f"ZZ{i:02d}USD", "direction": "BULLISH", "remainingRisk": 0.1} for i in range(12)]
         # Synthetic symbols are not FX; use real diversified names under the currency limit.
