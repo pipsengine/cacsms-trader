@@ -185,13 +185,32 @@ def _inside(price: float | None, zone: dict[str, Any] | None) -> bool:
 def p2_timing(extension_atr: float | None, channel_position: float | None, break_valid: bool) -> str:
     """A valid break is not permission to enter. Thresholds match Stage 7."""
     if not break_valid:
-        return "P2_WAITING"
+        return "P2_WAITING_FOR_BREAK"
     chased = extension_atr is not None and extension_atr >= CONFIG["extensionChaseAtr"]
     late = channel_position is not None and channel_position >= CONFIG["lateChannelPct"]
     late_extended = extension_atr is not None and extension_atr >= CONFIG["extensionLateAtr"] and late
     if chased or late_extended:
         return "P2_WAIT_RETEST"
-    return "P2_READY"
+    return "P2_READY_FOR_RISK"
+
+
+def resolve_p2(extension_atr: float | None, channel_position: float | None, break_valid: bool,
+               confirmation: dict[str, Any] | None, forced: str | None) -> str:
+    """Break detection, confirmation and entry quality stay separate. A bare break is not a Stage 8 handoff."""
+    if forced == "P2_WAIT_RETEST":
+        return "P2_WAIT_RETEST"
+    quality = p2_timing(extension_atr, channel_position, break_valid)
+    if quality in ("P2_WAITING_FOR_BREAK", "P2_WAIT_RETEST"):
+        return quality
+    if not confirmation:
+        return "P2_BREAK_DETECTED"
+    state = str(confirmation.get("state") or "")
+    timing = str(confirmation.get("timing") or "")
+    if state == "CONFIRMED" and timing in ("ENTER_NOW", "RETEST_CONFIRMED"):
+        return "P2_READY_FOR_RISK"
+    if state in ("SETUP_FORMING", "PULLBACK", "BREAKOUT_PENDING"):
+        return "P2_CONFIRMING"
+    return "P2_BREAK_DETECTED"
 
 
 def allocate_campaign(budget: float, p1_eligible: bool, p2_eligible: bool, erz_confidence: float) -> tuple[float, float]:
@@ -250,10 +269,10 @@ def principal_blocker(item: dict[str, Any]) -> str:
     p1 = (item.get("p1") or {}).get("state")
     p2 = (item.get("p2") or {}).get("state")
     if item.get("actionable"):
-        if p2 == "P2_READY":
-            return "P2_READY"
-        if p1 == "P1_READY":
-            return "P1_READY"
+        if p2 == "P2_READY_FOR_RISK":
+            return "P2_READY_FOR_RISK"
+        if p1 == "P1_READY_FOR_RISK":
+            return "P1_READY_FOR_RISK"
         return "ACTIONABLE"
     status = str(item.get("status") or "")
     text = " ".join(item.get("reasons") or [])
@@ -264,8 +283,16 @@ def principal_blocker(item: dict[str, Any]) -> str:
         return "STALE_DATA" if "fail closed" in low or "unknown" in low else "WAIT_NEW_CONFIRMATION"
     if p2 == "P2_WAIT_RETEST":
         return "WAIT_RETEST"
-    if p2 == "P2_WAITING":
+    if p2 == "P2_CONFIRMING":
+        return "P2_CONFIRMING"
+    if p2 == "P2_BREAK_DETECTED":
+        return "P2_BREAK_DETECTED"
+    if p2 == "P2_WAITING_FOR_BREAK":
         return "WAITING_FOR_BREAK"
+    if p1 == "P1_ZONE_REACHED":
+        return "P1_REACTION_PENDING"
+    if p1 == "P1_CONFIRMED":
+        return "P1_CONFIRMED"
     if p1 == "P1_WAITING_FOR_ERZ":
         return "WAITING_FOR_ERZ"
     execution = str(item.get("executionTimeframe") or "")
@@ -319,19 +346,32 @@ def _hypothesis(symbol: str, family: str, level: str | None, parent: dict[str, A
             if leg_extension is not None:
                 extension_atr = leg_extension
             forced = leg_hold
-    p1_ready = _inside(price, zone) and role in ("CORRECTION", "CONTINUATION", "TRANSITION")
-    timing = forced or p2_timing(extension_atr, (parent or {}).get("position") if trade == _sign((parent or {}).get("direction")) else None, break_valid)
+    inside = _inside(price, zone) and role in ("CORRECTION", "CONTINUATION", "TRANSITION")
+    channel_position = (parent or {}).get("position") if trade == _sign((parent or {}).get("direction")) else None
+    timing = resolve_p2(extension_atr, channel_position, break_valid, confirmation, forced)
+    reaction = bool(confirmation and confirmation.get("reaction"))
+    reaction_timing = str((confirmation or {}).get("timing") or "")
     if zone is None:
         p1_state, p1_reason = "P1_NOT_AVAILABLE", "NO_ZONE"
     elif price is None:
         p1_state, p1_reason = "P1_WAITING", "PRICE_UNKNOWN"
-    elif p1_ready:
-        p1_state, p1_reason = "P1_READY", "INSIDE_ERZ"
-    else:
+    elif not inside:
         p1_state, p1_reason = "P1_WAITING_FOR_ERZ", "WAITING_FOR_ERZ"
-    p2_reason = {"P2_WAITING": "WAITING_FOR_BREAK", "P2_WAIT_RETEST": "WAIT_RETEST", "P2_READY": "P2_READY"}.get(timing, timing)
-    p1_eligible = p1_state == "P1_READY"
-    p2_eligible = timing == "P2_READY"
+    elif not reaction:
+        p1_state, p1_reason = "P1_ZONE_REACHED", "P1_REACTION_PENDING"
+    elif reaction_timing in ("ENTER_NOW", "RETEST_CONFIRMED"):
+        p1_state, p1_reason = "P1_READY_FOR_RISK", "P1_READY_FOR_RISK"
+    else:
+        p1_state, p1_reason = "P1_CONFIRMED", "P1_CONFIRMED"
+    p2_reason = {
+        "P2_WAITING_FOR_BREAK": "WAITING_FOR_BREAK",
+        "P2_BREAK_DETECTED": "P2_BREAK_DETECTED",
+        "P2_CONFIRMING": "P2_CONFIRMING",
+        "P2_WAIT_RETEST": "WAIT_RETEST",
+        "P2_READY_FOR_RISK": "P2_READY_FOR_RISK",
+    }.get(timing, timing)
+    p1_eligible = p1_state == "P1_READY_FOR_RISK"
+    p2_eligible = timing == "P2_READY_FOR_RISK"
     budget = float(CONFIG["campaignBudgetPct"])
     p1_risk, p2_risk = allocate_campaign(budget, p1_eligible, p2_eligible, float((zone or {}).get("confidence") or 0))
     direction = _label(trade)
@@ -440,8 +480,9 @@ def _funnel(rows: list[dict[str, Any]], qualified: list[dict[str, Any]]) -> dict
         "watching": sum(1 for h in hypotheses if h.get("status") == "WATCHING"),
         "confirming": 0,
         "erzActive": sum(1 for h in hypotheses if h.get("priceInsideZone")),
-        "p1Ready": sum(1 for h in hypotheses if (h.get("p1") or {}).get("state") == "P1_READY"),
-        "p2Ready": sum(1 for h in hypotheses if (h.get("p2") or {}).get("state") == "P2_READY"),
+        "p1ZoneReached": sum(1 for h in hypotheses if (h.get("p1") or {}).get("state") == "P1_ZONE_REACHED"),
+        "p1Ready": sum(1 for h in hypotheses if (h.get("p1") or {}).get("state") == "P1_READY_FOR_RISK"),
+        "p2Ready": sum(1 for h in hypotheses if (h.get("p2") or {}).get("state") == "P2_READY_FOR_RISK"),
         "waitRetest": sum(1 for h in hypotheses if (h.get("p2") or {}).get("state") == "P2_WAIT_RETEST"),
         "stage8Authorized": 0,
         "activeCampaigns": 0,
@@ -523,8 +564,20 @@ def scan(symbols: list[str], channels_by_symbol: dict[str, dict[str, dict[str, A
         "funnel": _funnel(rows, qualified),
         "blockers": _blockers(rows),
         "legs": _leg_states(rows),
+        "production": _production_limits(),
     }
     return {"summary": summary, "instruments": rows, "qualified": qualified}
+
+
+def _production_limits() -> dict[str, Any]:
+    try:
+        import risk
+    except ImportError:  # pragma: no cover
+        from bridge.mt5 import risk  # type: ignore
+    return {
+        "operatorPositionLimit": int(risk.CONFIG["maxConcurrentPositions"]),
+        "xauReservePct": float(risk.CONFIG["xauReservePct"]),
+    }
 
 
 def currency_legs(symbol: str, direction_sign: int) -> dict[str, int]:

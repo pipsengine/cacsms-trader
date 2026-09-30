@@ -66,6 +66,7 @@ class ConfirmationEngine:
             "entry": entry,
             "pullback": setup.get("pullback"),
             "trigger": setup.get("trigger"),
+            "retest": bool(setup.get("retest")),
             "falseBreakout": bool(setup.get("falseBreakout")),
             "invalidationLevel": raw.get("invalidationLevel"),
             "atr": structure.get("atr"),

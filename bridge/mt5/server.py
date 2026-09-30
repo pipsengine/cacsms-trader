@@ -1496,6 +1496,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = cmd_sync(body)
                 self._json(200 if result.get("ok") else 400, result)
                 return
+            if parsed.path == "/validation/report":
+                import execution_validation
+                self._json(200, {"ok": True, **execution_validation.validation_status()})
+                return
             if parsed.path.startswith("/history/"):
                 qs = parse_qs(parsed.query)
                 if parsed.path == "/history/status":

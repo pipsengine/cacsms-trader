@@ -97,8 +97,8 @@ def _blank() -> dict[str, int]:
 def _touch(group: dict[str, int], item: dict[str, Any]) -> None:
     group["detected"] += 1
     inside = (item.get("location") or {}).get("inside") is True
-    p1 = (item.get("p1") or {}).get("state") == "P1_READY"
-    p2 = (item.get("p2") or {}).get("state") == "P2_READY"
+    p1 = (item.get("p1") or {}).get("state") == "P1_READY_FOR_RISK"
+    p2 = (item.get("p2") or {}).get("state") == "P2_READY_FOR_RISK"
     waiting = (item.get("p2") or {}).get("state") == "P2_WAIT_RETEST"
     if inside:
         group["erzReached"] += 1
@@ -222,8 +222,10 @@ def historical_distribution(symbols: list[str] | None = None, stride: int = 5, l
                 else:
                     confirmation_counts["other"] += 1
                 if state in ("CONFIRMED", "BREAKOUT_CONFIRMED_WAIT_RETEST"):
+                    timing = entry.get("timing")
                     confirmation = {"direction": h1.get("direction"), "state": state,
-                                    "timing": entry.get("timing"), "extension": entry.get("extensionATR")}
+                                    "timing": timing, "extension": entry.get("extensionATR"),
+                                    "reaction": timing in ("ENTER_NOW", "RETEST_CONFIRMED")}
             result = opportunity.scan(
                 [symbol], {symbol: pack}, prices={symbol: price},
                 confirmations={symbol: {"H1": confirmation}} if confirmation else None,
@@ -243,8 +245,8 @@ def historical_distribution(symbols: list[str] | None = None, stride: int = 5, l
                     seen.add(key)
                     flags = open_eps.setdefault(key, {"groups": bucket_names, "erz": False, "p1": False, "p2": False})
                     flags["erz"] = flags["erz"] or (item.get("location") or {}).get("inside") is True
-                    flags["p1"] = flags["p1"] or (item.get("p1") or {}).get("state") == "P1_READY"
-                    flags["p2"] = flags["p2"] or (item.get("p2") or {}).get("state") == "P2_READY"
+                    flags["p1"] = flags["p1"] or (item.get("p1") or {}).get("state") == "P1_READY_FOR_RISK"
+                    flags["p2"] = flags["p2"] or (item.get("p2") or {}).get("state") == "P2_READY_FOR_RISK"
             for key in [key for key in open_eps if key not in seen]:
                 _close_episode(open_eps.pop(key), groups)
         for flags in open_eps.values():

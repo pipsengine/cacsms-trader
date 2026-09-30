@@ -46,6 +46,30 @@ function locatedPrice(symbol: string, value?: number | null) {
   return value.toFixed(digits);
 }
 
+function XauWatch({ autonomy }: { autonomy?: { opportunity?: { summary?: { production?: { operatorPositionLimit?: number; xauReservePct?: number }; xau?: string }; instruments?: { symbol: string; hypotheses?: OpportunityHypothesis[]; execution?: Record<string, { direction?: string; status?: string; position?: number | null }> }[] } } }) {
+  const book = autonomy?.opportunity?.instruments?.find((row) => row.symbol === 'XAUUSD');
+  const live = (book?.hypotheses ?? []).filter((item) => item.status && item.status !== 'NOT_DETECTED' && item.opportunityFamily);
+  const production = autonomy?.opportunity?.summary?.production;
+  return (
+    <div className="table-wrap">
+      <p className="hr-reason">
+        XAUUSD {autonomy?.opportunity?.summary?.xau ?? 'WATCHING'} · reserve {production?.xauReservePct ?? 0}% · operator limit {production?.operatorPositionLimit ?? 3}
+        {' · '}M15 {book?.execution?.M15 ? `${book.execution.M15.direction ?? '—'} ${book.execution.M15.status ?? ''}` : 'no M15 channel yet'}
+        {' · '}M5 {book?.execution?.M5 ? `${book.execution.M5.direction ?? '—'} ${book.execution.M5.status ?? ''}` : 'no M5 channel yet'}
+      </p>
+      {!live.length ? <p className="hr-reason">No detected XAUUSD hypothesis. Proximity to a zone is not a trade.</p> : null}
+      {live.map((item) => {
+        const zone = item.location;
+        return (
+          <p key={`${item.TiTLevel}-${item.direction}`} className="hr-reason">
+            {item.TiTLevel} {human(item.direction)} · current {locatedPrice('XAUUSD', zone?.price)} · ERZ {zone?.zoneLow == null ? '—' : `${locatedPrice('XAUUSD', zone.zoneLow)}–${locatedPrice('XAUUSD', zone.zoneHigh)}`} · distance {zone?.distanceAtr == null ? '—' : `${zone.distanceAtr.toFixed(2)} ATR`} · P1 {human(item.p1?.reason ?? item.p1?.state)} · P2 {human(item.p2?.reason ?? item.p2?.state)} · campaign {human(item.status)}
+          </p>
+        );
+      })}
+    </div>
+  );
+}
+
 function HypothesisLocations({ rows }: { rows?: { symbol: string; hypotheses?: OpportunityHypothesis[] }[] }) {
   const detected = (rows ?? []).flatMap((row) =>
     (row.hypotheses ?? []).filter((item) => item.status && item.status !== 'NOT_DETECTED' && item.opportunityFamily),
@@ -733,6 +757,7 @@ export function MarketScannerPage({ children }: { children?: ReactNode }) {
             ? `P1 ${Object.entries(autonomy.opportunity.summary.legs.p1 ?? {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—'} · P2 ${Object.entries(autonomy.opportunity.summary.legs.p2 ?? {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—'}`
             : 'P1 and P2 reasons appear after the next bridge scan.'}
         </p>
+        <XauWatch autonomy={autonomy} />
         <HypothesisLocations rows={autonomy?.opportunity?.instruments} />
       </Card>
       {store.error && (

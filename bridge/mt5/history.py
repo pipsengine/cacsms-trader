@@ -40,8 +40,8 @@ TF_SPEC: dict[str, dict[str, Any]] = {
     "D1": {"sec": 86400, "depth": 2000, "min": 300, "bootstrapPriority": 10},
     "H8": {"sec": 8 * 3600, "depth": 3000, "min": 300, "bootstrapPriority": 14},
     "H1": {"sec": 3600, "depth": 6000, "min": 500, "bootstrapPriority": 13},
-    "M15": {"sec": 900, "depth": 4000, "min": 500, "bootstrapPriority": 20},
-    "M5": {"sec": 300, "depth": 4000, "min": 500, "bootstrapPriority": 21},
+    "M15": {"sec": 900, "depth": 12000, "min": 500, "bootstrapPriority": 20},
+    "M5": {"sec": 300, "depth": 12000, "min": 500, "bootstrapPriority": 21},
 }
 
 CONFIG = {
@@ -58,6 +58,7 @@ CONFIG = {
     "closureShare": 0.5,
     "spikeFactor": 25.0,
     "spikeFloor": 0.02,
+    "backfillBatch": 1000,
 }
 
 STATUS_ORDER = ["PROVIDER_OFFLINE", "VALIDATION_FAILED", "MISSING_HISTORY", "WARMING_UP", "STALE", "SYNCING", "READY"]
@@ -67,6 +68,28 @@ PRIORITY_INCREMENTAL = 5
 PRIORITY_BACKFILL = 30
 PRIORITY_REPAIR = 40
 PRIORITY_VALIDATE = 50
+
+
+def _execution_coverage(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stored M15/M5 progress. Missing series stay explicit rather than looking complete."""
+    by_key = {(r.get("symbol"), r.get("timeframe")): r for r in rows}
+    out = []
+    for sym in SYMBOLS:
+        item: dict[str, Any] = {"symbol": sym}
+        for tf in EXEC_TFS:
+            row = by_key.get((sym, tf))
+            item[tf] = None if row is None else {
+                "status": row.get("status"),
+                "count": int(row.get("count") or 0),
+                "earliest": row.get("earliest"),
+                "latest": row.get("latest"),
+                "missingBars": int(row.get("missingBars") or 0),
+                "gaps": len(row.get("gaps") or []),
+                "requiredDepth": row.get("requiredDepth"),
+                "providerExhausted": bool(row.get("providerExhausted")),
+            }
+        out.append(item)
+    return out
 
 
 def utc(ts: int) -> datetime:
@@ -92,6 +115,14 @@ def aligned(tf: str, ts: int) -> bool:
     if tf == "W1":
         return ts % 86400 == 0 and d.weekday() in (6, 0)
     return ts % TF_SPEC[tf]["sec"] == 0
+
+
+def backfill_request(tf: str, have: int, depth: int, batch: int) -> int:
+    """How many older or initial bars one job may ask for. Execution timeframes stay in bounded batches."""
+    remaining = max(0, int(depth) - max(0, int(have)))
+    if tf in EXEC_TFS:
+        return min(max(1, int(batch)), remaining) if remaining else 0
+    return remaining
 
 
 def ohlc_ok(o: float, h: float, lo: float, c: float) -> bool:
@@ -769,14 +800,15 @@ class HistoryService:
                 return self._derive_h8_from_db(sym)
         count, earliest, latest = store.candle_stats(sym, tf)
         if count == 0:
-            rows = self.provider.rates_from_pos(sym, tf, 0, spec["depth"] + 1)
+            requested = backfill_request(tf, 0, spec["depth"], int(CONFIG["backfillBatch"]))
+            rows = self.provider.rates_from_pos(sym, tf, 0, requested + 1)
             if rows is None:
                 raise RuntimeError(f"Provider returned no {tf} history for {sym}")
             rows = self._closed_filter(tf, rows)
             fetched += len(rows)
             ins, rev, iss = self._persist(sym, tf, rows, source)
             inserted, revised, issues = inserted + ins, revised + rev, issues + iss
-            exhausted = len(rows) < spec["depth"]
+            exhausted = len(rows) < requested
             self._series({"symbol": sym, "timeframe": tf, "provider_depth": len(rows) if exhausted else None,
                                  "provider_exhausted": 1 if exhausted else 0})
         else:
@@ -790,7 +822,7 @@ class HistoryService:
                 inserted, revised, issues = inserted + ins, revised + rev, issues + iss
                 store.job_update(jid, checkpoint_ts=store.candle_stats(sym, tf)[2])
             if jtype == "BOOTSTRAP" and count < spec["depth"] and earliest is not None:
-                want = spec["depth"] - count
+                want = backfill_request(tf, count, spec["depth"], int(CONFIG["backfillBatch"]))
                 older = self.provider.rates_before(sym, tf, earliest - 1, want) or []
                 older = [r for r in older if r[0] < earliest]
                 fetched += len(older)
@@ -976,6 +1008,7 @@ class HistoryService:
                 "current": ({**cur, "runningSec": round(time.time() - cur["startedAt"], 1)} if cur else None),
                 "next": open_jobs[:10],
             },
+            "executionCoverage": _execution_coverage(rows),
             "summary": {
                 "series": len(rows),
                 "ready": sum(1 for r in rows if r["status"] == "READY"),

@@ -76,13 +76,15 @@ def plan(hypothesis: dict[str, Any], confirmation: dict[str, Any]) -> dict[str, 
     p1 = (hypothesis.get("p1") or {}).get("state")
     p2 = (hypothesis.get("p2") or {}).get("state")
     held = timing in HELD_TIMING or (confirmation.get("entry") or {}).get("classification") in ("EXTENDED", "POOR", "INVALID")
-    if p2 == "P2_WAIT_RETEST" or (p2 == "P2_READY" and held and timing == "WAIT_RETEST"):
+    p2_ready = p2 in ("P2_READY_FOR_RISK", "P2_READY")
+    p1_ready = p1 in ("P1_READY_FOR_RISK", "P1_READY")
+    if p2 == "P2_WAIT_RETEST" or (p2_ready and held and timing == "WAIT_RETEST"):
         handoffs.append(_handoff(hypothesis, confirmation, "P2", False, "WAIT_RETEST"))
-    elif p2 == "P2_READY" and confirmation.get("confirmed") and timing in P2_ENTRY:
+    elif p2_ready and confirmation.get("confirmed") and timing in P2_ENTRY:
         handoffs.append(_handoff(hypothesis, confirmation, "P2", True, timing))
-    if p1 == "P1_READY" and confirmation.get("reaction") and not held and timing != "WAIT_RETEST":
+    if p1_ready and confirmation.get("reaction") and not held and timing != "WAIT_RETEST":
         handoffs.append(_handoff(hypothesis, confirmation, "P1", True, timing or "REACTION"))
-    elif p1 == "P1_READY" and not any(h["legType"] == "P1" for h in handoffs):
+    elif p1_ready and not any(h["legType"] == "P1" for h in handoffs):
         blocker = "WAITING_FOR_M5_CONFIRMATION" if hypothesis.get("executionTimeframe") == "M5" else "WAITING_FOR_CONFIRMATION"
         if not handoffs:
             return {"handoffs": [], "executable": False, "blocker": blocker, "reason": confirmation.get("reason")}

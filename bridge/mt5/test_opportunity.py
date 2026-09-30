@@ -58,7 +58,7 @@ class Discovery(unittest.TestCase):
         channels = pack(H1=ch("H1", "BULLISH", lower=2300, upper=2500), M15=ch("M15", "BEARISH", lower=2360, upper=2440))
         result = opportunity.scan(
             ["XAUUSD"], {"XAUUSD": channels}, ranks={"XAUUSD": 29}, prices={"XAUUSD": 2395},
-            extensions={"XAUUSD": 0.4}, breaks={"XAUUSD": True},
+            confirmations={"XAUUSD": {"M5": {"direction": "BULLISH", "state": "CONFIRMED", "timing": "ENTER_NOW", "extension": 0.4, "reaction": True}}},
         )
         self.assertEqual(result["summary"]["xau"], "QUALIFIED")
         self.assertTrue(any("independently of Stage 4" in r for h in result["qualified"] for r in h["reasons"]))
@@ -78,7 +78,7 @@ class Discovery(unittest.TestCase):
         # L4 execution is M5. Parent for L4 is H1 when H8 is absent.
         l4 = next(h for h in outside if h.get("TiTLevel") == "L4")
         self.assertEqual(l4["p1"]["reason"], "WAITING_FOR_ERZ")
-        self.assertEqual(l4["p2"]["state"], "P2_READY")
+        self.assertEqual(l4["p2"]["state"], "P2_READY_FOR_RISK")
         self.assertTrue(l4["actionable"])
         held = opportunity.classify_levels(
             "XAUUSD", pack(H1=parent, M15=child), price=1.40,
@@ -98,13 +98,14 @@ class Discovery(unittest.TestCase):
         self.assertEqual(l2["blocker"], "WAITING_FOR_BREAK")
         self.assertFalse(l2["actionable"])
         released = opportunity.classify_levels(
-            "GBPJPY", pack(D1=parent, H8=child), price=1.19, extension_atr=0.4, break_valid=True,
+            "GBPJPY", pack(D1=parent, H8=child), price=1.19,
+            confirmation_by_tf={"H1": {"direction": "BULLISH", "state": "CONFIRMED", "timing": "ENTER_NOW", "extension": 0.4}},
         )
         l2b = next(h for h in released if h.get("TiTLevel") == "L2")
         self.assertEqual(l2b["p1"]["state"], "P1_WAITING_FOR_ERZ")
-        self.assertEqual(l2b["p2"]["state"], "P2_READY")
+        self.assertEqual(l2b["p2"]["state"], "P2_READY_FOR_RISK")
         self.assertTrue(l2b["actionable"])
-        self.assertEqual(l2b["blocker"], "P2_READY")
+        self.assertEqual(l2b["blocker"], "P2_READY_FOR_RISK")
         unknown = opportunity.classify_levels("GBPJPY", pack(D1=parent, H8=child))
         l2c = next(h for h in unknown if h.get("TiTLevel") == "L2")
         self.assertEqual(l2c["p1"]["reason"], "PRICE_UNKNOWN")
@@ -121,11 +122,23 @@ class Discovery(unittest.TestCase):
         zone = opportunity.expected_retracement_zone(parent, child, 1)
         ready = opportunity.classify_levels("EURUSD", pack(D1=parent, H8=child), price=(zone["zoneLow"] + zone["zoneHigh"]) / 2, break_valid=False)
         l2 = next(h for h in ready if h.get("TiTLevel") == "L2")
-        self.assertEqual(l2["p1"]["state"], "P1_READY")
-        self.assertEqual(l2["p2"]["state"], "P2_WAITING")
-        later = opportunity.classify_levels("EURUSD", pack(D1=parent, H8=child), price=1.19, extension_atr=0.4, break_valid=True)
+        self.assertEqual(l2["p1"]["state"], "P1_ZONE_REACHED")
+        self.assertEqual(l2["p1"]["reason"], "P1_REACTION_PENDING")
+        self.assertFalse(l2["actionable"])
+        self.assertEqual(l2["p2"]["state"], "P2_WAITING_FOR_BREAK")
+        reacted = opportunity.classify_levels(
+            "EURUSD", pack(D1=parent, H8=child), price=(zone["zoneLow"] + zone["zoneHigh"]) / 2,
+            confirmation_by_tf={"H1": {"direction": "BEARISH", "state": "CONFIRMED", "timing": "ENTER_NOW", "extension": 0.2, "reaction": True}},
+        )
+        l2r = next(h for h in reacted if h.get("TiTLevel") == "L2")
+        self.assertEqual(l2r["p1"]["state"], "P1_READY_FOR_RISK")
+        self.assertTrue(l2r["actionable"])
+        later = opportunity.classify_levels(
+            "EURUSD", pack(D1=parent, H8=child), price=1.19,
+            confirmation_by_tf={"H1": {"direction": "BULLISH", "state": "CONFIRMED", "timing": "ENTER_NOW", "extension": 0.4}},
+        )
         l2b = next(h for h in later if h.get("TiTLevel") == "L2")
-        self.assertEqual(l2b["p2"]["state"], "P2_READY")
+        self.assertEqual(l2b["p2"]["state"], "P2_READY_FOR_RISK")
         self.assertNotEqual(l2b["p1"]["state"], "P1_FILLED")
 
     def test_extended_break_waits_for_retest(self):
@@ -138,8 +151,10 @@ class Discovery(unittest.TestCase):
     def test_shared_campaign_budget_never_doubles(self):
         parent, child = ch("D1", "BULLISH", position=30), ch("H8", "BEARISH", lower=1.02, upper=1.12)
         zone = opportunity.expected_retracement_zone(parent, child, 1)
-        rows = opportunity.classify_levels("EURUSD", pack(D1=parent, H8=child), price=(zone["zoneLow"] + zone["zoneHigh"]) / 2,
-                                           extension_atr=0.4, break_valid=True)
+        rows = opportunity.classify_levels(
+            "EURUSD", pack(D1=parent, H8=child), price=(zone["zoneLow"] + zone["zoneHigh"]) / 2,
+            confirmation_by_tf={"H1": {"direction": "BULLISH", "state": "CONFIRMED", "timing": "ENTER_NOW", "extension": 0.4, "reaction": True}},
+        )
         l2 = next(h for h in rows if h.get("TiTLevel") == "L2")
         self.assertAlmostEqual(l2["p1"]["riskPct"] + l2["p2"]["riskPct"], BUDGET)
         self.assertLess(l2["p1"]["riskPct"], BUDGET)
@@ -148,7 +163,7 @@ class Discovery(unittest.TestCase):
     def test_failed_break_does_not_authorize_p2(self):
         rows = opportunity.classify_levels("EURUSD", pack(D1=ch("D1", "BULLISH"), H8=ch("H8", "BEARISH", status="BROKEN")), break_valid=False)
         l2 = next(h for h in rows if h.get("TiTLevel") == "L2")
-        self.assertEqual(l2["p2"]["state"], "P2_WAITING")
+        self.assertEqual(l2["p2"]["state"], "P2_WAITING_FOR_BREAK")
         self.assertNotEqual(l2["childRole"], "REVERSAL_CANDIDATE")
 
     def test_correction_end_buys_with_the_parent(self):

@@ -175,14 +175,16 @@ class _Series:
         self.n = len(bars)
 
 
-def _scan_breaks(s: _Series, line, sgn_out: int, start: int, atr: list[float]) -> tuple[int | None, list[dict[str, Any]]]:
+def _scan_breaks(s: _Series, origin: float, slope: float, ia: int, offset: float, sgn_out: int, start: int, atr: list[float]) -> tuple[int | None, list[dict[str, Any]]]:
     """Walk closes from `start`; a close beyond the boundary (outside direction sgn_out) by breakTol is a break.
-    A later close back inside turns it into a failed breakout. Returns (definitive break index, failed list)."""
+    A later close back inside turns it into a failed breakout. Returns (definitive break index, failed list).
+    Boundary at i is (origin + slope * (i - ia)) + offset, the same association as the published line."""
     bt = CONFIG["breakTolAtr"]
     failed: list[dict[str, Any]] = []
     brk: int | None = None
+    closes = s.c
     for i in range(start, s.n):
-        d = sgn_out * (s.c[i] - line(i))
+        d = sgn_out * (closes[i] - ((origin + slope * (i - ia)) + offset))
         if brk is None:
             if d > bt * atr[i]:
                 brk = i
@@ -200,28 +202,32 @@ def _build(tf: str, s: _Series, side: str, A: dict, B: dict, piv: list[dict], at
     slope = (B["p"] - A["p"]) / (ib - ia)
     sgn = 1 if side == "L" else -1          # +1: price lives above the anchor line (support); -1: below (resistance)
     tt = CONFIG["touchTolAtr"]
+    origin = A["p"]
 
     def line(i: float) -> float:
-        return A["p"] + slope * (i - ia)
+        return origin + slope * (i - ia)
 
     wick = s.l if side == "L" else s.h
+    closes = s.c
     pierce = 0
     for i in range(ia + 1, ib):
-        if sgn * (s.c[i] - line(i)) < -tt * atr[i]:
+        bound = origin + slope * (i - ia)
+        if sgn * (closes[i] - bound) < -tt * atr[i]:
             return None
-        if sgn * (wick[i] - line(i)) < -2 * tt * atr[i]:
+        if sgn * (wick[i] - bound) < -2 * tt * atr[i]:
             pierce += 1
     if pierce > 1:
         return None
 
-    brk_a, failed_a = _scan_breaks(s, line, -sgn, ib + 1, atr)
+    brk_a, failed_a = _scan_breaks(s, origin, slope, ia, 0.0, -sgn, ib + 1, atr)
     end_a = brk_a if brk_a is not None else s.n
 
     def same_touches(end: int) -> list[dict]:
         out: list[dict] = []
         for p in piv:
-            if p["kind"] == side and ia <= p["i"] < end and abs(p["p"] - line(p["i"])) <= tt * atr[p["i"]]:
-                if out and p["i"] - out[-1]["i"] <= C["pivot"]:
+            pi = p["i"]
+            if p["kind"] == side and ia <= pi < end and abs(p["p"] - (origin + slope * (pi - ia))) <= tt * atr[pi]:
+                if out and pi - out[-1]["i"] <= C["pivot"]:
                     continue
                 out.append(p)
         return out
@@ -240,10 +246,12 @@ def _build(tf: str, s: _Series, side: str, A: dict, B: dict, piv: list[dict], at
     if width <= 0 or not (CONFIG["minWidthAtr"] <= width / a_last <= CONFIG["maxWidthAtr"]):
         return None
 
-    def opp_line(i: float) -> float:
-        return line(i) + sgn * width
+    opp_offset = sgn * width
 
-    brk_o, failed_o = _scan_breaks(s, opp_line, sgn, cut + 1, atr)
+    def opp_line(i: float) -> float:
+        return line(i) + opp_offset
+
+    brk_o, failed_o = _scan_breaks(s, origin, slope, ia, opp_offset, sgn, cut + 1, atr)
     brk, brk_side_sgn = None, 0
     if brk_a is not None and (brk_o is None or brk_a <= brk_o):
         brk, brk_side_sgn = brk_a, -sgn
@@ -257,12 +265,13 @@ def _build(tf: str, s: _Series, side: str, A: dict, B: dict, piv: list[dict], at
 
     t_o: list[dict] = []
     for p in piv:
-        if p["kind"] != side and ia <= p["i"] < end_pre and abs(p["p"] - opp_line(p["i"])) <= tt * atr[p["i"]]:
-            if t_o and p["i"] - t_o[-1]["i"] <= C["pivot"]:
+        pi = p["i"]
+        if p["kind"] != side and ia <= pi < end_pre and abs(p["p"] - ((origin + slope * (pi - ia)) + opp_offset)) <= tt * atr[pi]:
+            if t_o and pi - t_o[-1]["i"] <= C["pivot"]:
                 continue
             t_o.append(p)
 
-    near_opp = [p for p in piv if p["kind"] != side and ia <= p["i"] < end_pre and sgn * (p["p"] - line(p["i"])) >= 0.65 * width]
+    near_opp = [p for p in piv if p["kind"] != side and ia <= p["i"] < end_pre and sgn * (p["p"] - (origin + slope * (p["i"] - ia))) >= 0.65 * width]
     slope_o = _linreg_slope([p["i"] for p in near_opp], [p["p"] for p in near_opp]) if len(near_opp) >= 2 else None
     span = max(1, end_pre - 1 - ia)
     pdev = abs(slope_o - slope) * span / width if slope_o is not None else None
@@ -270,15 +279,18 @@ def _build(tf: str, s: _Series, side: str, A: dict, B: dict, piv: list[dict], at
 
     viol = 0
     for i in range(ia, end_pre):
-        lo, hi = (line(i), opp_line(i)) if sgn > 0 else (opp_line(i), line(i))
-        if s.c[i] < lo - tt * atr[i] or s.c[i] > hi + tt * atr[i]:
+        anchor = origin + slope * (i - ia)
+        opposite = anchor + opp_offset
+        lo, hi = (anchor, opposite) if sgn > 0 else (opposite, anchor)
+        tol = tt * atr[i]
+        if closes[i] < lo - tol or closes[i] > hi + tol:
             viol += 1
     viol_share = viol / max(1, end_pre - ia)
     if viol_share > CONFIG["maxViolationShare"]:
         return None
 
-    devs = [abs(p["p"] - line(p["i"])) / (tt * atr[p["i"]]) for p in t_a] + [
-        abs(p["p"] - opp_line(p["i"])) / (tt * atr[p["i"]]) for p in t_o
+    devs = [abs(p["p"] - (origin + slope * (p["i"] - ia))) / (tt * atr[p["i"]]) for p in t_a] + [
+        abs(p["p"] - ((origin + slope * (p["i"] - ia)) + opp_offset)) / (tt * atr[p["i"]]) for p in t_o
     ]
     quality = max(0.0, 100.0 * (1 - sum(devs) / len(devs))) if devs else 0.0
     last_touch = max([p["i"] for p in t_a + t_o])
@@ -290,9 +302,12 @@ def _build(tf: str, s: _Series, side: str, A: dict, B: dict, piv: list[dict], at
             invalid_hint = True
         else:
             up = brk_side_sgn > 0
+            invalid_atr = CONFIG["invalidAtr"]
             for i in range(brk, s.n):
-                lo, hi = (line(i), opp_line(i)) if sgn > 0 else (opp_line(i), line(i))
-                if ((s.c[i] - hi) if up else (lo - s.c[i])) >= CONFIG["invalidAtr"] * atr[i]:
+                anchor = origin + slope * (i - ia)
+                opposite = anchor + opp_offset
+                lo, hi = (anchor, opposite) if sgn > 0 else (opposite, anchor)
+                if ((closes[i] - hi) if up else (lo - closes[i])) >= invalid_atr * atr[i]:
                     invalid_hint = True
                     break
     score = (

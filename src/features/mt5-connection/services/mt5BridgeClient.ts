@@ -357,9 +357,10 @@ export type AutonomyState = {
     summary?: {
       scanned?: number; universe?: number; normal?: number; tit?: number; L1?: number; L2?: number; L3?: number; L4?: number; xau?: string;
       detected?: number;
-      funnel?: { scanned?: number; hypotheses?: number; watching?: number; confirming?: number; erzActive?: number; p1Ready?: number; p2Ready?: number; waitRetest?: number; stage8Authorized?: number; activeCampaigns?: number; actionable?: number };
+      funnel?: { scanned?: number; hypotheses?: number; watching?: number; confirming?: number; erzActive?: number; p1ZoneReached?: number; p1Ready?: number; p2Ready?: number; waitRetest?: number; stage8Authorized?: number; activeCampaigns?: number; actionable?: number };
       blockers?: Record<string, number>;
       legs?: { p1?: Record<string, number>; p2?: Record<string, number> };
+      production?: { operatorPositionLimit?: number; xauReservePct?: number };
     };
     instruments?: { symbol: string; hypotheses?: OpportunityHypothesis[]; execution?: Record<string, { direction?: string; status?: string; phase?: string; position?: number | null; confidence?: number; touchCount?: number; upper?: number; lower?: number; mid?: number }> }[];
     qualified?: {

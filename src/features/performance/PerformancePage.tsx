@@ -7,7 +7,7 @@ import { reloadLearning, setLearningFilters, startLearningStore, useLearningStor
 import '../market-data/market-data.css';
 import '../market-scanner/market-scanner.css';
 
-const TABS = ['Performance', 'Strategy Analytics', 'Decision Audit', 'Learning & Calibration'] as const;
+const TABS = ['Performance', 'Strategy Analytics', 'Decision Audit', 'Learning & Calibration', 'Historical Validation'] as const;
 const PAGE_SIZE = 15;
 const SLICES: { key: string; title: string }[] = [
   { key: 'bySetup', title: 'Setup type' },
@@ -142,6 +142,54 @@ function Audit({ row }: { row: LearningTrade }) {
                 <td>{s.stored ? (typeof s.summary === 'string' ? s.summary : JSON.stringify(s.summary)) : 'Not present in the stored record.'}</td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function HistoricalValidation() {
+  const [report, setReport] = useState<Record<string, unknown> | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let stop = false;
+    fetch('/mt5-bridge/validation/report')
+      .then((res) => res.json())
+      .then((body) => { if (!stop) setReport(body); })
+      .catch((err) => { if (!stop) setError(err instanceof Error ? err.message : 'Validation report unavailable'); });
+    return () => { stop = true; };
+  }, []);
+  const coverage = (report?.coverage ?? {}) as { m15Symbols?: number; m5Symbols?: number; symbols?: number; note?: string; rows?: { symbol: string; measurable?: boolean; M15?: { count?: number }; M5?: { count?: number } }[] };
+  const production = (report?.production ?? {}) as { operatorPositionLimit?: number; xauReservePct?: number; changed?: boolean };
+  const stage6 = (report?.stage6 ?? {}) as { measured?: boolean; reason?: string };
+  const rows = (coverage.rows ?? []).filter((row) => (row.M15?.count ?? 0) > 0 || (row.M5?.count ?? 0) > 0);
+  return (
+    <Card>
+      <div className="card-head">
+        <div>
+          <h3>Historical validation</h3>
+          <p>LIVE configuration is unchanged. This surface is the historical-replay and coverage record, not a capacity or reserve change.</p>
+        </div>
+        <Badge tone="blue">HISTORICAL REPLAY</Badge>
+      </div>
+      {error && <p className="hr-reason">{error}</p>}
+      <p className="hr-reason">
+        Production operator limit {production.operatorPositionLimit ?? '—'} · XAU reserve {production.xauReservePct ?? 0}% · changed {production.changed ? 'yes' : 'no'}
+        {' · '}M15 symbols {coverage.m15Symbols ?? 0}/{coverage.symbols ?? 29} · M5 symbols {coverage.m5Symbols ?? 0}/{coverage.symbols ?? 29}
+        {' · '}replay {String(report?.replay ?? '—')}
+      </p>
+      <p className="hr-reason">{coverage.note}</p>
+      <p className="hr-reason">{String(report?.executionModel ?? '')}</p>
+      <p className="hr-reason">Normal continuation: {stage6.measured ? 'reconstructed' : 'not measured'}. {stage6.reason}</p>
+      <p className="hr-reason">{String(report?.counterfactual ?? '')}</p>
+      <div className="table-wrap">
+        <table className="cs-table">
+          <thead><tr><th>Symbol</th><th>M15</th><th>M5</th></tr></thead>
+          <tbody>
+            {rows.length ? rows.map((row) => (
+              <tr key={row.symbol}><td>{row.symbol}</td><td>{row.M15?.count ?? 0}</td><td>{row.M5?.count ?? 0}</td></tr>
+            )) : <tr><td colSpan={3}>No M15 or M5 candles stored yet. Backfill stays on the history queue and does not invent bars.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -390,6 +438,7 @@ export function PerformancePage() {
         </>
       )}
 
+      {tab === 'Historical Validation' && <HistoricalValidation />}
       {tab === 'Learning & Calibration' && (
         <>
           <div className="metrics">

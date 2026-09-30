@@ -64,8 +64,10 @@ def _confirmation_from_decision(decision: dict[str, Any] | None) -> dict[str, An
     if not decision:
         return None
     entry = decision.get("entry") or {}
+    timing = entry.get("timing")
     return {"direction": decision.get("expectedDirection") or decision.get("direction"), "state": decision.get("state"),
-            "timing": entry.get("timing"), "extension": entry.get("extensionATR")}
+            "timing": timing, "extension": entry.get("extensionATR"),
+            "reaction": bool(decision.get("reaction")) or timing in ("ENTER_NOW", "RETEST_CONFIRMED")}
 
 
 def _execution_confirmations(channels: dict[str, dict[str, dict[str, Any]]]) -> dict[str, dict[str, dict[str, Any]]]:
@@ -88,7 +90,9 @@ def _confirmation_from_engine(direction: str | None, decision: dict[str, Any]) -
     if state not in ("CONFIRMED", "BREAKOUT_CONFIRMED_WAIT_RETEST"):
         return None
     entry = decision.get("entry") or {}
-    return {"direction": direction, "state": state, "timing": entry.get("timing"), "extension": entry.get("extensionATR")}
+    timing = entry.get("timing")
+    return {"direction": direction, "state": state, "timing": timing, "extension": entry.get("extensionATR"),
+            "reaction": bool(decision.get("reaction")) or timing in ("ENTER_NOW", "RETEST_CONFIRMED")}
 
 
 def current() -> dict[str, Any]:
