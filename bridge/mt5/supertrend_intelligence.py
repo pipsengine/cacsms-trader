@@ -18,8 +18,19 @@ try:
 except ImportError:  # pragma: no cover
     from bridge.mt5.db import ROOT, _iso, connect  # type: ignore
 
-TIMEFRAMES = ("YTD", "Q", "MN", "W", "D", "H8", "H1", "M15")
-HTF = ("YTD", "Q", "MN", "W", "D", "H8")
+TIMEFRAMES = ("Y", "Q", "MN", "W", "D", "H8", "H1", "M15")
+# Match Channel Analysis card density (avoid shipping 160+ bars that collapse to 1px wicks in the UI).
+CHART_BARS: dict[str, int] = {
+    "Y": 120,
+    "Q": 60,
+    "MN": 96,
+    "W": 80,
+    "D": 80,
+    "H8": 80,
+    "H1": 80,
+    "M15": 96,
+}
+HTF = ("Y", "Q", "MN", "W", "D", "H8")
 EXECUTION = ("H1", "M15")
 DEFAULT_MULTIPLIER = 1.0
 DEFAULT_PERIOD = 100
@@ -217,6 +228,28 @@ def calculate_supertrend(candles: list[dict[str, Any]], period: int, multiplier:
     return {"points": points, "painted": painted, "confirmedIndex": confirmed_index}
 
 
+def _provisional_atr_period(configured: int, bar_count: int) -> int | None:
+    """Pick an ATR length for chart-only Supertrend when full period is not yet available."""
+    if bar_count < 3:
+        return None
+    min_trail = min(28, max(10, bar_count // 2))
+    eff = min(configured, bar_count)
+    while eff > 2 and bar_count - eff < min_trail:
+        eff -= 1
+    return eff if eff >= 2 else None
+
+
+def chart_payload(calc: dict[str, Any], timeframe: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Supertrend-ready bars when available; otherwise last closed OHLC only (no fabricated ST/ATR)."""
+    n = CHART_BARS.get(timeframe, 80)
+    painted = [p for p in calc["painted"] if p.get("atr") is not None]
+    points = [p for p in calc["points"] if p.get("atr") is not None]
+    if painted:
+        return painted[-n:], points[-n:]
+    preview = [{**c, "trend": "UNKNOWN", "supertrend": None, "atr": None} for c in calc["painted"][-n:]]
+    return preview, []
+
+
 def _bars_since_flip(points: list[dict[str, Any]], confirmed_index: int) -> tuple[int | None, int | None]:
     if confirmed_index < 0 or points[confirmed_index]["direction"] == "UNKNOWN":
         return None, None
@@ -241,7 +274,15 @@ def _freshness_ms(candles: list[dict[str, Any]], confirmed_index: int, now_ms: i
     return max(0, now_ms - int(candles[confirmed_index]["time"]))
 
 
-def build_card(symbol: str, timeframe: str, candles: list[dict[str, Any]], settings: dict[str, Any], now_ms: int, digits: int = 5) -> dict[str, Any]:
+def build_card(
+    symbol: str,
+    timeframe: str,
+    candles: list[dict[str, Any]],
+    settings: dict[str, Any],
+    now_ms: int,
+    digits: int = 5,
+    live_price: float | None = None,
+) -> dict[str, Any]:
     period = int(settings["atrPeriod"])
     multiplier = float(settings["atrMultiplier"])
     calc = calculate_supertrend(candles, period, multiplier)
@@ -249,7 +290,7 @@ def build_card(symbol: str, timeframe: str, candles: list[dict[str, Any]], setti
     confirmed_index = int(calc["confirmedIndex"])
     confirmed = points[confirmed_index] if confirmed_index >= 0 else None
     confirmed_candle = candles[confirmed_index] if confirmed_index >= 0 else None
-    current_price = float(candles[-1]["close"]) if candles else None
+    current_price = live_price if live_price is not None else (float(candles[-1]["close"]) if candles else None)
     direction = confirmed["direction"] if confirmed else "UNKNOWN"
     supertrend = confirmed.get("value") if confirmed else None
     atr = confirmed.get("atr") if confirmed else None
@@ -258,6 +299,16 @@ def build_card(symbol: str, timeframe: str, candles: list[dict[str, Any]], setti
     distance_atr = (distance / atr) if distance is not None and atr else None
     bars_since, flip_time = _bars_since_flip(points, confirmed_index)
     health = _health(candles, confirmed_index, period, now_ms)
+    chart_candles, chart_points = chart_payload(calc, timeframe)
+    chart_provisional = False
+    if health == "INSUFFICIENT_DATA" and len(candles) >= 2:
+        has_st = any(c.get("supertrend") is not None for c in chart_candles)
+        if not has_st:
+            effective = _provisional_atr_period(period, len(candles))
+            if effective is not None:
+                preview_calc = calculate_supertrend(candles, effective, multiplier)
+                chart_candles, chart_points = chart_payload(preview_calc, timeframe)
+                chart_provisional = any(c.get("supertrend") is not None for c in chart_candles)
     return {
         "symbol": symbol,
         "timeframe": timeframe,
@@ -279,8 +330,9 @@ def build_card(symbol: str, timeframe: str, candles: list[dict[str, Any]], setti
         "multiplier": multiplier,
         "atrPeriod": period,
         "triggerCandle": settings.get("triggerCandle") or DEFAULT_TRIGGER,
-        "candles": calc["painted"][-160:],
-        "points": points[-160:],
+        "candles": chart_candles,
+        "points": chart_points,
+        "chartProvisional": chart_provisional,
         "sequence": now_ms,
         "settingsRevision": int(settings["revision"]),
         "digits": digits,

@@ -1,3 +1,4 @@
+import { normalizeSupertrendSnapshot } from './normalizeSnapshot';
 import type { SupertrendSettings, SupertrendSnapshot, SupertrendTimeframe } from './types';
 
 const BASE = (import.meta.env.VITE_MT5_BRIDGE_URL as string | undefined)?.replace(/\/$/, '') || '/mt5-bridge';
@@ -21,8 +22,9 @@ async function request<T>(path: string, init?: RequestInit & { timeoutMs?: numbe
   return body;
 }
 
-export function fetchSupertrend(symbol: string) {
-  return request<SupertrendSnapshot>(`/api/intelligence/supertrend/${encodeURIComponent(symbol)}`, { timeoutMs: 25_000 });
+export async function fetchSupertrend(symbol: string) {
+  const raw = await request<SupertrendSnapshot>(`/api/intelligence/supertrend/${encodeURIComponent(symbol)}`, { timeoutMs: 25_000 });
+  return normalizeSupertrendSnapshot(raw);
 }
 
 export function fetchSupertrendCard(symbol: string, timeframe: SupertrendTimeframe) {

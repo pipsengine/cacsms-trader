@@ -426,6 +426,34 @@ def _hypothesis(symbol: str, family: str, level: str | None, parent: dict[str, A
     return out
 
 
+def _sync_p2_from_channel_break(item: dict[str, Any], brk: dict[str, Any]) -> None:
+    """Align the TiT P2 leg with the Breakout & Retest scanner (production capital path for OP-06/07 watches)."""
+    st = str(brk.get("state") or "")
+    p2 = dict(item.get("p2") or {})
+    if st == "RETESTING":
+        p2.update({"state": "P2_WAIT_RETEST", "reason": "WAIT_RETEST"})
+    elif st == "RETEST_HELD":
+        p2.update({"state": "P2_READY_FOR_RISK", "reason": "P2_READY_FOR_RISK"})
+    item["p2"] = p2
+    if st not in ("RETESTING", "RETEST_HELD"):
+        item["blocker"] = principal_blocker(item)
+        return
+    p1 = item.get("p1") or {}
+    p1_eligible = p1.get("state") == "P1_READY_FOR_RISK"
+    p2_eligible = p2["state"] == "P2_READY_FOR_RISK"
+    zone = item.get("expectedRetracementZone") or {}
+    budget = float(CONFIG["campaignBudgetPct"])
+    p1_risk, p2_risk = allocate_campaign(budget, p1_eligible, p2_eligible, float(zone.get("confidence") or 0))
+    item["p1"] = {**p1, "riskPct": p1_risk}
+    item["p2"] = {**p2, "riskPct": p2_risk}
+    direction = item.get("direction")
+    item["actionable"] = (p1_eligible or p2_eligible) and direction not in (None, "UNKNOWN")
+    item["allocatedRisk"] = budget if item["actionable"] else 0.0
+    item["remainingRisk"] = (p1_risk + p2_risk) if item["actionable"] else 0.0
+    item["status"] = "CAMPAIGN_ACTIVE" if item["actionable"] else "WATCHING"
+    item["blocker"] = principal_blocker(item)
+
+
 def classify_levels(symbol: str, channels: dict[str, dict[str, Any]], price: float | None = None,
                     extension_atr: float | None = None, break_valid: bool = False, scanner_rank: int | None = None,
                     confirmation_by_tf: dict[str, dict[str, Any]] | None = None,
@@ -471,6 +499,7 @@ def classify_levels(symbol: str, channels: dict[str, dict[str, Any]], price: flo
         if brk:
             item["channelBreak"] = {k: brk.get(k) for k in ("state", "boundary", "expectedDirection", "extensionAtr", "candidateId")}
             item["reasons"].append(f"{spec['child']} channel {brk.get('state')} {brk.get('boundary')} (Breakout & Retest)")
+            _sync_p2_from_channel_break(item, brk)
         out.append(item)
     return out
 

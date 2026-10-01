@@ -1214,6 +1214,22 @@ _SUPERTREND_CONFIG_TTL_SEC = 120.0
 _SUPERTREND_PERSIST_LOCK = threading.Lock()
 
 
+def _merge_st_forming(closed: list[dict[str, Any]], bar: tuple | None) -> list[dict[str, Any]]:
+    """Closed canonical history plus the open bar (same rules as Channel Analysis attach_current_candle)."""
+    out = [{**row, "complete": True} for row in closed]
+    if not bar:
+        return out
+    forming = _st_bar(bar, False)
+    if out and out[-1]["time"] == forming["time"]:
+        out[-1] = forming
+    elif not out or out[-1]["time"] < forming["time"]:
+        out.append(forming)
+    return out
+
+
+_ST_FORMING_KEY = {"Y": "YTD", "Q": "Q", "MN": "MN", "W": "W", "D": "D1", "H8": "H8", "H1": "H1", "M15": "M15"}
+
+
 def _st_bar(r: Any, complete: bool = True) -> dict[str, Any]:
     if isinstance(r, tuple):
         volume = int(r[5] or 0) if len(r) > 5 else 0
@@ -1242,11 +1258,11 @@ def _mt5_rates(symbol: str, tf: int, count: int, include_live: bool = True) -> l
     return rows
 
 
-def _supertrend_bars(symbol: str) -> dict[str, list[dict[str, Any]]]:
-    """Canonical Supertrend bars. YTD uses D1 progression from Jan 1; Q uses channel_analysis.aggregate;
-    H8 uses history.derive_h8 on server-day 00/08/16 boundaries."""
+def _supertrend_bars(symbol: str) -> tuple[dict[str, list[dict[str, Any]]], float | None]:
+    """Canonical Supertrend bars. Y uses D1 progression from Jan 1 (same daily series as D1, calendar-year window);
+    H8 uses history.derive_h8 on server-day 00/08/16 boundaries. Open bars come from the existing MT5 tick path."""
     d1_t = history_store.candle_tail(symbol, "D1", 260)
-    mn1_t = history_store.candle_tail(symbol, "MN1", 180)
+    mn1_t = history_store.candle_tail(symbol, "MN1", 420)
     w1_t = history_store.candle_tail(symbol, "W1", 140)
     h1_t = history_store.candle_tail(symbol, "H1", 920)
     m15_t = history_store.candle_tail(symbol, "M15", 220)
@@ -1270,16 +1286,29 @@ def _supertrend_bars(symbol: str) -> dict[str, list[dict[str, Any]]]:
         raw_h1 = [(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), int(r[5] if len(r) > 5 else 0), int(r[6] if len(r) > 6 else 0)) for r in h1_t]
         h8_rows = [_st_bar(r, True) for r in history.derive_h8(raw_h1, now)]
 
-    return {
-        "YTD": ytd,
-        "Q": q_rows,
-        "MN": mn1,
-        "W": w1,
-        "D": d1,
-        "H8": h8_rows,
-        "H1": h1,
-        "M15": m15,
+    live_price: float | None = None
+    forming: dict[str, tuple] = {}
+    market = _channel_market(symbol)
+    if market:
+        live_price = (float(market["bid"]) + float(market["ask"])) / 2
+        closed_mn1 = _closed_months(symbol, int(market["now"]))
+        forming = channel_analysis.current_bars(int(market["now"]), market, closed_mn1)
+
+    def attach(series: list[dict[str, Any]], tf: str) -> list[dict[str, Any]]:
+        key = _ST_FORMING_KEY[tf]
+        return _merge_st_forming(series, forming.get(key))
+
+    series = {
+        "Y": attach(ytd, "Y"),
+        "Q": attach(q_rows, "Q"),
+        "MN": attach(mn1, "MN"),
+        "W": attach(w1, "W"),
+        "D": attach(d1, "D"),
+        "H8": attach(h8_rows, "H8"),
+        "H1": attach(h1, "H1"),
+        "M15": attach(m15, "M15"),
     }
+    return series, live_price
 
 
 def _persist_supertrend_snapshot_async(symbol: str, key: tuple[str, int], snapshot: dict[str, Any]) -> None:
@@ -1314,6 +1343,18 @@ def _clear_supertrend_cache() -> None:
     _SUPERTREND_CONFIG_CACHE = None
 
 
+def _normalize_supertrend_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    cards = dict(snapshot.get("cards") or {})
+    if "Y" not in cards and "YTD" in cards:
+        legacy = dict(cards["YTD"])
+        legacy["timeframe"] = "Y"
+        cards["Y"] = legacy
+    cards.pop("YTD", None)
+    out = dict(snapshot)
+    out["cards"] = cards
+    return out
+
+
 def cmd_supertrend_snapshot(symbol: str) -> dict[str, Any]:
     symbol = (symbol or "").strip().upper()
     if symbol not in regime.SYMBOLS:
@@ -1322,12 +1363,12 @@ def cmd_supertrend_snapshot(symbol: str) -> dict[str, Any]:
     key = (symbol, int(cfg["revision"]))
     hit = _SUPERTREND_CACHE.get(key)
     if hit and time.time() - hit[0] < _SUPERTREND_CACHE_TTL_SEC:
-        return hit[1]
+        return _normalize_supertrend_snapshot(dict(hit[1]))
     digits = 3 if "JPY" in symbol or symbol.startswith("XAU") else 5
     now_ms = int(time.time() * 1000)
-    bars = _supertrend_bars(symbol)
+    bars, live_price = _supertrend_bars(symbol)
     cards = {
-        tf: supertrend_intelligence.build_card(symbol, tf, rows, cfg, now_ms, digits)
+        tf: supertrend_intelligence.build_card(symbol, tf, rows, cfg, now_ms, digits, live_price=live_price)
         for tf, rows in bars.items()
     }
     snapshot = {
@@ -1341,6 +1382,7 @@ def cmd_supertrend_snapshot(symbol: str) -> dict[str, Any]:
         "cards": cards,
         "transitions": [],
     }
+    snapshot = _normalize_supertrend_snapshot(snapshot)
     _SUPERTREND_CACHE[key] = (time.time(), snapshot)
     _persist_supertrend_snapshot_async(symbol, key, snapshot)
     return snapshot
@@ -2352,6 +2394,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    _clear_supertrend_cache()
     try:
         ensure_database()
         ensure_schema()

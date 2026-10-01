@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTrading } from '../../context/TradingContext';
 import { pipelineFocusSymbol } from '../market-scanner/services/scannerStage';
 import { useScannerStore } from '../market-scanner/services/scannerStore';
@@ -13,6 +13,7 @@ import { InstrumentTraceTable } from './components/InstrumentTraceTable';
 import { OrchestratorPanel } from './components/OrchestratorPanel';
 import { DecisionQueue } from './components/DecisionQueue';
 import { OpportunityFrameworkPanel } from './components/OpportunityFrameworkPanel';
+import { startFrameworkStore } from './services/frameworkStore';
 import { WorldModelPanel } from './components/WorldModelPanel';
 import { EventStream } from './components/EventStream';
 import { RuntimeHealth } from './components/RuntimeHealth';
@@ -24,10 +25,13 @@ export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngi
   const w = useWorkflowEngine(adapter);
   const { selected: chartSymbol } = useTrading();
   const scan = useScannerStore();
-  const focusSymbol = useMemo(() => pipelineFocusSymbol() ?? chartSymbol, [scan.state, chartSymbol]);
+  const leaderSymbol = useMemo(() => pipelineFocusSymbol() ?? chartSymbol, [scan.state, chartSymbol]);
   const [selected, setSelected] = useState(1);
   const [pinnedWorld, setPinnedWorld] = useState<string | null>(null);
-  const worldSymbol = pinnedWorld ?? focusSymbol;
+  /** Stage cards follow the pinned instrument; otherwise the chart symbol, then the Stage 4 leader. */
+  const pipelineSymbol = pinnedWorld ?? chartSymbol ?? leaderSymbol;
+  const worldSymbol = pinnedWorld ?? leaderSymbol;
+  useEffect(() => startFrameworkStore(), []);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<ConfirmSpec | null>(null);
 
@@ -54,13 +58,13 @@ export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngi
         </div>
       )}
       <KpiStrip d={d} />
-      <StagePipeline stages={d.stages} selected={selected} focus={focusSymbol} onSelect={setSelected} />
+      <StagePipeline stages={d.stages} selected={selected} focus={pipelineSymbol} leader={leaderSymbol} onSelect={setSelected} />
       <div className="two">
         <StageInspector stage={stage} busy={Boolean(w.busy)} onRerun={() => void w.rerunStage(stage.id)} />
         <OrchestratorPanel d={d} />
       </div>
       <DecisionQueue rows={d.queue} onSelect={focus} />
-      <OpportunityFrameworkPanel focus={worldSymbol} />
+      <OpportunityFrameworkPanel focus={worldSymbol} onPinSymbol={(s) => setPinnedWorld(s)} />
       <InstrumentTraceTable rows={d.instruments} busy={w.busy} onReevaluate={(s) => void w.reevaluate(s)} expanded={expanded} onExpand={setExpanded} />
       <div className="two">
         <WorldModelPanel rows={d.world} symbol={worldSymbol} onSymbol={setPinnedWorld} />

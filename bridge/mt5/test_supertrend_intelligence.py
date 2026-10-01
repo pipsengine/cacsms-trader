@@ -49,6 +49,33 @@ class SupertrendCalculation(unittest.TestCase):
         with_live = st.build_card("EURUSD", "M15", [*rows, live], cfg, 90_000)
         self.assertEqual(with_live["lastClosedCandleTime"], closed["lastClosedCandleTime"])
         self.assertEqual(with_live["direction"], closed["direction"])
+        self.assertFalse(with_live["candles"][-1]["complete"])
+        self.assertEqual(with_live["currentPrice"], 80.0)
+
+    def test_chart_payload_ohlc_preview_when_atr_not_ready(self):
+        rows = [candle(i * 1000, 10 + i * 0.05, 11 + i * 0.05, 9 + i * 0.05, 10.4 + i * 0.05) for i in range(40)]
+        cfg = {"atrMultiplier": 1.0, "atrPeriod": 100, "triggerCandle": "PREVIOUS", "revision": 1}
+        card = st.build_card("EURUSD", "MN", rows, cfg, 40_000)
+        self.assertEqual(card["health"], "INSUFFICIENT_DATA")
+        self.assertGreater(len(card["candles"]), 0)
+        self.assertTrue(card["chartProvisional"])
+        self.assertTrue(any(c.get("supertrend") is not None for c in card["candles"]))
+        st_count = sum(1 for c in card["candles"] if c.get("supertrend") is not None)
+        self.assertGreaterEqual(st_count, 10)
+
+    def test_chart_payload_excludes_atr_warmup_bars(self):
+        rows = [candle(i * 1000, 100 + i * 0.05, 101 + i * 0.05, 99 + i * 0.05, 100.4 + i * 0.05) for i in range(130)]
+        cfg = {"atrMultiplier": 1.0, "atrPeriod": 100, "triggerCandle": "PREVIOUS", "revision": 1}
+        card = st.build_card("EURUSD", "W", rows, cfg, 130_000)
+        self.assertTrue(len(card["candles"]) <= 80)
+        self.assertTrue(all(c.get("atr") is not None for c in card["candles"]))
+        self.assertTrue(all(c.get("trend") in ("UP", "DOWN") for c in card["candles"]))
+
+    def test_live_price_overrides_last_close(self):
+        rows = [candle(i * 1000, 10, 11, 9, 10.5) for i in range(120)]
+        cfg = {"atrMultiplier": 1.0, "atrPeriod": 10, "triggerCandle": "PREVIOUS", "revision": 1}
+        card = st.build_card("EURUSD", "H1", rows, cfg, 120_000, live_price=10.75)
+        self.assertEqual(card["currentPrice"], 10.75)
 
     def test_config_validation(self):
         self.assertEqual(st.validate_config("0.75", "100"), (0.75, 100))

@@ -10,6 +10,7 @@ import { stage4Output } from '../../market-scanner/services/scannerStage';
 import { stage8Output } from '../../opportunity-risk/services/riskStage';
 import { stage6Output } from '../../structural-direction/services/directionStage';
 import { getAutonomySnapshot } from './autonomyStore';
+import { bestProductionHypothesis, frameworkStageCard } from './frameworkStore';
 import type { StageRuntime } from '../types/workflow';
 import { human } from '../utils/format';
 
@@ -20,6 +21,20 @@ const brief = (s: string | null | undefined, max = 110) => {
 };
 
 const n1 = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? '—' : v.toFixed(1));
+
+/** Opportunity Framework lane (all-instrument scan) — shown when it diverges from the classic Stage 4 promotion path. */
+function frameworkLines(stageId: number, pair: string): string[] {
+  const h = bestProductionHypothesis(pair);
+  if (!h || stageId < 4 || stageId > 9) return [];
+  const card = frameworkStageCard(h, stageId);
+  if (!card) return [];
+  const econ = h.stages.econ;
+  const econBlock = stageId >= 8 && econ?.blocksNewEntries ? ' · econ blocks entries' : '';
+  return [
+    `${h.opportunityName} · ${human(h.lifecycle)} · S${h.stage}${econBlock}`,
+    `${human(card.status)} — ${brief(card.detail, 95)}`,
+  ];
+}
 
 /** Why this stage is not passing work on, in one readable line. */
 function holdLine(stage: StageRuntime): string | null {
@@ -146,7 +161,13 @@ export function stageCardLines(stage: StageRuntime, focus: string): string[] {
     default:
       break;
   }
+  const fw = frameworkLines(stage.id, pair);
+  if (fw.length) {
+    const merged = [...lines.slice(0, 2), ...fw, ...lines.slice(2)];
+    lines.length = 0;
+    lines.push(...merged);
+  }
   const hold = lines.length >= 3 ? null : holdLine(stage);
   if (hold && !lines.some((l) => l === hold)) lines.push(hold);
-  return lines.filter(Boolean).slice(0, 4);
+  return lines.filter(Boolean).slice(0, 5);
 }

@@ -39,7 +39,19 @@ function StageCard({ s, selected, focus, onSelect, next }: { s: StageRuntime; se
 /** Flow between two stages: live when the upstream stage passes instruments on, held otherwise. */
 const flowOf = (s: StageRuntime) => (s.counts.passed > 0 && s.health !== 'OFFLINE' && s.health !== 'ERROR' ? 'flow' : 'held');
 
-export function StagePipeline({ stages, selected, focus, onSelect }: { stages: StageRuntime[]; selected: number; focus: string; onSelect: (id: number) => void }) {
+export function StagePipeline({
+  stages,
+  selected,
+  focus,
+  leader,
+  onSelect,
+}: {
+  stages: StageRuntime[];
+  selected: number;
+  focus: string;
+  leader?: string | null;
+  onSelect: (id: number) => void;
+}) {
   const rows = [stages.slice(0, 5), stages.slice(5, 10)];
   return (
     <section className="panel">
@@ -48,7 +60,10 @@ export function StagePipeline({ stages, selected, focus, onSelect }: { stages: S
           <span className="eyebrow">DECISION PIPELINE</span>
           <h2>10-stage live path</h2>
         </div>
-        <span className="muted">Cards follow the Stage 4 leader{focus ? ` · ${focus}` : ''} · Health = engine condition · State = where the stage's work stands</span>
+        <span className="muted">
+          Cards show {focus || '—'}
+          {leader && focus !== leader ? ` · Stage 4 leader ${leader}` : ''} · Classic path needs scanner promotion · Opportunity Framework scans all 29 · Health = engine · State = stage work
+        </span>
       </div>
       <div className="stage-grid">
         {rows.map((row, r) => (

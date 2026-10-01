@@ -23,6 +23,7 @@ import type {
 } from '../types/workflow';
 import type { StageSource } from './stageSources';
 import { fmtAge } from './stageSources';
+import { FRAMEWORK_TERMINAL, getFrameworkSnapshot } from './frameworkStore';
 
 /** Everything the per-instrument walk needs, read once per snapshot. */
 export type InstrumentContext = {
@@ -375,6 +376,45 @@ export function buildQueue(traces: InstrumentTrace[]): DecisionQueueItem[] {
       nextAction: t.nextAction,
       live,
     });
+  }
+  for (const h of getFrameworkSnapshot().data?.framework?.hypotheses ?? []) {
+    if (h.mode !== 'PRODUCTION' || FRAMEWORK_TERMINAL.has(h.lifecycle) || h.stage < 5) continue;
+    const idx = rows.findIndex((r) => r.symbol === h.symbol);
+    const fwDecision: TraceDecision =
+      h.lifecycle === 'READY_FOR_RISK' || h.lifecycle === 'AUTHORIZED'
+        ? 'READY'
+        : h.lifecycle === 'BLOCKED' || h.lifecycle === 'INVALIDATED'
+          ? 'BLOCKED'
+          : 'WAIT';
+    const fwState: PipelineState =
+      h.lifecycle === 'CONFIRMING' || h.lifecycle === 'TRIGGER_REACHED'
+        ? 'RUNNING'
+        : h.lifecycle === 'READY_FOR_RISK' || h.lifecycle === 'AUTHORIZED'
+          ? 'READY'
+          : h.lifecycle === 'BLOCKED'
+            ? 'BLOCKED'
+            : 'WAITING';
+    const fwDir: TraceDirection = h.direction === 'BULLISH' ? 'LONG' : h.direction === 'BEARISH' ? 'SHORT' : 'NEUTRAL';
+    const item: DecisionQueueItem = {
+      symbol: h.symbol,
+      stage: h.stage,
+      stageName: stageName(h.stage),
+      state: fwState,
+      decision: fwDecision,
+      direction: fwDir,
+      confidence: h.confidence ?? null,
+      waitingFor: h.waitingFor ?? h.confirmationState ?? h.nextStep ?? null,
+      since: null,
+      ageSec: null,
+      nextAction: h.nextStep ?? null,
+      live: false,
+    };
+    if (idx >= 0) {
+      if (rows[idx].live && rows[idx].stage >= h.stage) continue;
+      if (rows[idx].stage < h.stage) rows[idx] = { ...item, since: rows[idx].since, ageSec: rows[idx].ageSec };
+      continue;
+    }
+    rows.push(item);
   }
   return rows.sort((a, b) => Number(b.live) - Number(a.live) || b.stage - a.stage || (b.confidence ?? -1) - (a.confidence ?? -1));
 }

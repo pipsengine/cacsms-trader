@@ -200,6 +200,13 @@ class Discovery(unittest.TestCase):
         self.assertEqual(l3["p2"]["state"], "P2_WAIT_RETEST")
         self.assertFalse(l3["actionable"])
 
+    def test_retesting_channel_break_aligns_p2_wait_retest(self):
+        channels = pack(D1=ch("D1", "BEARISH"), H8=ch("H8", "BEARISH"), H1=ch("H1", "BEARISH", status="RETESTING"))
+        brk = {"L3": {"state": "RETESTING", "boundary": "LOWER", "expectedDirection": "BEARISH", "extensionAtr": 0.3, "candidateId": "c2"}}
+        l3 = next(h for h in opportunity.classify_levels("EURGBP", channels, level_breaks=brk) if h.get("TiTLevel") == "L3")
+        self.assertEqual(l3["p2"]["state"], "P2_WAIT_RETEST")
+        self.assertEqual(l3["channelBreak"]["state"], "RETESTING")
+
     def test_channel_break_against_the_parent_is_ignored(self):
         channels = pack(D1=ch("D1", "BULLISH"), H8=ch("H8", "BULLISH"), H1=ch("H1", "BULLISH"))
         brk = {"L3": {"state": "BREAK_CONFIRMED", "boundary": "LOWER", "expectedDirection": "BEARISH", "extensionAtr": 0.2}}

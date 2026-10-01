@@ -1,4 +1,4 @@
-export const SUPERTREND_TIMEFRAMES = ['YTD', 'Q', 'MN', 'W', 'D', 'H8', 'H1', 'M15'] as const;
+export const SUPERTREND_TIMEFRAMES = ['Y', 'Q', 'MN', 'W', 'D', 'H8', 'H1', 'M15'] as const;
 export type SupertrendTimeframe = (typeof SUPERTREND_TIMEFRAMES)[number];
 export type TrendDirection = 'UP' | 'DOWN' | 'UNKNOWN';
 export type DataHealth = 'LIVE' | 'DELAYED' | 'STALE' | 'DISCONNECTED' | 'INSUFFICIENT_DATA' | 'ERROR';
@@ -57,6 +57,8 @@ export interface SupertrendCardSnapshot {
   triggerCandle: 'PREVIOUS';
   candles: PaintedCandle[];
   points: SupertrendPoint[];
+  /** Chart ST used fewer bars than atrPeriod; confirmed metrics stay INSUFFICIENT DATA. */
+  chartProvisional?: boolean;
   sequence: number;
   settingsRevision: number;
   digits: number;

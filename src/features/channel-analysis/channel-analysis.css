@@ -561,6 +561,42 @@
   fill: #f2bd4a;
   font-weight: 700;
 }
+.ca-chart .supertrend {
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.ca-chart.card .supertrend {
+  stroke-width: 1.35;
+  opacity: 0.92;
+}
+.ca-chart .st-line-layer .supertrend {
+  stroke-width: 2.4;
+}
+.ca-chart .supertrend.provisional {
+  stroke-dasharray: 5 4;
+  opacity: 0.88;
+}
+.ca-chart.card .st-line-layer .supertrend {
+  stroke-width: 2;
+}
+.ca-chart .supertrend.up {
+  stroke: #31dfa1;
+}
+.ca-chart .supertrend.down {
+  stroke: #ff5d70;
+}
+.ca-chart .supertrend.unknown {
+  stroke: #6f8295;
+}
+.ca-chart .unknown line,
+.ca-chart .unknown rect {
+  stroke: #6f8295;
+  fill: #6f8295;
+}
+.ca-chart .candle-live rect {
+  fill-opacity: 0.45;
+}
 .ca-chart .breakout {
   stroke: #ff9f43;
   stroke-width: 1;

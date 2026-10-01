@@ -167,7 +167,7 @@ function Matrix({ matrix }: { matrix: FrameworkMatrix }) {
   );
 }
 
-export function OpportunityFrameworkPanel({ focus }: { focus?: string }) {
+export function OpportunityFrameworkPanel({ focus, onPinSymbol }: { focus?: string; onPinSymbol?: (symbol: string) => void }) {
   const { data, error } = useOpportunityFramework();
   const matrix = useFrameworkContracts();
   const [type, setType] = useState<string | null>(null);
@@ -206,7 +206,15 @@ export function OpportunityFrameworkPanel({ focus }: { focus?: string }) {
           )}
         </div>
         <div className="filters">
-          <select value={symbol} onChange={(e) => setSymbol(e.target.value)} aria-label="Instrument">
+          <select
+            value={symbol}
+            onChange={(e) => {
+              const v = e.target.value;
+              setSymbol(v);
+              if (v !== 'ALL') onPinSymbol?.(v);
+            }}
+            aria-label="Instrument"
+          >
             <option value="ALL">All instruments</option>
             {focus && !symbols.includes(focus) && <option value={focus}>{focus}</option>}
             {symbols.map((s) => (

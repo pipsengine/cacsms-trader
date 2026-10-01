@@ -23,6 +23,7 @@ import type { Opportunity } from '../../opportunity-risk/types';
 import type { Execution } from '../../execution/types';
 import { STAGE_DEFINITIONS } from '../data/stageDefinitions';
 import { getAutonomySnapshot } from './autonomyStore';
+import { subscribeFramework } from './frameworkStore';
 import type {
   AccountView,
   ActionResult,
@@ -686,6 +687,7 @@ export function subscribeWorkflowSources(cb: () => void): () => void {
     subscribeRisk(cb),
     subscribeExecution(cb),
     subscribeEconomic(cb),
+    subscribeFramework(cb),
     subscribeMT5(() => cb()),
     ...BUS_TYPES.map((t) => eventBus.on(t, () => cb())),
   ];
