@@ -20,6 +20,7 @@ import {
   PauseCircle,
   PlayCircle,
   Radar,
+  ScanSearch,
   ServerCog,
   ShieldAlert,
   SlidersHorizontal,
@@ -31,7 +32,7 @@ import {
 import { useTrading } from '../context/TradingContext';
 import { useAutonomyState } from '../features/workflow-engine/services/autonomyStore';
 
-type NavItem = { label: string; icon: LucideIcon; section?: string; sectionIcon?: LucideIcon };
+type NavItem = { label: string; icon: LucideIcon; section?: string; sectionIcon?: LucideIcon; pageKey?: string };
 
 export const nav: NavItem[] = [
   { label: 'Overview', icon: LayoutDashboard },
@@ -46,7 +47,8 @@ export const nav: NavItem[] = [
   { label: 'Channel Analysis', icon: Spline },
   { label: 'Structural Direction', icon: Waypoints },
   { label: 'H1 Confirmation', icon: BadgeCheck },
-  { label: 'Opportunities & Risk', icon: ShieldAlert, section: 'TRADING', sectionIcon: Bot },
+  { label: 'Trading Opportunities', icon: ScanSearch, section: 'TRADING', sectionIcon: Bot },
+  { label: 'Risk & Authorization', pageKey: 'Opportunities & Risk', icon: ShieldAlert },
   { label: 'Execution & Positions', icon: BriefcaseBusiness },
   { label: 'Performance & Learning', icon: ChartNoAxesCombined, section: 'ANALYTICS', sectionIcon: Crosshair },
   { label: 'System Control', icon: SlidersHorizontal, section: 'SYSTEM', sectionIcon: Cpu },
@@ -130,10 +132,10 @@ export default function Sidebar({
             )}
             <button
               type="button"
-              onClick={() => setPage(item.label)}
-              className={page === item.label ? 'selected' : ''}
+              onClick={() => setPage(item.pageKey ?? item.label)}
+              className={page === (item.pageKey ?? item.label) ? 'selected' : ''}
               title={item.label}
-              aria-current={page === item.label ? 'page' : undefined}
+              aria-current={page === (item.pageKey ?? item.label) ? 'page' : undefined}
             >
               <item.icon size={18} strokeWidth={1.85} />
               {!collapsed && <span>{item.label}</span>}

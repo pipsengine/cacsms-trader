@@ -21,6 +21,7 @@ import { WorkflowEnginePage } from './features/workflow-engine';
 import { MT5ConnectionPage } from './features/mt5-connection';
 import { ChannelAnalysisPage } from './features/channel-analysis';
 import { EconomicIntelligencePage } from './features/economic-intelligence';
+import { TradingOpportunitiesPage } from './features/trading-opportunities';
 
 const slug = (label: string) => label.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
@@ -37,6 +38,7 @@ const pages: Record<string, React.ComponentType> = {
   'Channel Analysis': ChannelAnalysisPage,
   'Structural Direction': Direction,
   'H1 Confirmation': H1,
+  'Trading Opportunities': TradingOpportunitiesPage,
   'Opportunities & Risk': Risk,
   'Execution & Positions': Execution,
   'Performance & Learning': Performance,
@@ -49,6 +51,8 @@ const pageBySlug = Object.fromEntries(Object.keys(pages).map((label) => [slug(la
 function pageFromHash(): string {
   const raw = decodeURIComponent(window.location.hash.replace(/^#\/?/, '')).split('?')[0];
   if (pages[raw]) return raw;
+  if (raw === 'risk-and-authorization') return 'Opportunities & Risk';
+  if (raw === 'trading-opportunities') return 'Trading Opportunities';
   return pageBySlug[raw] || 'Overview';
 }
 

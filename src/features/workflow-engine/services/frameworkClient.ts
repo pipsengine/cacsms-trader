@@ -155,6 +155,27 @@ export const fetchFramework = (symbol?: string) =>
 
 export const fetchFrameworkContracts = () => get<FrameworkMatrix>('/opportunity/contracts');
 
+export interface FrameworkTransition {
+  opportunityId?: string;
+  symbol?: string;
+  fromLifecycle?: string;
+  toLifecycle?: string;
+  at?: string;
+  detail?: string;
+}
+
+export interface FrameworkHistoryResponse {
+  ok: boolean;
+  transitions?: FrameworkTransition[];
+  learning?: Record<string, unknown>;
+}
+
+export const fetchFrameworkHistory = (limit = 200) =>
+  get<FrameworkHistoryResponse>(`/opportunity/framework/history?limit=${limit}`);
+
+export const fetchFrameworkOpportunityHistory = (opportunityId: string) =>
+  get<FrameworkHistoryResponse>(`/opportunity/framework/history?id=${encodeURIComponent(opportunityId)}`);
+
 /** Polls the backend framework state. `symbol` narrows the payload for compact per-instrument views. */
 export function useOpportunityFramework(symbol?: string, intervalMs = 15000) {
   const [data, setData] = useState<FrameworkResponse | null>(null);
