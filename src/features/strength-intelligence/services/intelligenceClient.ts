@@ -1,4 +1,4 @@
-import type { IntelligenceSnapshot } from '../types';
+import type { IntelligenceSnapshot, TrendSnapshot } from '../types';
 
 const BASE = (import.meta.env.VITE_MT5_BRIDGE_URL as string | undefined)?.replace(/\/$/, '') || '/mt5-bridge';
 
@@ -23,6 +23,33 @@ export async function fetchStrengthIntelligence(params: {
   }
   if (!res.ok && !body.matrix) {
     throw new Error(body.message || `Strength intelligence unavailable (${res.status})`);
+  }
+  return body;
+}
+
+export async function fetchTrendIntelligence(params: {
+  period: string;
+  limit?: number;
+  offset?: number;
+  asset?: string;
+  timeframe?: string;
+}): Promise<TrendSnapshot> {
+  const qs = new URLSearchParams({
+    period: params.period,
+    limit: String(params.limit ?? 80),
+    offset: String(params.offset ?? 0),
+  });
+  if (params.asset) qs.set('asset', params.asset);
+  if (params.timeframe) qs.set('timeframe', params.timeframe);
+  const res = await fetch(`${BASE}/intelligence/trend?${qs.toString()}`, { headers: { Accept: 'application/json' } });
+  let body: TrendSnapshot & { message?: string };
+  try {
+    body = (await res.json()) as TrendSnapshot & { message?: string };
+  } catch {
+    throw new Error(`MT5 bridge unreachable (${res.status}). Start it with npm run mt5:bridge`);
+  }
+  if (!res.ok && !body.matrix) {
+    throw new Error(body.message || `Trend intelligence unavailable (${res.status})`);
   }
   return body;
 }

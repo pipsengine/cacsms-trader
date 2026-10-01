@@ -11,10 +11,11 @@ import {
   RefreshCw,
   Settings,
   Sparkles,
+  Activity,
 } from 'lucide-react';
 import { Badge, Card, PageHeader, Tabs, tabIds } from '../../components/UI';
-import { ASSETS, HORIZONS, type Asset, type FeedStatus, type IntelligenceSnapshot, type StrengthRow } from './types';
-import { fetchStrengthIntelligence } from './services/intelligenceClient';
+import { ASSETS, HORIZONS, type Asset, type FeedStatus, type IntelligenceSnapshot, type StrengthRow, type TrendCell, type TrendRow, type TrendSnapshot } from './types';
+import { fetchStrengthIntelligence, fetchTrendIntelligence } from './services/intelligenceClient';
 import './strength-intelligence.css';
 
 const TABS = ['Strength Matrix', 'Trend Analysis', 'Correlation', 'Volatility', 'Sentiment', 'Order Flow', 'Liquidity', 'AI Projection'];
@@ -39,6 +40,30 @@ function heat(v: number | null | undefined) {
   return 'si-heat v1';
 }
 
+function trendClass(state: string) {
+  const s = state.split(' + ')[0];
+  if (s === 'Strong Bullish') return 'ti-cell strong-bull';
+  if (s === 'Bullish') return 'ti-cell bull';
+  if (s === 'Bullish Weakening') return 'ti-cell bull-weak';
+  if (s === 'Neutral / Range') return 'ti-cell neutral';
+  if (s === 'Bearish Weakening') return 'ti-cell bear-weak';
+  if (s === 'Bearish') return 'ti-cell bear';
+  if (s === 'Strong Bearish') return 'ti-cell strong-bear';
+  return 'ti-cell insufficient';
+}
+
+function trendGlyph(state: string) {
+  const s = state.split(' + ')[0];
+  if (s === 'Strong Bullish') return '↑↑';
+  if (s === 'Bullish') return '↑';
+  if (s === 'Bullish Weakening') return '↗';
+  if (s === 'Neutral / Range') return '→';
+  if (s === 'Bearish Weakening') return '↘';
+  if (s === 'Bearish') return '↓';
+  if (s === 'Strong Bearish') return '↓↓';
+  return '!';
+}
+
 function tone(status: FeedStatus) {
   return status === 'LIVE' ? 'green' : status === 'DISCONNECTED' || status === 'STALE' ? 'red' : 'amber';
 }
@@ -61,6 +86,211 @@ function UnavailableTab({ title }: { title: string }) {
         <span>This indicator tab is reserved in the Intelligence Indicators structure. It is intentionally not filled with fabricated data.</span>
       </div>
     </Card>
+  );
+}
+
+function TrendMatrix({ rows, selected, onSelected }: { rows: TrendRow[]; selected: Asset; onSelected: (asset: Asset) => void }) {
+  return (
+    <Card className="si-card">
+      <div className="si-card-head">
+        <div>
+          <h3><Activity size={18} /> Multi-Timeframe Trend Matrix</h3>
+          <p>Closed-bar directional structure, persistence and weighted cross-timeframe alignment.</p>
+        </div>
+      </div>
+      <div className="table-wrap si-table-wrap ti-matrix-wrap">
+        <table className="si-table ti-table">
+          <thead>
+            <tr>
+              <th>Asset</th>
+              {HORIZONS.map((h) => <th key={h}>{h}</th>)}
+              <th>Alignment</th>
+              <th>Strength</th>
+              <th>State</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.asset} className={row.asset === selected ? 'row-selected' : ''} onClick={() => onSelected(row.asset)}>
+                <td className="si-asset"><span>{FLAGS[row.asset]}</span><b>{row.asset}</b></td>
+                {HORIZONS.map((h) => {
+                  const cell = row.timeframes[h] as TrendCell;
+                  return (
+                    <td key={h} className={trendClass(cell.direction)} title={`${cell.direction} | score ${n(cell.trendScore)} | confidence ${n(cell.confidence)}%`}>
+                      <b>{trendGlyph(cell.direction)}</b>
+                      <span>{cell.direction.replace(' + Potential Reversal / Transition', ' + Transition')}</span>
+                    </td>
+                  );
+                })}
+                <td><b>{n(row.alignment, 0)}%</b><small>{row.alignmentLabel}</small></td>
+                <td className={heat(row.strength)}>{n(row.strength, 0)}</td>
+                <td><Badge tone={row.titState === 'Trend Continuation' ? 'green' : row.titState === 'Pullback' ? 'amber' : row.titState === 'Potential Reversal' ? 'red' : 'gray'}>{row.titState}</Badge></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function CurrentTrendIntelligence({ row }: { row: TrendRow | undefined }) {
+  if (!row) return <Card className="si-card"><div className="empty-block"><b>Select an asset</b><span>Trend intelligence will appear here.</span></div></Card>;
+  const details = [
+    ['Overall Direction', row.overallDirection],
+    ['Trend Strength', n(row.strength, 0)],
+    ['Alignment', `${n(row.alignment, 0)}%`],
+    ['Persistence', `${n(row.persistence, 0)}%`],
+    ['Momentum', signed(row.momentum, 2)],
+    ['Acceleration', signed(row.acceleration, 2)],
+    ['Current Structure', row.currentStructure],
+    ['Market Regime', row.marketRegime],
+    ['HTF Direction', row.htfDirection],
+    ['LTF Direction', row.ltfDirection],
+    ['TiT State', row.titState],
+    ['Last Update', new Date(row.lastUpdate).toLocaleTimeString()],
+  ];
+  const ev = row.lastStructuralEvent;
+  return (
+    <Card className="si-card ti-current">
+      <div className="si-card-head">
+        <div>
+          <h3>{FLAGS[row.asset]} {row.asset} Current Trend Intelligence</h3>
+          <p>Deterministic explanation from calculated trend, structure and TiT evidence.</p>
+        </div>
+        <Badge tone={row.dataQuality === 'OK' ? 'green' : row.dataQuality === 'DEGRADED' ? 'amber' : 'red'}>{row.dataQuality}</Badge>
+      </div>
+      <div className="ti-detail-grid">
+        {details.map(([label, value]) => <div key={label}><small>{label}</small><b>{value}</b></div>)}
+        <div><small>Last Structural Event</small><b>{ev ? `${ev.timeframe} ${ev.kind} ${ev.direction}` : '-'}</b></div>
+      </div>
+      <p className="ti-explain">{row.explanation}</p>
+    </Card>
+  );
+}
+
+function TrendTransitionMonitor({ rows }: { rows: TrendSnapshot['transitions'] }) {
+  return (
+    <Card className="si-card">
+      <div className="si-card-head">
+        <div>
+          <h3>Trend Transition Monitor</h3>
+          <p>Debounced structural state changes only.</p>
+        </div>
+      </div>
+      <div className="table-wrap ti-transition-wrap">
+        <table className="si-table">
+          <thead><tr><th>Asset</th><th>TF</th><th>Previous</th><th>Current</th><th>Strength</th><th>Event</th><th>Time</th></tr></thead>
+          <tbody>
+            {rows.length ? rows.map((r, i) => (
+              <tr key={`${r.asset}-${r.timeframe}-${r.time}-${i}`}>
+                <td className="si-asset"><span>{FLAGS[r.asset]}</span><b>{r.asset}</b></td>
+                <td>{r.timeframe}</td>
+                <td>{r.previous}</td>
+                <td>{r.current}</td>
+                <td>{n(r.strength, 0)}</td>
+                <td>{r.event}</td>
+                <td>{new Date(r.time).toLocaleTimeString()}</td>
+              </tr>
+            )) : <tr><td colSpan={7} className="si-unavailable">No meaningful trend transitions in the selected window.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function HistoricalTrend({ data, period, onPeriod }: { data: TrendSnapshot | null; period: string; onPeriod: (x: string) => void }) {
+  return (
+    <Card className="si-card">
+      <div className="si-card-head">
+        <div>
+          <h3>Historical Trend Intelligence</h3>
+          <p>Stored trend states and transitions for AI-ready feature context.</p>
+        </div>
+        <Badge tone="gray">{data?.history.total ?? 0} records</Badge>
+      </div>
+      <div className="si-toolbar">
+        <div className="si-periods">
+          {PERIODS.map((x) => <button key={x} type="button" className={period === x ? 'primary' : ''} onClick={() => onPeriod(x)}>{x}</button>)}
+        </div>
+      </div>
+      <div className="table-wrap si-history-table-wrap">
+        <table className="si-table">
+          <thead><tr><th>#</th><th>Timestamp</th><th>Asset</th><th>Direction</th><th>Strength</th><th>Alignment</th><th>Persistence</th><th>Momentum</th><th>Regime</th><th>TiT</th></tr></thead>
+          <tbody>
+            {(data?.history.rows ?? []).map((r, i) => (
+              <tr key={`${r.timestamp}-${r.asset}-${i}`}>
+                <td className="rank">{i + 1}</td>
+                <td>{new Date(r.timestamp).toLocaleString()}</td>
+                <td className="si-asset"><span>{FLAGS[r.asset]}</span><b>{r.asset}</b></td>
+                <td>{r.direction}</td>
+                <td className={heat(r.strength)}>{n(r.strength, 0)}</td>
+                <td>{n(r.alignment, 0)}%</td>
+                <td>{n(r.persistence, 0)}%</td>
+                <td>{signed(r.momentum, 2)}</td>
+                <td>{r.regime}</td>
+                <td>{r.titState}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+function TrendAnalysisTab({ selected, onSelected }: { selected: Asset; onSelected: (asset: Asset) => void }) {
+  const [period, setPeriod] = useState('24H');
+  const [data, setData] = useState<TrendSnapshot | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let dead = false;
+    let timer = 0;
+    let failures = 0;
+    const load = async () => {
+      try {
+        const next = await fetchTrendIntelligence({ period, limit: 80, asset: selected });
+        if (dead) return;
+        setData(next);
+        setError(next.ok ? '' : next.feed.message);
+        failures = next.ok ? 0 : failures + 1;
+      } catch (exc) {
+        failures += 1;
+        if (!dead) setError(exc instanceof Error ? exc.message : 'Trend intelligence unavailable');
+      } finally {
+        if (!dead) {
+          setLoading(false);
+          timer = window.setTimeout(load, failures ? Math.min(15_000, 3_000 * failures) : 5000);
+        }
+      }
+    };
+    void load();
+    return () => {
+      dead = true;
+      window.clearTimeout(timer);
+    };
+  }, [period, selected]);
+
+  const row = data?.matrix.find((x) => x.asset === selected) ?? data?.matrix[0];
+  if (loading && !data) {
+    return <Card><div className="empty-block"><RefreshCw size={18} className="hr-spin" /><b>Loading trend intelligence</b><span>Reading closed bars from the existing MT5 bridge.</span></div></Card>;
+  }
+  if (!data?.matrix.length) {
+    return <Card><div className="empty-block"><b>Trend intelligence unavailable</b><span>{error || 'Connect MT5 and ensure required symbols are available.'}</span></div></Card>;
+  }
+  return (
+    <>
+      {error && <div className="hr-banner err"><AlertTriangle size={14} /><span>{error}</span></div>}
+      <TrendMatrix rows={data.matrix} selected={selected} onSelected={onSelected} />
+      <div className="ti-mid-grid">
+        <CurrentTrendIntelligence row={row} />
+        <TrendTransitionMonitor rows={data.transitions ?? []} />
+      </div>
+      <HistoricalTrend data={data} period={period} onPeriod={setPeriod} />
+    </>
   );
 }
 
@@ -349,7 +579,9 @@ export function StrengthIntelligencePage() {
       ) : null}
       <Tabs items={TABS} active={tab} onChange={setTab} idPrefix="intelligence" label="Intelligence Indicators" />
       <div role="tabpanel" id={ids.panel} aria-labelledby={ids.tab} className="si-page">
-        {tab !== 'Strength Matrix' ? (
+        {tab === 'Trend Analysis' ? (
+          <TrendAnalysisTab selected={selected} onSelected={setSelected} />
+        ) : tab !== 'Strength Matrix' ? (
           <UnavailableTab title={tab} />
         ) : loading && !data ? (
           <Card><div className="empty-block"><RefreshCw size={18} className="hr-spin" /><b>Loading strength intelligence</b><span>Reading MT5 market data from the existing bridge.</span></div></Card>

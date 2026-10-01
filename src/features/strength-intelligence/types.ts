@@ -64,3 +64,99 @@ export type IntelligenceSnapshot = {
   };
 };
 
+export type TrendState =
+  | 'Strong Bullish'
+  | 'Bullish'
+  | 'Bullish Weakening'
+  | 'Neutral / Range'
+  | 'Bearish Weakening'
+  | 'Bearish'
+  | 'Strong Bearish'
+  | 'INSUFFICIENT DATA'
+  | string;
+
+export type TrendCell = {
+  direction: TrendState;
+  trendScore: number;
+  trendStrength: number;
+  structureState: string;
+  slope: number;
+  momentum: number;
+  persistence: number;
+  volatilityAdjustedMove: number;
+  lastBOS: Record<string, unknown> | null;
+  lastCHoCH: Record<string, unknown> | null;
+  lastSwingHigh: Record<string, unknown> | null;
+  lastSwingLow: Record<string, unknown> | null;
+  barsInTrend: number;
+  confidence: number;
+  timestamp: string;
+  dataQuality: string;
+};
+
+export type TrendRow = {
+  asset: Asset;
+  timeframes: Record<Horizon, TrendCell>;
+  alignment: number;
+  alignmentLabel: string;
+  strength: number;
+  state: string;
+  overallDirection: string;
+  persistence: number;
+  momentum: number;
+  acceleration: number;
+  currentStructure: string;
+  marketRegime: string;
+  htfDirection: string;
+  ltfDirection: string;
+  titState: string;
+  lastStructuralEvent: { kind?: string; direction?: string; timeframe?: string; ts?: number; price?: number } | null;
+  lastUpdate: string;
+  dataQuality: string;
+  explanation: string;
+};
+
+export type TrendTransition = {
+  id?: number;
+  asset: Asset;
+  timeframe: Horizon;
+  previous: string;
+  current: string;
+  strength: number;
+  event: string;
+  time: string;
+};
+
+export type TrendHistoryRow = {
+  timestamp: string;
+  asset: Asset;
+  direction: string;
+  strength: number;
+  alignment: number;
+  persistence: number;
+  momentum: number;
+  acceleration: number;
+  regime: string;
+  titState: string;
+};
+
+export type TrendSnapshot = {
+  ok: boolean;
+  timestamp: string;
+  sequence: number;
+  feed: IntelligenceSnapshot['feed'];
+  matrix: TrendRow[];
+  history: {
+    rows: TrendHistoryRow[];
+    total: number;
+    period: string;
+    resolution: string;
+  };
+  transitions: TrendTransition[];
+  weights: Record<Horizon, number>;
+  quality: number;
+  dataQuality?: {
+    missingSymbols?: string[];
+  };
+};
+

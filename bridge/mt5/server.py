@@ -52,6 +52,8 @@ try:
     import scanner_service
     import scanner_store
     import strength_intelligence
+    import supertrend_intelligence
+    import trend_intelligence
     import vision
     import vision_service
     import vision_store
@@ -87,6 +89,8 @@ except ImportError:
     from bridge.mt5 import risk_mt5, risk_service, risk_store  # type: ignore
     from bridge.mt5 import scanner, scanner_service, scanner_store  # type: ignore
     from bridge.mt5 import strength_intelligence  # type: ignore
+    from bridge.mt5 import supertrend_intelligence  # type: ignore
+    from bridge.mt5 import trend_intelligence  # type: ignore
     from bridge.mt5 import vision, vision_service, vision_store  # type: ignore
     from bridge.mt5.db import (  # type: ignore
         delete_account,
@@ -557,12 +561,30 @@ def cmd_bars(body: dict[str, Any]) -> dict[str, Any]:
 
 
 _INTELLIGENCE_CACHE: dict[str, Any] = {"at": 0.0, "payload": None}
+_TREND_CACHE: dict[str, Any] = {"at": 0.0, "payload": None}
 
 
 def _rate_rows(raw: Any) -> list[dict[str, Any]]:
     if raw is None:
         return []
     return [{"time": int(r["time"]), "close": float(r["close"])} for r in raw if float(r["close"]) > 0]
+
+
+def _ohlc_rows(raw: Any, closed: bool = True) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    rows = [
+        {
+            "time": int(r["time"]),
+            "open": float(r["open"]),
+            "high": float(r["high"]),
+            "low": float(r["low"]),
+            "close": float(r["close"]),
+        }
+        for r in raw
+        if float(r["close"]) > 0
+    ]
+    return rows[:-1] if closed and len(rows) > 1 else rows
 
 
 @_mt5_serialized
@@ -663,6 +685,101 @@ def cmd_intelligence_strength(period: str = "24H", limit: int = 100, offset: int
     }
     _INTELLIGENCE_CACHE["at"] = time.time()
     _INTELLIGENCE_CACHE["payload"] = {k: v for k, v in payload.items() if k != "history"}
+    return payload
+
+
+@_mt5_serialized
+def cmd_intelligence_trend(period: str = "24H", limit: int = 80, offset: int = 0, asset: str = "", timeframe: str = "") -> dict[str, Any]:
+    cached = _TREND_CACHE.get("payload")
+    if cached and time.time() - float(_TREND_CACHE.get("at") or 0) < 4.0:
+        payload = dict(cached)
+        payload["history"] = trend_intelligence.history_page(period, asset, timeframe, limit, offset)
+        payload["transitions"] = trend_intelligence.transitions(80, asset)
+        return payload
+
+    ok, msg = _ensure_terminal()
+    if not ok:
+        return trend_intelligence.unavailable(msg)
+    term = mt5.terminal_info()
+    if not term or not term.connected:
+        return trend_intelligence.unavailable("MT5 terminal not connected to broker")
+
+    now_dt = datetime.now(timezone.utc)
+    bars: dict[str, dict[str, list[Any]]] = {}
+    strength_bars: dict[str, dict[str, list[Any]]] = {}
+    ticks: dict[str, dict[str, Any]] = {}
+    missing_symbols: list[str] = []
+
+    for symbol in trend_intelligence.SYMBOLS:
+        mt5.symbol_select(symbol, True)
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            missing_symbols.append(symbol)
+        else:
+            bid, ask = float(tick.bid), float(tick.ask)
+            ticks[symbol] = {
+                "bid": bid,
+                "ask": ask,
+                "mid": (bid + ask) / 2 if bid > 0 and ask > 0 else float(tick.last or 0),
+                "time": _mt5_time(tick.time),
+                "timeRaw": int(tick.time),
+            }
+
+        d1_raw = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, 390)
+        h1_raw = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 260)
+        m15_raw = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 190)
+        m5_raw = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 160)
+        m1_raw = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 140)
+
+        d1 = _ohlc_rows(d1_raw, True)
+        h1 = _ohlc_rows(h1_raw, True)
+        m15 = _ohlc_rows(m15_raw, True)
+        m5 = _ohlc_rows(m5_raw, True)
+        m1 = _ohlc_rows(m1_raw, True)
+        if h1:
+            raw_h1 = [(int(r["time"]), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), int(r["tick_volume"]), int(r["spread"])) for r in h1_raw[:-1]]
+            h8 = [{"time": int(r[0]), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4])} for r in history.derive_h8(raw_h1, 2**40)]
+        else:
+            h8 = []
+        bars[symbol] = {
+            "YTD": d1, "HY": d1, "Q": d1, "MN": d1, "W": d1, "D": d1,
+            "H8": h8 or h1, "H1": h1, "M15": m15, "M5": m5, "M1": m1,
+        }
+        strength_bars[symbol] = {h: [{"time": b["time"], "close": b["close"]} for b in rows] for h, rows in bars[symbol].items()}
+
+    strength_previous = strength_intelligence.load_previous()
+    strength_snapshot = strength_intelligence.calculate_strength(strength_bars, ticks, strength_previous, now_dt)
+    channel_hierarchies = {}
+    try:
+        channel_hierarchies["XAUUSD"] = channel_store.hierarchy("XAUUSD")
+    except Exception:
+        channel_hierarchies = {}
+    snapshot = trend_intelligence.calculate_trends(bars, strength_snapshot.get("matrix") or [], channel_hierarchies, now_dt)
+    new_transitions = trend_intelligence.persist_snapshot(snapshot)
+
+    tick_times = [int(t.get("timeRaw") or 0) for t in ticks.values() if t.get("timeRaw")]
+    last_tick = max(tick_times) if tick_times else 0
+    age = time.time() - last_tick if last_tick else 10**9
+    status = "LIVE" if age < 15 and not missing_symbols else "DEGRADED" if age < 120 else "STALE" if last_tick else "DISCONNECTED"
+    degraded = sum(1 for r in snapshot["matrix"] if r["dataQuality"] != "OK")
+    quality = max(0.0, 100.0 - degraded * (100.0 / len(snapshot["matrix"])) - len(missing_symbols))
+    payload = {
+        **snapshot,
+        "feed": {
+            "status": status if quality >= 75 else "DEGRADED",
+            "message": "Live MT5 trend intelligence" if status == "LIVE" else "Incomplete or stale MT5 market data",
+            "latencyMs": int(round((term.ping_last or 0) / 1000)) if term else None,
+            "lastTick": _mt5_time(last_tick) if last_tick else None,
+            "serverTime": now_dt.isoformat(),
+            "nextUiUpdateMs": 1000,
+        },
+        "history": trend_intelligence.history_page(period, asset, timeframe, limit, offset),
+        "transitions": (new_transitions or trend_intelligence.transitions(80, asset)),
+        "quality": round(quality, 1),
+        "dataQuality": {"missingSymbols": missing_symbols},
+    }
+    _TREND_CACHE["at"] = time.time()
+    _TREND_CACHE["payload"] = {k: v for k, v in payload.items() if k not in ("history", "transitions")}
     return payload
 
 
@@ -1088,6 +1205,145 @@ def cmd_channel_live(symbol: str) -> dict[str, Any]:
         "ok": True, "instrument": symbol, "price": price, "at": int(time.time() * 1000), "ageSec": age,
         "bars": payload, "views": views,
     }
+
+
+_SUPERTREND_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+_SUPERTREND_CONFIG_CACHE: tuple[float, dict[str, Any]] | None = None
+_SUPERTREND_CACHE_TTL_SEC = 60.0
+_SUPERTREND_CONFIG_TTL_SEC = 120.0
+_SUPERTREND_PERSIST_LOCK = threading.Lock()
+
+
+def _st_bar(r: Any, complete: bool = True) -> dict[str, Any]:
+    if isinstance(r, tuple):
+        volume = int(r[5] or 0) if len(r) > 5 else 0
+    elif isinstance(r, dict):
+        volume = int(r.get("tick_volume") or r.get("volume") or 0)
+    else:
+        volume = int(r[5] or 0) if len(r) > 5 else 0
+    return {
+        "time": int(r[0] if isinstance(r, tuple) else r["time"]) * 1000,
+        "open": float(r[1] if isinstance(r, tuple) else r["open"]),
+        "high": float(r[2] if isinstance(r, tuple) else r["high"]),
+        "low": float(r[3] if isinstance(r, tuple) else r["low"]),
+        "close": float(r[4] if isinstance(r, tuple) else r["close"]),
+        "volume": volume,
+        "complete": complete,
+    }
+
+
+def _mt5_rates(symbol: str, tf: int, count: int, include_live: bool = True) -> list[dict[str, Any]]:
+    raw = mt5.copy_rates_from_pos(symbol, tf, 0, count)
+    if raw is None:
+        return []
+    rows = [_st_bar(r, True) for r in raw]
+    if include_live and rows:
+        rows[-1]["complete"] = False
+    return rows
+
+
+def _supertrend_bars(symbol: str) -> dict[str, list[dict[str, Any]]]:
+    """Canonical Supertrend bars. YTD uses D1 progression from Jan 1; Q uses channel_analysis.aggregate;
+    H8 uses history.derive_h8 on server-day 00/08/16 boundaries."""
+    d1_t = history_store.candle_tail(symbol, "D1", 260)
+    mn1_t = history_store.candle_tail(symbol, "MN1", 180)
+    w1_t = history_store.candle_tail(symbol, "W1", 140)
+    h1_t = history_store.candle_tail(symbol, "H1", 920)
+    m15_t = history_store.candle_tail(symbol, "M15", 220)
+    d1 = [_st_bar(r, True) for r in d1_t]
+    mn1 = [_st_bar(r, True) for r in mn1_t]
+    w1 = [_st_bar(r, True) for r in w1_t]
+    h1 = [_st_bar(r, True) for r in h1_t]
+    m15 = [_st_bar(r, True) for r in m15_t]
+
+    now = HISTORY.server_now() or int(time.time())
+    year_start = calendar.timegm((datetime.fromtimestamp(now, tz=timezone.utc).year, 1, 1, 0, 0, 0))
+    ytd = [r for r in d1 if int(r["time"] / 1000) >= year_start]
+
+    q_rows: list[dict[str, Any]] = []
+    if mn1_t:
+        closed_mn = [(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4])) for r in mn1_t]
+        q_rows = [_st_bar(r, True) for r in channel_analysis.aggregate(closed_mn, "Q")]
+
+    h8_rows: list[dict[str, Any]] = []
+    if h1_t:
+        raw_h1 = [(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), int(r[5] if len(r) > 5 else 0), int(r[6] if len(r) > 6 else 0)) for r in h1_t]
+        h8_rows = [_st_bar(r, True) for r in history.derive_h8(raw_h1, now)]
+
+    return {
+        "YTD": ytd,
+        "Q": q_rows,
+        "MN": mn1,
+        "W": w1,
+        "D": d1,
+        "H8": h8_rows,
+        "H1": h1,
+        "M15": m15,
+    }
+
+
+def _persist_supertrend_snapshot_async(symbol: str, key: tuple[str, int], snapshot: dict[str, Any]) -> None:
+    def worker() -> None:
+        if not _SUPERTREND_PERSIST_LOCK.acquire(blocking=False):
+            return
+        try:
+            transitions = supertrend_intelligence.persist_snapshot(symbol, snapshot) or supertrend_intelligence.transitions(symbol, 40)
+            updated = {**snapshot, "transitions": transitions}
+            _SUPERTREND_CACHE[key] = (time.time(), updated)
+        except Exception as exc:
+            print(f"[supertrend] snapshot persistence failed: {exc}")
+        finally:
+            _SUPERTREND_PERSIST_LOCK.release()
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _supertrend_config() -> dict[str, Any]:
+    global _SUPERTREND_CONFIG_CACHE
+    now = time.time()
+    if _SUPERTREND_CONFIG_CACHE and now - _SUPERTREND_CONFIG_CACHE[0] < _SUPERTREND_CONFIG_TTL_SEC:
+        return dict(_SUPERTREND_CONFIG_CACHE[1])
+    cfg = supertrend_intelligence.get_config()
+    _SUPERTREND_CONFIG_CACHE = (now, dict(cfg))
+    return cfg
+
+
+def _clear_supertrend_cache() -> None:
+    global _SUPERTREND_CONFIG_CACHE
+    _SUPERTREND_CACHE.clear()
+    _SUPERTREND_CONFIG_CACHE = None
+
+
+def cmd_supertrend_snapshot(symbol: str) -> dict[str, Any]:
+    symbol = (symbol or "").strip().upper()
+    if symbol not in regime.SYMBOLS:
+        return {"ok": False, "message": f"Unknown instrument {symbol}"}
+    cfg = _supertrend_config()
+    key = (symbol, int(cfg["revision"]))
+    hit = _SUPERTREND_CACHE.get(key)
+    if hit and time.time() - hit[0] < _SUPERTREND_CACHE_TTL_SEC:
+        return hit[1]
+    digits = 3 if "JPY" in symbol or symbol.startswith("XAU") else 5
+    now_ms = int(time.time() * 1000)
+    bars = _supertrend_bars(symbol)
+    cards = {
+        tf: supertrend_intelligence.build_card(symbol, tf, rows, cfg, now_ms, digits)
+        for tf, rows in bars.items()
+    }
+    snapshot = {
+        "ok": True,
+        "symbol": symbol,
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "sequence": now_ms,
+        "settings": cfg,
+        "health": "LIVE" if any(c["health"] == "LIVE" for c in cards.values()) else "INSUFFICIENT_DATA",
+        "alignment": supertrend_intelligence.alignment(cards),
+        "cards": cards,
+        "transitions": [],
+    }
+    _SUPERTREND_CACHE[key] = (time.time(), snapshot)
+    _persist_supertrend_snapshot_async(symbol, key, snapshot)
+    return snapshot
 
 
 _CHART_CACHE: dict[tuple[str, str], tuple[tuple, float, dict[str, dict[str, Any]]]] = {}
@@ -1528,6 +1784,62 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self._json(200 if result.get("ok") else 503, result)
                 return
+            if parsed.path in ("/intelligence/trend", "/api/intelligence/trend/current"):
+                qs = parse_qs(parsed.query)
+                result = cmd_intelligence_trend(
+                    _q(qs, "period") or "24H",
+                    int(_q(qs, "limit") or 80),
+                    int(_q(qs, "offset") or 0),
+                    _q(qs, "asset") or "",
+                    _q(qs, "timeframe") or "",
+                )
+                self._json(200 if result.get("ok") else 503, result)
+                return
+            if parsed.path.startswith("/api/intelligence/trend/"):
+                qs = parse_qs(parsed.query)
+                tail = parsed.path.rsplit("/", 1)[-1]
+                if tail == "history":
+                    self._json(200, {"ok": True, "history": trend_intelligence.history_page(
+                        _q(qs, "period") or "24H", _q(qs, "asset") or "", _q(qs, "timeframe") or "",
+                        int(_q(qs, "limit") or 80), int(_q(qs, "offset") or 0),
+                    )})
+                    return
+                if tail == "transitions":
+                    self._json(200, {"ok": True, "transitions": trend_intelligence.transitions(
+                        int(_q(qs, "limit") or 80), _q(qs, "asset") or "",
+                    )})
+                    return
+                if tail == "health":
+                    self._json(200, {"ok": True, "weights": trend_intelligence.WEIGHTS, "config": trend_intelligence.CONFIG})
+                    return
+                asset_id = tail.upper()
+                if asset_id in trend_intelligence.ASSETS:
+                    result = cmd_intelligence_trend("24H", 80, 0, asset_id, "")
+                    if result.get("matrix"):
+                        result = {**result, "asset": next((r for r in result["matrix"] if r["asset"] == asset_id), None)}
+                    self._json(200 if result.get("ok") else 503, result)
+                    return
+            if parsed.path == "/api/intelligence/supertrend/config":
+                self._json(200, {"ok": True, "settings": supertrend_intelligence.get_config()})
+                return
+            if parsed.path == "/api/intelligence/supertrend/health":
+                self._json(200, supertrend_intelligence.health())
+                return
+            if parsed.path.startswith("/api/intelligence/supertrend/"):
+                qs = parse_qs(parsed.query)
+                parts = [p for p in parsed.path.split("/") if p]
+                symbol = parts[3].upper() if len(parts) >= 4 else ""
+                if len(parts) >= 5 and parts[4] == "transitions":
+                    self._json(200, {"ok": True, "transitions": supertrend_intelligence.transitions(symbol, int(_q(qs, "limit") or 80))})
+                    return
+                result = cmd_supertrend_snapshot(symbol)
+                if len(parts) >= 5 and result.get("ok"):
+                    tf = parts[4].upper()
+                    card = (result.get("cards") or {}).get(tf)
+                    self._json(200 if card else 404, {"ok": bool(card), "symbol": symbol, "timeframe": tf, "card": card, "settings": result.get("settings")})
+                    return
+                self._json(200 if result.get("ok") else 400, result)
+                return
             if parsed.path == "/opportunity/framework":
                 import opportunity_framework
                 import opportunity_types
@@ -1786,6 +2098,11 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/economic/refresh":
                 self._json(202, ECONOMIC.refresh())
                 return
+            if parsed.path == "/api/intelligence/supertrend/config/reset":
+                result = supertrend_intelligence.reset_config(body.get("expectedRevision"), str(body.get("actor") or "operator"))
+                _clear_supertrend_cache()
+                self._json(200 if result.get("ok") else 409, result)
+                return
             if parsed.path == "/economic/policy":
                 self._json(200, ECONOMIC.set_policy(body))
                 return
@@ -1993,6 +2310,20 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/app/state":
                 result = save_app_state(body)
                 self._json(200 if result.get("ok") else 400, result)
+                return
+            if parsed.path == "/api/intelligence/supertrend/config":
+                try:
+                    result = supertrend_intelligence.update_config(
+                        body.get("atrMultiplier"),
+                        body.get("atrPeriod"),
+                        body.get("expectedRevision"),
+                        str(body.get("actor") or "operator"),
+                    )
+                except ValueError as exc:
+                    self._json(400, {"ok": False, "message": str(exc)})
+                    return
+                _clear_supertrend_cache()
+                self._json(200 if result.get("ok") else 409, result)
                 return
             if parsed.path == "/accounts" or parsed.path.startswith("/accounts/"):
                 if parsed.path.startswith("/accounts/") and not body.get("id"):

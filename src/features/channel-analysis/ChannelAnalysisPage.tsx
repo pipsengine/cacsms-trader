@@ -14,13 +14,15 @@ import { ChannelCard, ChannelCardPending } from './components/ChannelCard';
 import { ChannelDetailModal } from './components/ChannelDetailModal';
 import { ChannelOpportunities } from './components/ChannelOpportunities';
 import { ChannelAnalysisSkeleton, ChannelMasthead, StructureInterpretationPanel, TrendMap } from './components/Panels';
+import { MultitimeframeSupertrendTab } from './supertrend/MultitimeframeSupertrendTab';
 import './channel-analysis.css';
 
-type AnalysisTab = 'channels' | 'breakouts';
+type AnalysisTab = 'channels' | 'breakouts' | 'supertrend';
 
 function tabFromHash(): AnalysisTab {
   const query = window.location.hash.split('?')[1] || '';
-  return new URLSearchParams(query).get('tab') === 'breakouts' ? 'breakouts' : 'channels';
+  const tab = new URLSearchParams(query).get('tab');
+  return tab === 'breakouts' ? 'breakouts' : tab === 'supertrend' ? 'supertrend' : 'channels';
 }
 
 function useModalKeys(selected: ChannelTimeframe | null, onSelect: (tf: ChannelTimeframe | null) => void) {
@@ -52,7 +54,7 @@ export default function ChannelAnalysisPage() {
   }, []);
   const chooseTab = (next: AnalysisTab) => {
     setTab(next);
-    const hash = next === 'breakouts' ? '#/channel-analysis?tab=breakouts' : '#/channel-analysis';
+    const hash = next === 'breakouts' ? '#/channel-analysis?tab=breakouts' : next === 'supertrend' ? '#/channel-analysis?tab=supertrend' : '#/channel-analysis';
     if (window.location.hash !== hash) history.replaceState(null, '', hash);
   };
   const close = useCallback(() => setSelected(null), []);
@@ -74,9 +76,26 @@ export default function ChannelAnalysisPage() {
         <button type="button" role="tab" aria-selected={tab === 'breakouts'} className={tab === 'breakouts' ? 'on' : ''} onClick={() => chooseTab('breakouts')}>
           Channel Breakout & Retest <span className="ca-tab-count">{watchCount}</span>
         </button>
+        <button type="button" role="tab" aria-selected={tab === 'supertrend'} className={tab === 'supertrend' ? 'on' : ''} onClick={() => chooseTab('supertrend')}>
+          Multitimeframe Supertrend
+        </button>
       </div>
       {tab === 'breakouts' ? (
         <BreakoutTab state={breakouts.state} onRefresh={breakouts.load} />
+      ) : tab === 'supertrend' ? (
+        <>
+          <ChannelMasthead
+            items={universe}
+            instrument={vm.instrument}
+            onInstrument={selectChannelInstrument}
+            state={state}
+            reanalysing={vm.reanalysing}
+            paused={paused}
+            canReanalyse={Boolean(data)}
+            onReanalyse={() => void reanalyseChannels()}
+          />
+          <MultitimeframeSupertrendTab symbol={vm.instrument} />
+        </>
       ) : (
         <>
       {vm.error && (

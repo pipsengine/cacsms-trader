@@ -715,7 +715,16 @@ class TradingWeight(unittest.TestCase):
 
     def test_no_trading_stage_reads_ytd_or_hy(self):
         here = Path(__file__).resolve().parent
-        allowed = {"channel_analysis.py", "channel_service.py", "channel_store.py", "vision.py", "server.py"}
+        allowed = {
+            "channel_analysis.py",
+            "channel_service.py",
+            "channel_store.py",
+            "strength_intelligence.py",
+            "supertrend_intelligence.py",
+            "trend_intelligence.py",
+            "vision.py",
+            "server.py",
+        }
         token = re.compile(r"""["'](?:YTD|HY)["']""")
         offenders = [p.name for p in here.glob("*.py")
                      if not p.name.startswith("test_") and p.name not in allowed and token.search(p.read_text(encoding="utf-8", errors="ignore"))]

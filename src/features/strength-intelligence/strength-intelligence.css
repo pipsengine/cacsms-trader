@@ -58,12 +58,36 @@
 .si-bar{height:14px;background:#102336;border:1px solid #18344e;border-radius:4px;overflow:hidden;min-width:120px}
 .si-bar i{display:block;height:100%;background:linear-gradient(90deg,#ff4058,#ffd84f,#12d96a)}
 .si-average-card .si-table td{padding:7px 8px}
+.ti-matrix-wrap{max-height:430px}
+.ti-table{min-width:1320px}
+.ti-table td:first-child,.ti-table th:first-child{text-align:left}
+.ti-cell{min-width:88px;font-size:10px;line-height:1.1;font-weight:700;color:#05111a!important;text-shadow:0 1px rgba(255,255,255,.14)}
+.ti-cell b{display:block;font-size:14px;margin-bottom:2px}
+.ti-cell span{display:block;white-space:normal}
+.ti-cell.strong-bull{background:linear-gradient(180deg,#18e68a,#079c5f)!important}
+.ti-cell.bull{background:linear-gradient(180deg,#7fe06b,#3bb55d)!important}
+.ti-cell.bull-weak{background:linear-gradient(180deg,#c9dd61,#79b95c)!important}
+.ti-cell.neutral{background:linear-gradient(180deg,#f4ca57,#be8e30)!important}
+.ti-cell.bear-weak{background:linear-gradient(180deg,#ff9b50,#e16045)!important}
+.ti-cell.bear{background:linear-gradient(180deg,#ff5c66,#d63c4c)!important;color:#fff!important}
+.ti-cell.strong-bear{background:linear-gradient(180deg,#d92f4c,#8f1b37)!important;color:#fff!important}
+.ti-cell.insufficient{background:#101d2c!important;color:#718aa3!important;text-shadow:none}
+.ti-table td small{display:block;color:#80a0bd;font-size:10px;margin-top:2px}
+.ti-mid-grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(360px,.95fr);gap:12px;align-items:start}
+.ti-detail-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+.ti-detail-grid div{background:#0b2238;border:1px solid #174261;border-radius:7px;padding:9px;min-width:0}
+.ti-detail-grid small{display:block;color:#7c9bb7;font-size:10px}
+.ti-detail-grid b{display:block;margin-top:4px;color:#e7f2ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ti-explain{border:1px solid #173a59;background:#07182a;border-radius:8px;margin:10px 0 0;padding:10px;color:#a9c5df;font-size:12px;line-height:1.45}
+.ti-transition-wrap{max-height:310px}
 .hr-banner{display:flex;align-items:center;gap:8px;border-radius:8px;padding:9px 11px;margin:0 0 10px;font-size:12px}
 .hr-banner.warn{background:#2a2410;border:1px solid #66511d;color:#f8d06a}
 .hr-banner.err{background:#321920;border:1px solid #74313d;color:#ff9ca7}
 @media(max-width:1180px){
   .si-feed-strip{grid-template-columns:repeat(2,minmax(0,1fr))}
   .si-ai-grid,.si-lower-grid{grid-template-columns:minmax(0,1fr)}
+  .ti-mid-grid{grid-template-columns:minmax(0,1fr)}
+  .ti-detail-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
 @media(max-width:760px){
   .si-card-head{flex-direction:column}
