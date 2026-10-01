@@ -9,6 +9,7 @@ import { MarketDataPage } from '../features/market-data';
 import { assessInstrument, gatedState } from '../features/market-data/services/stage1Gate';
 import { HistoricalRegimePage, regimeStageStatus, useRegimeStore } from '../features/historical-regime';
 import { CurrencyStrengthPage } from '../features/currency-strength';
+import { StrengthIntelligencePage } from '../features/strength-intelligence';
 import { ageText, HtfVisionPage, useVisionStore, visionStageStatus } from '../features/htf-vision';
 import { MarketScannerPage, scannerStageStatus, useScannerStore } from '../features/market-scanner';
 import { directionStageStatus, StructuralDirectionPage, useDirectionStore } from '../features/structural-direction';
@@ -325,6 +326,10 @@ export function MarketData() {
 
 export function Strength() {
   return <CurrencyStrengthPage />;
+}
+
+export function IntelligenceStrengthMatrix() {
+  return <StrengthIntelligencePage />;
 }
 
 export function Regime() {

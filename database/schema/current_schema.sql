@@ -129,6 +129,20 @@ CREATE TABLE app_auto_job (
     CONSTRAINT UQ_app_auto_job_key UNIQUE (job_key)
   );
 
+-- app_campaign_event
+CREATE TABLE app_campaign_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_key TEXT NOT NULL,
+    campaign_id TEXT NULL,
+    symbol TEXT NULL,
+    family TEXT NULL,
+    tit_level TEXT NULL,
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT UQ_app_campaign_event_key UNIQUE (event_key)
+  );
+
 -- app_candles
 CREATE TABLE app_candles (
     symbol TEXT NOT NULL,
@@ -145,6 +159,137 @@ CREATE TABLE app_candles (
     ingested_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     revised_at TEXT NULL,
     CONSTRAINT PK_app_candles PRIMARY KEY (symbol, timeframe, open_ts)
+  );
+
+-- app_channel_edge
+CREATE TABLE app_channel_edge (
+    symbol TEXT NOT NULL,
+    child_timeframe TEXT NOT NULL,
+    parent_timeframe TEXT NOT NULL,
+    via_timeframe TEXT NULL,
+    relationship TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    explanation TEXT NOT NULL,
+    run_id INTEGER NULL,
+    analysed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT PK_app_channel_edge PRIMARY KEY (symbol, child_timeframe)
+  );
+
+-- app_channel_event
+CREATE TABLE app_channel_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    bar_ts INTEGER NOT NULL,
+    price REAL NULL,
+    severity TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT UQ_app_channel_event UNIQUE (symbol, timeframe, channel_id, event_type, bar_ts)
+  );
+
+-- app_channel_history
+CREATE TABLE app_channel_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    anchor_side TEXT NULL,
+    anchor_ts INTEGER NULL,
+    direction TEXT NOT NULL,
+    last_status TEXT NOT NULL,
+    first_status TEXT NOT NULL,
+    validated_bar_ts INTEGER NULL,
+    broken_bar_ts INTEGER NULL,
+    invalidated_bar_ts INTEGER NULL,
+    first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    replaced_at TEXT NULL,
+    config_version TEXT NOT NULL,
+    CONSTRAINT UQ_app_channel_history UNIQUE (symbol, timeframe, channel_id)
+  );
+
+-- app_channel_instrument
+CREATE TABLE app_channel_instrument (
+    symbol TEXT NOT NULL PRIMARY KEY,
+    run_id INTEGER NULL,
+    state_version TEXT NOT NULL,
+    primary_direction TEXT NOT NULL,
+    intermediate_direction TEXT NOT NULL,
+    current_direction TEXT NOT NULL,
+    market_state TEXT NOT NULL,
+    structural_confidence REAL NOT NULL DEFAULT 0,
+    alignment REAL NULL,
+    live_price REAL NULL,
+    live_at TEXT NULL,
+    hierarchy_json TEXT NOT NULL,
+    interpretation_json TEXT NOT NULL,
+    trigger_reason TEXT NULL,
+    analysed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_channel_run
+CREATE TABLE app_channel_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trigger_reason TEXT NOT NULL,
+    symbols_json TEXT NOT NULL,
+    analysed INT NOT NULL,
+    failed INT NOT NULL,
+    new_events INT NOT NULL,
+    duration_ms INT NOT NULL,
+    config_version TEXT NOT NULL,
+    run_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_channel_state
+CREATE TABLE app_channel_state (
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    channel_id TEXT NULL,
+    status TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    phase TEXT NULL,
+    relationship TEXT NOT NULL,
+    parent_timeframe TEXT NULL,
+    parent_channel_id TEXT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    position REAL NULL,
+    upper_now REAL NULL,
+    mid_now REAL NULL,
+    lower_now REAL NULL,
+    slope REAL NULL,
+    width REAL NULL,
+    width_atr REAL NULL,
+    touch_count INT NOT NULL DEFAULT 0,
+    touch_quality REAL NULL,
+    data_status TEXT NOT NULL,
+    data_reason TEXT NULL,
+    source_timeframe TEXT NOT NULL,
+    source_bar_ts INTEGER NULL,
+    last_bar_ts INTEGER NULL,
+    run_id INTEGER NULL,
+    config_version TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    analysed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT PK_app_channel_state PRIMARY KEY (symbol, timeframe)
+  );
+
+-- app_channel_touch
+CREATE TABLE app_channel_touch (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    seq INT NOT NULL,
+    boundary TEXT NOT NULL,
+    role TEXT NOT NULL,
+    bar_ts INTEGER NOT NULL,
+    price REAL NOT NULL,
+    line_price REAL NOT NULL,
+    deviation_atr REAL NOT NULL,
+    CONSTRAINT UQ_app_channel_touch UNIQUE (symbol, timeframe, channel_id, seq)
   );
 
 -- app_currency_strength
@@ -222,6 +367,94 @@ CREATE TABLE app_direction_run (
     changed INT NOT NULL,
     duration_ms INT NOT NULL,
     summary_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_econ_audit
+CREATE TABLE app_econ_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    event_id TEXT NULL,
+    symbol TEXT NULL,
+    severity TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    payload_json TEXT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_econ_engine
+CREATE TABLE app_econ_engine (
+    id INT NOT NULL PRIMARY KEY,
+    state TEXT NOT NULL,
+    source_mode TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL,
+    detail_json TEXT NOT NULL
+  );
+
+-- app_econ_event
+CREATE TABLE app_econ_event (
+    event_id TEXT NOT NULL PRIMARY KEY,
+    provider_key TEXT NOT NULL,
+    scheduled_at TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    country TEXT NOT NULL,
+    title TEXT NOT NULL,
+    impact TEXT NOT NULL,
+    series_kind TEXT NOT NULL,
+    unit TEXT NULL,
+    actual TEXT NULL,
+    forecast TEXT NULL,
+    previous TEXT NULL,
+    status TEXT NOT NULL,
+    surprise_json TEXT NULL,
+    source_mode TEXT NOT NULL,
+    revision INT NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_econ_instrument
+CREATE TABLE app_econ_instrument (
+    symbol TEXT NOT NULL PRIMARY KEY,
+    state TEXT NOT NULL,
+    active_event_id TEXT NULL,
+    currency TEXT NULL,
+    impact TEXT NULL,
+    minutes_to_event INT NULL,
+    surprise TEXT NULL,
+    spread_condition TEXT NOT NULL,
+    volatility_condition TEXT NOT NULL,
+    restriction TEXT NOT NULL,
+    blocks_new INT NOT NULL,
+    revalidation_required INT NOT NULL,
+    reason TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_econ_outcome
+CREATE TABLE app_econ_outcome (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    outcome_json TEXT NOT NULL,
+    published INT NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_econ_policy
+CREATE TABLE app_econ_policy (
+    id INT NOT NULL PRIMARY KEY,
+    policy_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_econ_revision
+CREATE TABLE app_econ_revision (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL,
+    revision INT NOT NULL,
+    payload_json TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -587,6 +820,106 @@ CREATE TABLE app_learning_version (
     comparison TEXT NULL,
     note TEXT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_notification_outbox
+CREATE TABLE app_notification_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    notification_id TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    candidate_id TEXT NULL,
+    campaign_id TEXT NULL,
+    symbol TEXT NULL,
+    tit_level TEXT NULL,
+    event_type TEXT NOT NULL,
+    category TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt_count INT NOT NULL,
+    last_error TEXT NULL,
+    created_at TEXT NOT NULL,
+    last_attempt_at TEXT NULL,
+    sent_at TEXT NULL,
+    next_attempt_at TEXT NULL
+  );
+
+-- app_notification_settings
+CREATE TABLE app_notification_settings (
+    id INT NOT NULL PRIMARY KEY,
+    master_enabled INTEGER NOT NULL,
+    fx_enabled INTEGER NOT NULL,
+    xau_enabled INTEGER NOT NULL,
+    recipient TEXT NOT NULL,
+    policies_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  , smtp_host TEXT, smtp_port INTEGER, smtp_secure INTEGER, smtp_user TEXT, smtp_from_email TEXT, smtp_from_name TEXT, smtp_app_password TEXT);
+
+-- app_opportunity_hypothesis
+CREATE TABLE app_opportunity_hypothesis (
+    opportunity_id TEXT NOT NULL PRIMARY KEY,
+    framework_version TEXT NOT NULL,
+    opportunity_type TEXT NOT NULL,
+    opportunity_context TEXT NULL,
+    route TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    parent_tf TEXT NULL,
+    child_tf TEXT NULL,
+    execution_tf TEXT NULL,
+    channel_id TEXT NULL,
+    channel_role TEXT NULL,
+    trigger_type TEXT NULL,
+    trigger_ts INTEGER NULL,
+    trigger_price REAL NULL,
+    contract_id TEXT NOT NULL,
+    confirmation_state TEXT NOT NULL,
+    detector_state TEXT NULL,
+    lifecycle TEXT NOT NULL,
+    required_json TEXT NULL,
+    satisfied_json TEXT NULL,
+    missing_json TEXT NULL,
+    optional_json TEXT NULL,
+    invalidation_reason TEXT NULL,
+    confidence REAL NULL,
+    entry_quality TEXT NULL,
+    campaign_id TEXT NULL,
+    episode_id TEXT NULL,
+    revision INT NOT NULL,
+    risk_group TEXT NULL,
+    counterfactual_json TEXT NULL,
+    snapshot_json TEXT NOT NULL,
+    discovered_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT NULL
+  );
+
+-- app_opportunity_run
+CREATE TABLE app_opportunity_run (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    summary_json TEXT NOT NULL,
+    snapshot_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+-- app_opportunity_transition
+CREATE TABLE app_opportunity_transition (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opportunity_id TEXT NOT NULL,
+    opportunity_type TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    episode_id TEXT NULL,
+    mode TEXT NOT NULL,
+    from_lifecycle TEXT NULL,
+    to_lifecycle TEXT NOT NULL,
+    from_state TEXT NULL,
+    to_state TEXT NULL,
+    confirmation_state TEXT NULL,
+    revision INT NOT NULL,
+    detail TEXT NULL,
+    created_at TEXT NOT NULL
   );
 
 -- app_positions

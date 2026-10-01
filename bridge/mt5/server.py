@@ -51,6 +51,7 @@ try:
     import scanner
     import scanner_service
     import scanner_store
+    import strength_intelligence
     import vision
     import vision_service
     import vision_store
@@ -85,6 +86,7 @@ except ImportError:
     from bridge.mt5 import regime  # type: ignore
     from bridge.mt5 import risk_mt5, risk_service, risk_store  # type: ignore
     from bridge.mt5 import scanner, scanner_service, scanner_store  # type: ignore
+    from bridge.mt5 import strength_intelligence  # type: ignore
     from bridge.mt5 import vision, vision_service, vision_store  # type: ignore
     from bridge.mt5.db import (  # type: ignore
         delete_account,
@@ -552,6 +554,116 @@ def cmd_bars(body: dict[str, Any]) -> dict[str, Any]:
         for r in raw
     ]
     return {"ok": True, "symbol": symbol, "timeframe": timeframe, "bars": bars, "count": len(bars)}
+
+
+_INTELLIGENCE_CACHE: dict[str, Any] = {"at": 0.0, "payload": None}
+
+
+def _rate_rows(raw: Any) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    return [{"time": int(r["time"]), "close": float(r["close"])} for r in raw if float(r["close"]) > 0]
+
+
+@_mt5_serialized
+def cmd_intelligence_strength(period: str = "24H", limit: int = 100, offset: int = 0, search: str = "") -> dict[str, Any]:
+    cached = _INTELLIGENCE_CACHE.get("payload")
+    if cached and time.time() - float(_INTELLIGENCE_CACHE.get("at") or 0) < 0.9:
+        payload = dict(cached)
+        payload["history"] = strength_intelligence.history_page(period, limit, offset, search)
+        return payload
+
+    ok, msg = _ensure_terminal()
+    if not ok:
+        return strength_intelligence.unavailable(msg)
+    term = mt5.terminal_info()
+    if not term or not term.connected:
+        return strength_intelligence.unavailable("MT5 terminal not connected to broker")
+
+    now_dt = datetime.now(timezone.utc)
+    bars: dict[str, dict[str, list[Any]]] = {}
+    ticks: dict[str, dict[str, Any]] = {}
+    missing_symbols: list[str] = []
+
+    for symbol in strength_intelligence.SYMBOLS:
+        mt5.symbol_select(symbol, True)
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            missing_symbols.append(symbol)
+        else:
+            bid, ask = float(tick.bid), float(tick.ask)
+            ticks[symbol] = {
+                "bid": bid,
+                "ask": ask,
+                "mid": (bid + ask) / 2 if bid > 0 and ask > 0 else float(tick.last or 0),
+                "time": _mt5_time(tick.time),
+                "timeRaw": int(tick.time),
+            }
+
+        d1 = _rate_rows(mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 0, 370))
+        h1_raw = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_H1, 0, 220)
+        h1 = _rate_rows(h1_raw)
+        m15 = _rate_rows(mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M15, 0, 160))
+        m5 = _rate_rows(mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M5, 0, 120))
+        m1 = _rate_rows(mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_M1, 0, 90))
+
+        if h1_raw is not None:
+            raw_h1 = [(int(r["time"]), float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]), int(r["tick_volume"]), int(r["spread"])) for r in h1_raw]
+            h8 = [{"time": int(r[0]), "close": float(r[4])} for r in history.derive_h8(raw_h1, 2**40)]
+        else:
+            h8 = []
+
+        bars[symbol] = {
+            "YTD": d1,
+            "HY": d1,
+            "Q": d1,
+            "MN": d1,
+            "W": d1,
+            "D": d1,
+            "H8": h8 or h1,
+            "H1": h1,
+            "M15": m15,
+            "M5": m5,
+            "M1": m1,
+        }
+
+    previous = strength_intelligence.load_previous()
+    snapshot = strength_intelligence.calculate_strength(bars, ticks, previous, now_dt)
+    strength_intelligence.persist_snapshot(snapshot)
+
+    tick_times = [int(t.get("timeRaw") or 0) for t in ticks.values() if t.get("timeRaw")]
+    last_tick = max(tick_times) if tick_times else 0
+    age = time.time() - last_tick if last_tick else 10**9
+    status = "LIVE" if age < 15 and not missing_symbols else "DEGRADED" if age < 120 else "STALE" if last_tick else "DISCONNECTED"
+    payload = {
+        "ok": True,
+        "timestamp": snapshot["timestamp"],
+        "sequence": snapshot["sequence"],
+        "feed": {
+            "status": status,
+            "message": "Live MT5 strength intelligence" if status == "LIVE" else "Incomplete or stale MT5 market data",
+            "latencyMs": int(round((term.ping_last or 0) / 1000)) if term else None,
+            "lastTick": _mt5_time(last_tick) if last_tick else None,
+            "serverTime": now_dt.isoformat(),
+            "nextUiUpdateMs": 1000,
+        },
+        "matrix": snapshot["matrix"],
+        "history": strength_intelligence.history_page(period, limit, offset, search),
+        "average": snapshot["matrix"],
+        "predictions": {
+            "status": "MODEL_NOT_AVAILABLE",
+            "modelVersion": None,
+            "generatedAt": now_dt.isoformat(),
+            "rows": [],
+            "message": "Awaiting a calibrated production AI model. No simulated predictions are displayed.",
+        },
+        "weights": snapshot["weights"],
+        "quality": snapshot["quality"],
+        "dataQuality": {**snapshot["dataQuality"], "missingSymbols": missing_symbols},
+    }
+    _INTELLIGENCE_CACHE["at"] = time.time()
+    _INTELLIGENCE_CACHE["payload"] = {k: v for k, v in payload.items() if k != "history"}
+    return payload
 
 
 @_mt5_serialized
@@ -1405,6 +1517,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/opportunity/state":
                 self._json(200, OPPORTUNITY.snapshot())
+                return
+            if parsed.path == "/intelligence/strength":
+                qs = parse_qs(parsed.query)
+                result = cmd_intelligence_strength(
+                    _q(qs, "period") or "24H",
+                    int(_q(qs, "limit") or 100),
+                    int(_q(qs, "offset") or 0),
+                    _q(qs, "search") or "",
+                )
+                self._json(200 if result.get("ok") else 503, result)
                 return
             if parsed.path == "/opportunity/framework":
                 import opportunity_framework

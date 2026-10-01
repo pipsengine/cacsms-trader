@@ -38,6 +38,7 @@ export const nav: NavItem[] = [
   { label: 'Workflow Engine', icon: CircuitBoard },
   { label: 'Market Data', icon: LineChart, section: 'MARKET INTELLIGENCE', sectionIcon: Globe2 },
   { label: 'Currency & XAU Strength', icon: Coins },
+  { label: 'Strength Matrix', icon: BrainCircuit },
   { label: 'Historical Regime', icon: History },
   { label: 'Market Scanner', icon: Radar },
   { label: 'Economic Intelligence', icon: CalendarDays },

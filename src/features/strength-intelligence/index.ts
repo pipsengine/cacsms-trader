@@ -1,0 +1,2 @@
+export { StrengthIntelligencePage } from './StrengthIntelligencePage';
+
