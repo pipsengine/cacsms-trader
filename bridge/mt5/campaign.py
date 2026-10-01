@@ -12,8 +12,19 @@ HELD_TIMING = frozenset(("WAIT_RETEST", "WAIT_PULLBACK", "WAIT_NEW_CONFIRMATION"
 P2_ENTRY = frozenset(("ENTER_NOW", "RETEST_CONFIRMED"))
 
 
-def execution_key(campaign_id: str, leg: str, revision: Any) -> str:
+def execution_key(campaign_id: str, leg: str, revision: Any, episode_id: Any = None) -> str:
+    """Stage 9 idempotency identity: campaign + episode + leg + revision. Legacy campaigns have no episode."""
+    if episode_id:
+        return f"{campaign_id}|{episode_id}|{leg}|{revision}"
     return f"{campaign_id}|{leg}|{revision}"
+
+
+def _opportunity_type(hypothesis: dict[str, Any]) -> str | None:
+    try:
+        import opportunity_types as ot
+    except ImportError:  # pragma: no cover
+        from bridge.mt5 import opportunity_types as ot  # type: ignore
+    return hypothesis.get("opportunityType") or ot.legacy_type(hypothesis.get("opportunityFamily"))
 
 
 def _handoff(hypothesis: dict[str, Any], confirmation: dict[str, Any], leg: str, executable: bool, timing: str) -> dict[str, Any]:
@@ -32,10 +43,12 @@ def _handoff(hypothesis: dict[str, Any], confirmation: dict[str, Any], leg: str,
         "campaignId": hypothesis.get("campaignId"),
         "legType": leg,
         "setupRevision": revision,
-        "executionKey": execution_key(str(hypothesis.get("campaignId")), leg, revision),
+        "executionKey": execution_key(str(hypothesis.get("campaignId")), leg, revision, hypothesis.get("episodeId")),
+        "episodeId": hypothesis.get("episodeId"),
         "instrument": hypothesis.get("instrument"),
         "direction": hypothesis.get("direction"),
         "opportunityFamily": hypothesis.get("opportunityFamily"),
+        "opportunityType": _opportunity_type(hypothesis),
         "TiTLevel": hypothesis.get("TiTLevel"),
         "parentTimeframe": hypothesis.get("parentTimeframe"),
         "childTimeframe": hypothesis.get("childTimeframe"),

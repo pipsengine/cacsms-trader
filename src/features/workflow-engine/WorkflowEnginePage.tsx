@@ -12,6 +12,7 @@ import { StageInspector } from './components/StageInspector';
 import { InstrumentTraceTable } from './components/InstrumentTraceTable';
 import { OrchestratorPanel } from './components/OrchestratorPanel';
 import { DecisionQueue } from './components/DecisionQueue';
+import { OpportunityFrameworkPanel } from './components/OpportunityFrameworkPanel';
 import { WorldModelPanel } from './components/WorldModelPanel';
 import { EventStream } from './components/EventStream';
 import { RuntimeHealth } from './components/RuntimeHealth';
@@ -59,6 +60,7 @@ export default function WorkflowEnginePage({ adapter }: { adapter?: WorkflowEngi
         <OrchestratorPanel d={d} />
       </div>
       <DecisionQueue rows={d.queue} onSelect={focus} />
+      <OpportunityFrameworkPanel focus={worldSymbol} />
       <InstrumentTraceTable rows={d.instruments} busy={w.busy} onReevaluate={(s) => void w.reevaluate(s)} expanded={expanded} onExpand={setExpanded} />
       <div className="two">
         <WorldModelPanel rows={d.world} symbol={worldSymbol} onSymbol={setPinnedWorld} />

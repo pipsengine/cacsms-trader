@@ -1,8 +1,9 @@
 """Persistence for Channel Analysis: per-timeframe channel state, the coherent instrument hierarchy, lifecycle,
 touches, structural events and runs.
 
-Every analysis run rewrites all seven timeframe rows and the instrument row in one transaction with the same run id,
-so readers never combine Y from one version with H1 from another. Other engines read the published hierarchy with
+Every analysis run rewrites all nine context rows (Y/YTD/HY/Q/MN/W/D1/H8/H1) and the instrument row in one transaction
+with the same run id, so readers never combine Y from one version with H1 from another. YTD/HY rows store
+source_timeframe D1 and their window bounds in snapshot_json. Other engines read the published hierarchy with
 `hierarchy(symbol)` or the compact `world_rows()`.
 """
 
@@ -12,8 +13,10 @@ import json
 from typing import Any
 
 try:
+    import channel_analysis as ca
     from db import ROOT, _iso, connect, set_setting
 except ImportError:  # pragma: no cover
+    from bridge.mt5 import channel_analysis as ca  # type: ignore
     from bridge.mt5.db import ROOT, _iso, connect, set_setting  # type: ignore
 
 _schema_ready = False
@@ -23,7 +26,7 @@ EVENT_SEVERITY = {
     "CHANNEL_LOST": "WARN", "REVERSAL_CANDIDATE": "WARN", "ANALYSIS_ERROR": "ERROR",
     "VALIDATION": "SUCCESS", "NEW_CHANNEL": "SUCCESS",
 }
-TIMEFRAMES = ("Y", "Q", "MN", "W", "D1", "H8", "H1")
+TIMEFRAMES = ca.TIMEFRAMES
 
 
 def ensure_schema() -> None:
@@ -230,7 +233,8 @@ def load_versions() -> dict[str, str]:
 
 
 def hierarchy(symbol: str) -> dict[str, Any] | None:
-    """Latest coherent hierarchy: seven channel snapshots from one run, their edges and the interpretation."""
+    """Latest coherent hierarchy: the channel snapshots of one run, their edges and the interpretation.
+    Every core context must be present; a context added later (YTD/HY) may be absent until its first run."""
     ensure_schema()
     for _ in range(3):
         with connect() as conn:
@@ -242,12 +246,18 @@ def hierarchy(symbol: str) -> dict[str, Any] | None:
                 return None
             cur.execute("SELECT timeframe, run_id, snapshot_json FROM dbo.app_channel_state WHERE symbol=?", symbol)
             rows = cur.fetchall()
-        if all(r[1] == inst[0] for r in rows) and len(rows) == len(TIMEFRAMES):
+        present = {r[0] for r in rows}
+        if all(r[1] == inst[0] for r in rows) and set(ca.CORE_TIMEFRAMES) <= present:
+            channels = {tf: _loads(raw, None) for tf, _, raw in rows}
+            for tf, snap in channels.items():
+                if snap is not None:
+                    snap.setdefault("hierarchyRole", "CONTEXT" if tf in ca.CONTEXT_TIMEFRAMES else "CORE")
+                    snap.setdefault("window", None)
             return {
                 "symbol": symbol, "runId": inst[0], "stateVersion": inst[1], "hierarchy": _loads(inst[2], []),
                 "interpretation": _loads(inst[3], {}), "trigger": inst[4], "analysedAt": _iso(inst[5]),
                 "livePrice": inst[6], "liveAt": _iso(inst[7]),
-                "channels": {tf: _loads(raw, None) for tf, _, raw in rows},
+                "channels": channels,
             }
     return None
 
@@ -260,16 +270,25 @@ def world_rows() -> list[dict[str, Any]]:
         cur.execute("SELECT symbol, run_id, state_version, primary_direction, intermediate_direction, current_direction, market_state, "
                     "structural_confidence, alignment, interpretation_json, analysed_at FROM dbo.app_channel_instrument")
         inst = cur.fetchall()
+        ctx = "CASE WHEN timeframe IN (" + ",".join(f"'{t}'" for t in ca.CONTEXT_TIMEFRAMES) + ") THEN JSON_VALUE(snapshot_json, '$.window.{}') END"
         cur.execute("SELECT symbol, timeframe, channel_id, status, direction, relationship, parent_timeframe, parent_channel_id, confidence, "
-                    "position, upper_now, mid_now, lower_now, data_status, last_bar_ts FROM dbo.app_channel_state")
+                    "position, upper_now, mid_now, lower_now, data_status, last_bar_ts, phase, slope, source_timeframe, "
+                    + ", ".join(ctx.format(k) for k in ("type", "start", "end", "bars")) +
+                    " FROM dbo.app_channel_state")
         states = cur.fetchall()
+    num = lambda v: int(float(v)) if v not in (None, "") else None  # noqa: E731
     by_sym: dict[str, dict[str, Any]] = {}
-    for r in states:
-        by_sym.setdefault(r[0], {})[r[1]] = {
+    for r in sorted(states, key=lambda r: ca.TIMEFRAMES.index(r[1]) if r[1] in ca.TIMEFRAMES else 99):
+        row = {
             "channelId": r[2], "status": r[3], "direction": r[4], "relationship": r[5], "parentTimeframe": r[6],
             "parentChannelId": r[7], "confidence": r[8], "position": r[9], "upper": r[10], "mid": r[11], "lower": r[12],
-            "dataStatus": r[13], "lastBarTs": r[14],
+            "dataStatus": r[13], "lastBarTs": r[14], "phase": r[15], "slope": r[16], "sourceTimeframe": r[17],
+            "hierarchyRole": "CONTEXT" if r[1] in ca.CONTEXT_TIMEFRAMES else "CORE",
         }
+        if r[1] in ca.CONTEXT_TIMEFRAMES:
+            row.update({"contextRole": "STRATEGIC_CONTEXT", "scored": False, "weight": ca.CONFIG["tfWeight"][r[1]],
+                        "windowType": r[18], "windowStart": num(r[19]), "windowEnd": num(r[20]), "windowBars": num(r[21])})
+        by_sym.setdefault(r[0], {})[r[1]] = row
     out = []
     for r in inst:
         interp = _loads(r[9], {})
@@ -279,6 +298,8 @@ def world_rows() -> list[dict[str, Any]]:
             "parentTimeframe": interp.get("parentTimeframe"), "parentDirection": interp.get("parentDirection"),
             "currentTimeframe": interp.get("currentTimeframe"), "correctionDepth": interp.get("correctionDepth"),
             "narrative": interp.get("narrative"), "analysedAt": _iso(r[10]), "timeframes": by_sym.get(r[0], {}),
+            "hierarchy": list(ca.TIMEFRAMES), "scoredTimeframes": list(ca.CORE_TIMEFRAMES),
+            "contextTimeframes": list(ca.CONTEXT_TIMEFRAMES),
         })
     return out
 

@@ -978,9 +978,42 @@ def cmd_channel_live(symbol: str) -> dict[str, Any]:
     }
 
 
+_CHART_CACHE: dict[tuple[str, str], tuple[tuple, float, dict[str, dict[str, Any]]]] = {}
+CHART_CACHE_TTL_SEC = 300
+
+
+def _channel_charts(symbol: str, h: dict[str, Any], published: list[str], series: dict) -> tuple[dict[str, dict[str, Any]], int]:
+    """Closed-candle chart series per published context. A chart depends only on the stored calculation and its Stage 1
+    source series, so an unchanged source group is served from memory; a changed one is read once (D1 serves D1, YTD, HY)."""
+    groups: dict[str, list[str]] = {}
+    for tf in published:
+        groups.setdefault(channel_analysis.SOURCE_TF[tf], []).append(tf)
+    charts: dict[str, dict[str, Any]] = {}
+    reads = 0
+    now = time.time()
+    for src, tfs in groups.items():
+        row = series.get((symbol, src)) or {}
+        key = (row.get("latest_ts"), row.get("candle_count"),
+               tuple((tf, h["channels"][tf].get("analysedAt"), h["channels"][tf].get("channelId"), h["channels"][tf].get("lastCandleTime"),
+                      json.dumps(h["channels"][tf].get("definition"), sort_keys=True, default=str),
+                      (h["channels"][tf].get("window") or {}).get("start")) for tf in tfs))
+        hit = _CHART_CACHE.get((symbol, src))
+        if hit and hit[0] == key and now - hit[1] < CHART_CACHE_TTL_SEC:
+            charts.update(hit[2])
+            continue
+        bars = CHANNELS.load_all_bars(symbol, tfs)
+        reads += 1
+        built = {tf: channel_analysis.chart_payload(h["channels"][tf], bars[tf]) for tf in tfs}
+        _CHART_CACHE[(symbol, src)] = (key, now, built)
+        charts.update(built)
+    return charts, reads
+
+
 def cmd_channel_snapshot(symbol: str) -> dict[str, Any]:
-    """One coherent instrument read: the seven persisted timeframe channels of the latest run, their hierarchy and
-    interpretation, chart candles from Stage 1 with the channel projected from the stored definition, and live position."""
+    """One coherent instrument read: the persisted Y/YTD/HY/Q/MN/W/D1/H8/H1 channels of the latest run, their hierarchy
+    and interpretation, chart candles from Stage 1 with the channel projected from the stored definition, and live position.
+    Each Stage 1 source series is read at most once (D1 serves D1, YTD and HY) and only when it changed; nothing is
+    recalculated here. D1/YTD/HY chart candles are sent once in `sharedCandles` and referenced (see share_source_series)."""
     started = time.time()
     health, engine = _channel_engine_state()
     base = {"ok": True, "generatedAt": int(started * 1000), "health": health, "engineState": engine,
@@ -990,16 +1023,18 @@ def cmd_channel_snapshot(symbol: str) -> dict[str, Any]:
     if not h:
         return {**base, "selected": None, "events": [], "latencyMs": int((time.time() - started) * 1000),
                 "message": f"{symbol} has not completed its first autonomous channel analysis yet"}
+    t_store = time.time()
     now = CHANNELS.server_now()
     series = history_store.series_all()
     live = CHANNELS.live_price(symbol)
     live_price = live["price"] if live and live.get("fresh") else None
-    mn1 = history_store.candle_tail(symbol, "MN1", channel_service.CONFIG["mn1History"])
+    published = [tf for tf in channel_analysis.TIMEFRAMES if h["channels"].get(tf)]
+    charts, reads = _channel_charts(symbol, h, published, series)
+    t_bars = time.time()
     channels: dict[str, Any] = {}
-    for tf in channel_analysis.TIMEFRAMES:
+    for tf in published:
         snap = dict(h["channels"][tf])
-        bars = CHANNELS.load_bars(symbol, tf, mn1)
-        chart = channel_analysis.chart_payload(snap, bars)
+        chart = charts[tf]
         row = series.get((symbol, channel_analysis.SOURCE_TF[tf]))
         close_ms = snap.get("lastCandleClose")
         snap["freshnessSeconds"] = max(0, now - int(close_ms / 1000)) if close_ms else None
@@ -1008,9 +1043,12 @@ def cmd_channel_snapshot(symbol: str) -> dict[str, Any]:
         snap["candles"] = chart["candles"]
         snap["lines"] = chart["lines"]
         channels[tf] = snap
+    t_chart = time.time()
     market = _channel_market(symbol)
     if market:
         live_price = _paint_current_candles(channels, market, _closed_months(symbol, market["now"]))
+    shared = channel_analysis.share_source_series(channels)
+    t_market = time.time()
     h1 = channels["H1"]
     price = live_price if live_price is not None else h1.get("currentPrice")
     fresh = [c["freshnessSeconds"] for c in channels.values() if c.get("freshnessSeconds") is not None]
@@ -1027,10 +1065,14 @@ def cmd_channel_snapshot(symbol: str) -> dict[str, Any]:
         "sourceHealth": "STALE" if stale else health,
         "runId": h["runId"], "stateVersion": h["stateVersion"], "trigger": h["trigger"],
         "channels": channels, "hierarchy": h["hierarchy"], "interpretation": h["interpretation"],
-        "lifecycle": channel_store.lifecycle(symbol),
+        "lifecycle": channel_store.lifecycle(symbol), "sharedCandles": shared,
     }
-    return {**base, "selected": selected, "events": channel_store.recent_events(symbol, 80),
-            "latencyMs": int((time.time() - started) * 1000)}
+    events = channel_store.recent_events(symbol, 80)
+    ms = lambda a, b: int((b - a) * 1000)  # noqa: E731
+    timings = {"storeMs": ms(started, t_store), "barsMs": ms(t_store, t_bars), "chartMs": ms(t_bars, t_chart),
+               "marketMs": ms(t_chart, t_market), "sourceReads": reads,
+               "sourceGroups": len({channel_analysis.SOURCE_TF[tf] for tf in published}), "contexts": len(published)}
+    return {**base, "selected": selected, "events": events, "latencyMs": int((time.time() - started) * 1000), "timings": timings}
 
 
 def _scanner_state() -> dict[str, Any]:
@@ -1315,7 +1357,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
 
     def _json(self, code: int, payload: dict[str, Any]) -> None:
-        raw = json.dumps(payload, default=str).encode("utf-8")
+        raw = json.dumps(payload, default=str, separators=(",", ":")).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
@@ -1363,6 +1405,29 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/opportunity/state":
                 self._json(200, OPPORTUNITY.snapshot())
+                return
+            if parsed.path == "/opportunity/framework":
+                import opportunity_framework
+                import opportunity_types
+                state = OPPORTUNITY.framework
+                symbol = (_q(parse_qs(parsed.query), "symbol") or "").upper()
+                if state and symbol:
+                    state = {**state, "hypotheses": [h for h in state.get("hypotheses") or [] if h.get("symbol") == symbol]}
+                self._json(200, {"ok": True, "framework": state, "routes": opportunity_types.ROUTES,
+                                 "shadowStage8": opportunity_framework.SHADOW_STAGE8})
+                return
+            if parsed.path == "/opportunity/contracts":
+                import opportunity_types
+                self._json(200, {"ok": True, **opportunity_types.matrix()})
+                return
+            if parsed.path == "/opportunity/framework/history":
+                import opportunity_framework_store
+                oid = _q(parse_qs(parsed.query), "id")
+                if oid:
+                    self._json(200, opportunity_framework_store.history(oid))
+                else:
+                    self._json(200, {"ok": True, "transitions": opportunity_framework_store.recent_transitions(80),
+                                     "learning": opportunity_framework_store.learning_summary()})
                 return
             if parsed.path == "/economic/audit":
                 self._json(200, {"ok": True, "audit": economic_service.store.recent_audit(120)})

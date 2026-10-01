@@ -226,6 +226,8 @@ def _xau_holdback(symbol: str, cfg: dict[str, Any], ctx: dict[str, Any] | None =
 
 def setup_key(h: dict[str, Any]) -> str:
     if h.get("handoffKind") == "CAMPAIGN":
+        if h.get("episodeId"):
+            return f"{h.get('campaignId')}|{h.get('episodeId')}|{h.get('legType')}|{h.get('setupRevision')}"
         return f"{h.get('campaignId')}|{h.get('legType')}|{h.get('setupRevision')}"
     ec = h.get("entryContext") or {}
     anchor = ec.get("triggerTs") or h.get("h1LastTs") or h.get("confirmedSince") or ""
@@ -1209,7 +1211,8 @@ def evaluate_campaign(h: dict[str, Any], market: dict[str, dict[str, Any]], cfg:
                    "allocatedRisk": (h.get("campaign") or {}).get("allocatedRisk"), "opportunityFamily": h.get("opportunityFamily"),
                    "TiTLevel": h.get("TiTLevel"), "executionTimeframe": h.get("executionTimeframe"),
                    "parentTimeframe": h.get("parentTimeframe"), "childTimeframe": h.get("childTimeframe"),
-                   "executionKey": h.get("executionKey"), "tradeType": h.get("opportunityFamily")},
+                   "executionKey": h.get("executionKey"), "tradeType": h.get("opportunityFamily"),
+                   "opportunityType": h.get("opportunityType"), "episodeId": h.get("episodeId")},
     }
 
 

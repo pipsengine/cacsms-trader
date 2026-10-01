@@ -10,8 +10,9 @@ import {
 } from './services/channelStore';
 import { startAutonomyStore, useAutonomyState } from '../workflow-engine/services/autonomyStore';
 import { BreakoutTab, useBreakoutWatch } from './components/BreakoutTab';
-import { ChannelCard } from './components/ChannelCard';
+import { ChannelCard, ChannelCardPending } from './components/ChannelCard';
 import { ChannelDetailModal } from './components/ChannelDetailModal';
+import { ChannelOpportunities } from './components/ChannelOpportunities';
 import { ChannelAnalysisSkeleton, ChannelMasthead, StructureInterpretationPanel, TrendMap } from './components/Panels';
 import './channel-analysis.css';
 
@@ -148,15 +149,21 @@ export default function ChannelAnalysisPage() {
       ) : (
         <>
           <section className="ca-channel-grid" aria-label={`${state.instrument} timeframe channels`}>
-            {TIMEFRAMES.map((tf) => (
-              <ChannelCard key={tf} channel={state.channels[tf]} onOpen={() => setSelected(tf)} />
-            ))}
+            {TIMEFRAMES.map((tf) => {
+              const channel = state.channels[tf];
+              return channel ? (
+                <ChannelCard key={tf} channel={channel} onOpen={() => setSelected(tf)} />
+              ) : (
+                <ChannelCardPending key={tf} timeframe={tf} />
+              );
+            })}
           </section>
           <div className="ca-bottom-grid">
             <TrendMap state={state} />
             <StructureInterpretationPanel state={state} />
           </div>
-          {selected && (
+          <ChannelOpportunities instrument={vm.instrument} />
+          {selected && state.channels[selected] && (
             <ChannelDetailModal
               channel={state.channels[selected]}
               state={state}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import bisect
 from typing import Any, Callable
 
 try:
@@ -124,6 +125,137 @@ def _close_episode(flags: dict[str, Any], groups: dict[str, dict[str, int]]) -> 
             group["episodesP2"] += 1
         if not flags["erz"] and not flags["p1"] and not flags["p2"]:
             group["episodesNeither"] += 1
+
+
+OP01_ORDER = ("BOUNDARY_APPROACH", "BOUNDARY_ZONE_REACHED", "BOUNDARY_TOUCH", "BOUNDARY_PENETRATION", "REACTION_PENDING",
+              "REACTION_DETECTED", "REACTION_CONFIRMED")
+
+
+def op01_replay(symbols: list[str] | None = None, *, tf: str = "D1", days: int = 120, h1_stride: int = 2,
+                loader: Callable[[str, str], list[tuple]] | None = None) -> dict[str, Any]:
+    """Causal OP-01 boundary-reaction replay with a per-episode funnel and the shadow comparison against the legacy
+    BOS/CHoCH gate.
+
+    At each closed parent bar the channel is rebuilt from the parent prefix only. Each following execution bar is then
+    evaluated on the execution prefix that has closed at that bar, against that channel. Bars after a confirmation are
+    read only to measure the counterfactual outcome (MFE/MAE in R), never to decide.
+    """
+    try:
+        import boundary_reaction as br
+        import channel_analysis as ca
+        import opportunity_framework as fw
+        import opportunity_framework_store as fstore
+        import history_store as hs
+        import vision
+    except ImportError:  # pragma: no cover
+        from bridge.mt5 import boundary_reaction as br  # type: ignore
+        from bridge.mt5 import channel_analysis as ca  # type: ignore
+        from bridge.mt5 import opportunity_framework as fw  # type: ignore
+        from bridge.mt5 import opportunity_framework_store as fstore  # type: ignore
+        from bridge.mt5 import history_store as hs  # type: ignore
+        from bridge.mt5 import vision  # type: ignore
+
+    exec_tf = fw.EXECUTION[tf]
+    sec = fw.TF_SEC[exec_tf]
+    symbols = list(symbols or opportunity.SYMBOLS)
+    read = loader or (lambda symbol, frame: hs.candle_ohlc(symbol, ca.SOURCE_TF.get(frame, frame)))
+    lookback = int(vision.tf_cfg(tf)["lookback"])
+    funnel = {"episodes": 0, "zoneReached": 0, "reactionDetected": 0, "reactionConfirmed": 0, "roomOk": 0, "readyForRisk": 0,
+              "confirmedWithBos": 0, "confirmedWithoutBos": 0, "legacyGateWouldPass": 0, "broken": 0, "failed": 0}
+    outcomes: dict[str, dict[str, Any]] = {k: {"tracked": 0, "targetFirst": 0, "stopFirst": 0, "timeout": 0, "open": 0, "mfe": [], "mae": []}
+                                           for k in ("withBos", "withoutBos")}
+    per_symbol: dict[str, int] = {}
+    evaluations = 0
+    for symbol in symbols:
+        parent = read(symbol, tf)
+        execution = read(symbol, exec_tf)
+        if len(parent) < lookback // 2 or len(execution) < br.CONFIG["minBars"]:
+            continue
+        exec_ts = [int(b[0]) for b in execution]
+        episodes: dict[tuple, dict[str, Any]] = {}
+        start = max(lookback // 2, len(parent) - int(days))
+        for i in range(start, len(parent)):
+            asof = ca.bar_close(tf, int(parent[i][0]))
+            prefix = parent[max(0, i + 1 - lookback):i + 1]
+            if ca.bar_close(tf, int(prefix[-1][0])) > asof:
+                raise RuntimeError("parent prefix includes a future bar")
+            snap = ca.analyse_timeframe(symbol, tf, prefix, ("READY", "closed historical candles"), asof)
+            defn = snap.get("definition")
+            sign = fw._sign(snap.get("direction"))
+            if not defn or sign == 0 or str(snap.get("status") or "") not in fw.CHANNEL_OK:
+                continue
+            tp = fw._trade_pos(snap.get("position"), sign)
+            if tp is None or tp > fw.CONFIG["boundaryBandPct"]:
+                continue
+            atr = (snap.get("evidence") or {}).get("atr")
+            parent_ts = [int(b[0]) for b in parent[:i + 1] if int(b[0]) >= int(defn["anchorTs"])]
+            nxt = ca.bar_close(tf, int(parent[i + 1][0])) if i + 1 < len(parent) else asof + fw.TF_SEC[tf]
+            j0 = bisect.bisect_left(exec_ts, asof)
+            j1 = bisect.bisect_left(exec_ts, nxt - sec + 1)
+            for j in range(j0, min(j1, len(execution)), max(1, int(h1_stride))):
+                now = exec_ts[j] + sec
+                bars = execution[max(0, j + 1 - 300):j + 1]
+                lines = br.project_lines(defn, parent_ts, [int(b[0]) for b in bars])
+                det = br.detect(bars, lines, sign, parent_atr=atr, mode="BOUNDARY", tf_sec=sec, now_ts=now)
+                evaluations += 1
+                touch = (det.get("touch") or {}).get("ts")
+                if not touch or det["state"] in ("BOUNDARY_DISTANT", "BOUNDARY_APPROACH", "INSUFFICIENT_HISTORY"):
+                    continue
+                key = (snap.get("channelId"), sign, touch)
+                ep = episodes.setdefault(key, {"rank": -1, "confirmed": False, "broken": False, "failed": False, "room": False, "ready": False})
+                if det["state"] in OP01_ORDER:
+                    ep["rank"] = max(ep["rank"], OP01_ORDER.index(det["state"]))
+                ep["broken"] = ep["broken"] or det["state"] == "BOUNDARY_BROKEN"
+                ep["failed"] = ep["failed"] or det["state"] == "REACTION_FAILED"
+                if det["state"] == "REACTION_CONFIRMED" and not det.get("expired") and not ep["confirmed"]:
+                    ep["confirmed"] = True
+                    events = ca.structure_events(exec_tf, bars, limit=60)
+                    bos, choch = fw._structure_since(events, sign, touch)
+                    room = det.get("room") or {}
+                    ep.update({"bos": bos, "choch": choch, "room": bool(room.get("ok")),
+                               "ready": bool(room.get("ok")) and (det.get("entryQuality") or {}).get("grade") != "EXTENDED"})
+                    if room.get("entry") is not None and room.get("invalidation") is not None:
+                        ep["cf"] = {"state": "OPEN", "entry": float(room["entry"]), "stop": float(room["invalidation"]),
+                                    "target": room.get("target"), "sign": sign, "startTs": int(bars[-1][0]), "mfeR": 0.0, "maeR": 0.0, "bars": 0}
+        for ep in episodes.values():
+            funnel["episodes"] += 1
+            funnel["zoneReached"] += ep["rank"] >= OP01_ORDER.index("BOUNDARY_ZONE_REACHED")
+            funnel["reactionDetected"] += ep["rank"] >= OP01_ORDER.index("REACTION_DETECTED")
+            funnel["reactionConfirmed"] += ep["confirmed"]
+            funnel["broken"] += ep["broken"]
+            funnel["failed"] += ep["failed"]
+            if ep["confirmed"]:
+                funnel["roomOk"] += ep["room"]
+                funnel["readyForRisk"] += ep["ready"]
+                funnel["confirmedWithBos"] += bool(ep.get("bos"))
+                funnel["confirmedWithoutBos"] += not ep.get("bos")
+                funnel["legacyGateWouldPass"] += bool(ep.get("bos") or ep.get("choch"))
+            if ep.get("cf") and ep["ready"]:
+                k = "withBos" if ep.get("bos") else "withoutBos"
+                after = execution[bisect.bisect_right(exec_ts, ep["cf"]["startTs"]):]
+                cf = fstore.measure_counterfactual(ep["cf"], after[:fstore.COUNTERFACTUAL_MAX_BARS + 1])
+                o = outcomes[k]
+                o["tracked"] += 1
+                o["mfe"].append(cf["mfeR"])
+                o["mae"].append(cf["maeR"])
+                outcome = cf.get("outcome")
+                o["targetFirst"] += outcome == "TARGET_FIRST"
+                o["stopFirst"] += outcome == "STOP_FIRST"
+                o["timeout"] += outcome == "TIMEOUT"
+                o["open"] += outcome is None
+        per_symbol[symbol] = len(episodes)
+    for o in outcomes.values():
+        mfe, mae = o.pop("mfe"), o.pop("mae")
+        o["avgMfeR"] = round(sum(mfe) / len(mfe), 2) if mfe else None
+        o["avgMaeR"] = round(sum(mae) / len(mae), 2) if mae else None
+    return {
+        "opportunityType": "OP-01", "route": "OP-01:BOUNDARY_REACTION", "parentTimeframe": tf, "executionTimeframe": exec_tf,
+        "days": int(days), "executionStride": int(h1_stride), "symbols": len(symbols), "evaluations": evaluations,
+        "funnel": funnel, "counterfactual": outcomes, "episodesBySymbol": per_symbol, "lookahead": False, "thresholdsChanged": False,
+        "note": ("Episodes keyed by channel, direction and touch bar. legacyGateWouldPass counts confirmed reactions that also had a "
+                 "BOS or CHoCH since the touch (the existing NORMAL gate). Counterfactual outcomes are observational, "
+                 "first-touch, conservative on same-bar ambiguity, and never change thresholds."),
+    }
 
 
 def historical_distribution(symbols: list[str] | None = None, stride: int = 5, loader: Callable[[str, str], list[tuple]] | None = None) -> dict[str, Any]:

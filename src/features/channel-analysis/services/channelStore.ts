@@ -51,8 +51,9 @@ function applyLive(data: ChannelAnalysisSnapshot, live: ChannelLiveQuote): Chann
   for (const tf of TIMEFRAMES) {
     const bar = live.bars?.[tf];
     const view = live.views?.[tf];
-    if (!bar && !view) continue;
-    const ch = { ...channels[tf] };
+    const current = channels[tf];
+    if (!current || (!bar && !view)) continue;
+    const ch = { ...current };
     if (bar) {
       const candles = ch.candles.slice();
       const last = candles[candles.length - 1];

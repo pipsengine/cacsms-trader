@@ -48,6 +48,17 @@ def setup_class(trade_type: str | None, setup_key: str | None = None) -> str:
     return "UNSPECIFIED"
 
 
+def opportunity_type(recorded: Any, family: Any, setup: str) -> str:
+    """Framework type recorded at decision time; older rows are read through the legacy mapping (never rewritten)."""
+    if recorded:
+        return str(recorded)
+    try:
+        import opportunity_types as ot
+    except ImportError:  # pragma: no cover
+        from bridge.mt5 import opportunity_types as ot  # type: ignore
+    return ot.legacy_type(None if family is None else str(family), setup) or "UNCLASSIFIED"
+
+
 def relationship(setup: str) -> str:
     if setup in PRIMARY:
         return "PRIMARY"
@@ -88,6 +99,7 @@ def normalize_trade(row: dict[str, Any]) -> dict[str, Any]:
         "symbol": row.get("symbol"),
         "direction": row.get("direction"),
         "setup": kind,
+        "opportunityType": opportunity_type(stage7.get("opportunityType"), stage7.get("opportunityFamily") or stage7.get("tradeType"), kind),
         "relationship": relationship(kind),
         "regime": upstream.get("regime") or stage7.get("regime"),
         "session": upstream.get("session"),
@@ -129,6 +141,8 @@ def normalize_decision(row: dict[str, Any]) -> dict[str, Any]:
         "symbol": row.get("symbol"),
         "direction": evidence.get("direction"),
         "setup": kind,
+        "opportunityType": opportunity_type(evidence.get("opportunityType") or _dig(evidence, "stage7", "opportunityType"),
+                                            evidence.get("opportunityFamily") or evidence.get("tradeType"), kind),
         "relationship": relationship(kind),
         "regime": evidence.get("regime"),
         "session": evidence.get("session"),
@@ -304,6 +318,7 @@ def analytics(trades: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "minSample": MIN_SLICE,
         "bySetup": _slice(tagged, "setup"),
+        "byOpportunityType": _slice(tagged, "opportunityType"),
         "bySymbol": _slice(tagged, "symbol"),
         "bySide": _slice(tagged, "side"),
         "byRelationship": _slice(tagged, "relationship"),

@@ -53,11 +53,24 @@ EXEC_TF_CFG: dict[str, dict[str, Any]] = {
 }
 
 
+# Channel Analysis derived windows (YTD / rolling HY), read from closed D1 candles. Same swing, touch, parallel and
+# breakout rules as D1; swings and anchors are restricted to the window by analyse_tf(start_ts=...), so `lookback`
+# only scales structure-age scoring. minBars counts bars inside the window.
+WINDOW_TF_CFG: dict[str, dict[str, Any]] = {
+    "YTD": {"lookback": 260, "pivot": 3, "minSwingAtr": 1.0, "minBars": 40, "maxSwings": 14, "minAnchorGap": 6,
+            "invalidBars": 40, "chartBars": 320},
+    "HY": {"lookback": 130, "pivot": 3, "minSwingAtr": 1.0, "minBars": 100, "maxSwings": 14, "minAnchorGap": 6,
+           "invalidBars": 40, "chartBars": 200},
+}
+
+
 def tf_cfg(tf: str) -> dict[str, Any]:
     if tf in TF_CFG:
         return TF_CFG[tf]
     if tf in EXEC_TF_CFG:
         return EXEC_TF_CFG[tf]
+    if tf in WINDOW_TF_CFG:
+        return WINDOW_TF_CFG[tf]
     return MACRO_TF_CFG[tf]
 
 CONFIG: dict[str, Any] = {
@@ -341,8 +354,9 @@ def _fmt(p: float) -> str:
     return f"{p:.5f}" if p < 50 else f"{p:.3f}" if p < 1000 else f"{p:.2f}"
 
 
-def analyse_tf(tf: str, bars: list[tuple]) -> dict[str, Any]:
-    """Full structural read for one timeframe. `bars` must be validated closed candles, ascending."""
+def analyse_tf(tf: str, bars: list[tuple], start_ts: int | None = None) -> dict[str, Any]:
+    """Full structural read for one timeframe. `bars` must be validated closed candles, ascending.
+    `start_ts` restricts swings and anchors to bars opening at or after it; earlier bars only warm up the ATR."""
     C = tf_cfg(tf)
     s = _Series(bars)
     n = s.n
@@ -350,7 +364,10 @@ def analyse_tf(tf: str, bars: list[tuple]) -> dict[str, Any]:
     atr_slow = wilder_atr(s.h, s.l, s.c, CONFIG["atrSlowLen"])
     a_last = atr[-1]
     vol_ratio = a_last / atr_slow[-1] if atr_slow[-1] > 0 else 1.0
-    start = max(0, n - C["lookback"])
+    if start_ts is None:
+        start = max(0, n - C["lookback"])
+    else:
+        start = next((i for i, t in enumerate(s.ts) if t >= int(start_ts)), n)
     piv = [p for p in pivots(s.h, s.l, C["pivot"]) if p["i"] >= start]
     swings = zigzag(piv, atr, C["minSwingAtr"])
 
@@ -376,7 +393,7 @@ def analyse_tf(tf: str, bars: list[tuple]) -> dict[str, Any]:
             "IMPULSE" if abs(net5) >= 1.5 * a_last else "CONSOLIDATION"
         reason = (
             f"No channel: {base['swings']['lows']} swing lows / {base['swings']['highs']} swing highs in the last "
-            f"{min(n, C['lookback'])} bars do not form a boundary within {CONFIG['touchTolAtr']} ATR tolerance"
+            f"{n - start} bars do not form a boundary within {CONFIG['touchTolAtr']} ATR tolerance"
         )
         net20 = (s.c[-1] - s.c[-21]) / a_last if n > 21 and a_last else 0.0
         return {**base, "status": "NONE", "direction": "NEUTRAL", "lean": _slope_label(net20 / 4, net20),

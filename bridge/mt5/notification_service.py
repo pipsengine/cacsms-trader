@@ -31,6 +31,15 @@ P2_EVENTS = {
     "P2_WAIT_RETEST": "P2_WAIT_RETEST",
     "P2_READY_FOR_RISK": "P2_READY_FOR_RISK",
 }
+FRAMEWORK_EVENTS = {
+    "DISCOVERED": "OPPORTUNITY_DISCOVERED",
+    "WATCHING": "OPPORTUNITY_DISCOVERED",
+    "TRIGGER_APPROACHING": "OPPORTUNITY_DISCOVERED",
+    "CONFIRMING": "OPPORTUNITY_CONFIRMING",
+    "READY_FOR_RISK": "OPPORTUNITY_READY_FOR_RISK",
+    "AUTHORIZED": "OPPORTUNITY_AUTHORIZED",
+    "INVALIDATED": "OPPORTUNITY_INVALIDATED",
+}
 
 
 class MemoryOutbox:
@@ -161,6 +170,7 @@ class NotificationService:
         self._probed = False
         self._hyp_seeded = False
         self._hyp_open: set[str] = set()
+        self._fw_seeded = False
         self._stop = False
         self._thread: threading.Thread | None = None
         self._started = False
@@ -369,6 +379,8 @@ class NotificationService:
             "titLevel": level,
             "direction": hypothesis.get("direction"),
             "opportunityFamily": hypothesis.get("opportunityFamily"),
+            "opportunityType": hypothesis.get("opportunityType"),
+            "opportunityTypeName": hypothesis.get("opportunityTypeName"),
             "timeframe": hypothesis.get("childTimeframe") or hypothesis.get("executionTimeframe"),
             "channelBreak": hypothesis.get("channelBreak") or (hypothesis.get("p1") or {}).get("reason"),
             "structuralBreak": hypothesis.get("structuralBreak"),
@@ -385,6 +397,42 @@ class NotificationService:
             "environment": os.environ.get("CACSMS_ENV") or "development",
         }
         self._queue(event_type, f"{symbol}|{level}|{event_type}|{revision}", payload, hypothesis.get("candidateId"), symbol, level, hypothesis.get("campaignId"))
+
+    def observe_framework(self, transitions: list[dict[str, Any]]) -> None:
+        """Opportunity-framework lifecycle transitions. Every policy defaults off; the first call after a restart only seeds."""
+        if not self._live():
+            return
+        if not self._fw_seeded:
+            self._fw_seeded = True
+            return
+        try:
+            for t in transitions:
+                event_type = FRAMEWORK_EVENTS.get(str(t.get("toLifecycle")))
+                if not event_type or (event_type == "OPPORTUNITY_DISCOVERED" and t.get("fromLifecycle")):
+                    continue
+                h = t.get("hypothesis") or {}
+                symbol = t.get("symbol")
+                freshness = "STALE" if (h.get("dataFreshness") or {}).get("state") == "STALE" else "CURRENT"
+                settings = self.outbox.settings(self.delivery_config()["defaultRecipient"])
+                ok, _reason = policy.allows(event_type, symbol, settings, freshness)
+                if not ok:
+                    continue
+                room = h.get("room") or {}
+                payload = {
+                    "symbol": symbol, "direction": t.get("direction"), "titLevel": h.get("TiTLevel"),
+                    "opportunityType": t.get("opportunityType"), "opportunityTypeName": t.get("opportunityName"),
+                    "opportunityFamily": h.get("opportunityCode"), "mode": t.get("mode"), "lifecycle": t.get("toLifecycle"),
+                    "confirmationState": t.get("confirmationState"), "timeframe": h.get("executionTimeframe"),
+                    "missing": ", ".join(h.get("missingEvidence") or []) or None, "invalidation": room.get("invalidation"),
+                    "target": room.get("target"), "reason": t.get("detail"),
+                    "stage8": "NOT YET AUTHORIZED" if t.get("toLifecycle") != "AUTHORIZED" else "AUTHORIZED",
+                    "campaignId": h.get("campaignId"), "freshness": freshness, "eventEpoch": time.time(),
+                    "environment": os.environ.get("CACSMS_ENV") or "development",
+                }
+                self._queue(event_type, f"{t['opportunityId']}|{event_type}|{t.get('revision')}", payload, h.get("candidateId"), symbol,
+                            h.get("TiTLevel"), h.get("campaignId"))
+        except Exception:
+            traceback.print_exc()
 
     def ingest_execution(self, event_type: str, execution: dict[str, Any]) -> dict[str, Any] | None:
         if not self._live():

@@ -1,8 +1,9 @@
-import type { ChannelSnapshot } from '../types';
+import type { ChannelSnapshot, ChannelTimeframe } from '../types';
 import {
   dirClass,
   displayPhase,
   human,
+  isContext,
   isValid,
   num,
   pct,
@@ -10,9 +11,36 @@ import {
   posTone,
   slopeText,
   statusTone,
+  TF_HELP,
   TF_TITLE,
 } from '../format';
 import { ChannelChart } from './ChannelChart';
+
+function cardHelp(channel: ChannelSnapshot): string | undefined {
+  const help = TF_HELP[channel.timeframe];
+  if (!help) return undefined;
+  const w = channel.window;
+  return w ? `${help}\nWindow ${w.label} · ${w.bars} closed ${w.sourceTimeframe} candles` : help;
+}
+
+/** Placeholder for a context the bridge has not published yet; the other cards render independently. */
+export function ChannelCardPending({ timeframe }: { timeframe: ChannelTimeframe }) {
+  return (
+    <div className={`ca-card tf-${timeframe.toLowerCase()} dir-unknown invalid pending`} role="status" title={TF_HELP[timeframe]}>
+      <header>
+        <span className="ca-tf">{timeframe}</span>
+        <span className="ca-label">{TF_TITLE[timeframe]}</span>
+        <span className="ca-head-pills">
+          <span className="ca-status muted">● Loading</span>
+        </span>
+      </header>
+      <div className="ca-novalid">
+        <b>AWAITING FIRST CALCULATION</b>
+        <span>The bridge has not published this context for the selected instrument yet.</span>
+      </div>
+    </div>
+  );
+}
 
 export function ChannelCard({ channel, onOpen }: { channel: ChannelSnapshot; onOpen: () => void }) {
   const valid = isValid(channel);
@@ -24,7 +52,8 @@ export function ChannelCard({ channel, onOpen }: { channel: ChannelSnapshot; onO
   const tone = posTone(dir, pos);
   const phase = displayPhase(channel);
   const d = channel.digits;
-  const primary = valid && channel.relationship === 'PRIMARY';
+  const primary = valid && channel.relationship === 'PRIMARY' && !isContext(channel);
+  const stale = channel.dataStatus === 'STALE';
   return (
     <button
       type="button"
@@ -34,14 +63,17 @@ export function ChannelCard({ channel, onOpen }: { channel: ChannelSnapshot; onO
     >
       <header>
         <span className="ca-tf">{channel.timeframe}</span>
-        <span className="ca-label">{TF_TITLE[channel.timeframe]}</span>
+        <span className="ca-label" title={cardHelp(channel)}>
+          {TF_TITLE[channel.timeframe]}
+        </span>
         <span className="ca-head-pills">
           <span className={`ca-pill ${dirClass(dir)}`}>{show ? dir : 'NONE'}</span>
           {primary ? (
             <span className="ca-primary-tag">PRIMARY</span>
           ) : (
-            <span className={`ca-status ${statusTone(channel.status)}`}>
+            <span className={`ca-status ${stale ? 'warn' : statusTone(channel.status)}`} title={stale ? channel.dataReason : undefined}>
               ● {channel.status === 'ACTIVE' ? 'Active' : human(channel.status)}
+              {stale ? ' · Stale' : ''}
             </span>
           )}
         </span>

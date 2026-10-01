@@ -316,6 +316,9 @@ export type AutonomyDecision = {
 export type OpportunityHypothesis = {
   instrument?: string;
   opportunityFamily?: string;
+  opportunityType?: string;
+  opportunityTypeName?: string;
+  opportunityId?: string;
   TiTLevel?: string | null;
   direction?: string;
   status?: string;
@@ -354,6 +357,19 @@ export type AutonomyState = {
   } | null;
   opportunity?: {
     run?: { status?: string; message?: string };
+    framework?: {
+      frameworkVersion?: string;
+      generatedAt?: string;
+      summary?: { hypotheses?: number; byType?: Record<string, number>; byLifecycle?: Record<string, number>; byMode?: Record<string, number>; op01?: Record<string, number> };
+      hypotheses?: {
+        opportunityId: string; opportunityType: string; opportunityName?: string; badge?: string; symbol: string; direction?: string; side?: string;
+        mode?: string; lifecycle?: string; stage?: number; parentTimeframe?: string | null; executionTimeframe?: string | null; detectorState?: string;
+        confirmationState?: string; missingEvidence?: string[]; waitingFor?: string | null; confidence?: number; entryQuality?: string | null;
+        opportunityContext?: string[]; TiTLevel?: string | null; channelRole?: string | null;
+      }[];
+      errors?: number;
+      durationMs?: number;
+    } | null;
     summary?: {
       scanned?: number; universe?: number; normal?: number; tit?: number; L1?: number; L2?: number; L3?: number; L4?: number; xau?: string;
       detected?: number;

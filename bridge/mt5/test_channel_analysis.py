@@ -98,7 +98,7 @@ class Hierarchy(unittest.TestCase):
         ch = nested_example()
         before = copy.deepcopy({tf: ch[tf]["definition"] for tf in ch})
         edges = ca.build_hierarchy(ch)
-        rel = {tf: ch[tf]["relationship"] for tf in ca.TIMEFRAMES}
+        rel = {tf: ch[tf]["relationship"] for tf in ca.CORE_TIMEFRAMES}
         self.assertEqual(rel, {"Y": "UNRESOLVED", "Q": "UNRESOLVED", "MN": "PRIMARY", "W": "CORRECTIVE", "D1": "ALIGNED",
                                "H8": "COUNTER_CORRECTION", "H1": "NESTED_CORRECTION"})
         self.assertEqual({tf: ch[tf]["definition"] for tf in ch}, before, "hierarchy must never change channel geometry")

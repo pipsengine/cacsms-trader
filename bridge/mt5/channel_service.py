@@ -1,9 +1,10 @@
-"""Channel Analysis autonomous runner: Stage 1 closed candles -> independent Y/Q/MN/W/D1/H8/H1 channels ->
+"""Channel Analysis autonomous runner: Stage 1 closed candles -> independent Y/YTD/HY/Q/MN/W/D1/H8/H1 channels ->
 trend-within-trend hierarchy -> persisted state -> Market World Model / event bus.
 
 Runs on a bridge background thread for all 29 instruments, independent of any browser session and of Market Scanner
-promotion. Only the timeframes whose source candles changed are recalculated (MN1 feeds Y/Q/MN, W1 feeds W, D1/H8/H1
-feed themselves); the hierarchy and interpretation of that instrument are rebuilt after every recalculation. Live
+promotion. Only the timeframes whose source candles changed are recalculated (MN1 feeds Y/Q/MN, W1 feeds W, D1 feeds
+D1 and the derived YTD/HY windows from one read, H8/H1 feed themselves; a calendar-year change also rebuilds YTD);
+the hierarchy and interpretation of that instrument are rebuilt after every recalculation. Live
 price only updates positions and emits boundary approach / intrabar breach events; closed candles alone change a
 channel. Operator re-analysis is a diagnostic that forces a recalculation through the same path.
 """
@@ -230,11 +231,19 @@ class ChannelService:
             for (sym, src), v in sig.items():
                 if self._series_sig.get((sym, src)) != v and sym in SYMBOLS:
                     self.mark([sym], f"STAGE1_DATA_CHANGE {src}", list(ca.DERIVED[src]))
+            now = self.server_now()
+            for sym in SYMBOLS:
+                cached = self._cache.get(sym) or {}
+                expired = [tf for tf in ca.CONTEXT_TIMEFRAMES if tf in cached and ca.window_expired(cached[tf], now)]
+                if expired:
+                    self.mark([sym], "WINDOW_ROLLOVER", expired)
         self._series_sig = sig
 
     def _needs(self, sym: str, tf: str, series: dict[tuple[str, str], dict[str, Any]]) -> bool:
         snap = (self._cache.get(sym) or {}).get(tf)
         if not snap or snap.get("configVersion") != ca.CONFIG["version"]:
+            return True
+        if ca.window_expired(snap, self.server_now()):
             return True
         row = series.get((sym, ca.SOURCE_TF[tf]))
         latest = row.get("latest_ts") if row else None
@@ -286,7 +295,8 @@ class ChannelService:
                 "analysedNow": ok, "failedNow": failed, "newEvents": new_events, "triggers": triggers[:12],
                 "recalculated": {s: t for s, t in list(recalculated.items())[:29]},
                 "runs": int(self.meta.get("runs") or 0) + 1, "summary": summary,
-                "config": {"service": CONFIG, "engine": ca.CONFIG, "macroTimeframes": vision.MACRO_TF_CFG},
+                "config": {"service": CONFIG, "engine": ca.CONFIG, "macroTimeframes": vision.MACRO_TF_CFG,
+                           "windowTimeframes": vision.WINDOW_TF_CFG, "windows": ca.WINDOWS},
             })
             cs.save_meta(self.meta)
             if changed and self.on_change:
@@ -296,13 +306,31 @@ class ChannelService:
                     traceback.print_exc()
             return {"analysed": ok, "failed": failed, "newEvents": new_events, "changed": changed, "runId": run_id}
 
-    def load_bars(self, sym: str, tf: str, mn1: list[tuple] | None = None) -> list[tuple]:
+    @staticmethod
+    def source_need(src: str) -> int:
+        """Closed source bars covering every context derived from `src` (D1 also feeds the YTD/HY windows)."""
+        return max(int(vision.tf_cfg(t)["lookback"]) for t in ca.DERIVED[src]) + int(ca.CONFIG["extraBars"])
+
+    def load_bars(self, sym: str, tf: str, mn1: list[tuple] | None = None, rows: list[tuple] | None = None) -> list[tuple]:
+        """Bars for one context. `rows` is an already-read source series so D1, YTD and HY share one query.
+        Derived windows receive the whole source series; analyse_timeframe cuts the window."""
         need = vision.tf_cfg(tf)["lookback"] + ca.CONFIG["extraBars"]
         src = ca.SOURCE_TF[tf]
         if src == "MN1":
             rows = mn1 if mn1 is not None else hs.candle_tail(sym, "MN1", CONFIG["mn1History"])
             return ca.aggregate(rows, tf)[-need:]
-        return ca.aggregate(hs.candle_tail(sym, src, need), tf)
+        if rows is None:
+            rows = hs.candle_tail(sym, src, self.source_need(src))
+        if tf in ca.WINDOWS:
+            return list(rows)
+        return ca.aggregate(rows[-need:], tf)
+
+    def load_all_bars(self, sym: str, tfs: list[str] | tuple[str, ...]) -> dict[str, list[tuple]]:
+        """One Stage 1 read per source series for the requested contexts."""
+        sources: dict[str, list[tuple]] = {}
+        for src in dict.fromkeys(ca.SOURCE_TF[t] for t in tfs):
+            sources[src] = hs.candle_tail(sym, src, CONFIG["mn1History"] if src == "MN1" else self.source_need(src))
+        return {tf: self.load_bars(sym, tf, sources.get("MN1"), sources[ca.SOURCE_TF[tf]]) for tf in tfs}
 
     def server_now(self) -> int:
         """Current time on the candle clock (broker server time)."""
@@ -315,12 +343,11 @@ class ChannelService:
     def analyse_symbol(self, sym: str, tfs: list[str], series: dict[tuple[str, str], dict[str, Any]], trigger: str, run_id: int) -> tuple[bool, int]:
         now = self.server_now()
         prev = copy.deepcopy(self._cache.get(sym) or {})
-        mn1 = hs.candle_tail(sym, "MN1", CONFIG["mn1History"]) if any(ca.SOURCE_TF[t] == "MN1" for t in tfs) else None
         channels = copy.deepcopy(prev)
+        all_bars = self.load_all_bars(sym, tfs)
         for tf in tfs:
             row = series.get((sym, ca.SOURCE_TF[tf]))
-            bars = self.load_bars(sym, tf, mn1)
-            snap = ca.analyse_timeframe(sym, tf, bars, data_state(tf, row), now)
+            snap = ca.analyse_timeframe(sym, tf, all_bars[tf], data_state(tf, row), now)
             snap["sourceBarTs"] = row.get("latest_ts") if row else None
             channels[tf] = snap
         edges = ca.build_hierarchy(channels)
@@ -402,9 +429,9 @@ class ChannelService:
         return self._live.get(sym)
 
     def summary(self) -> dict[str, Any]:
-        analysed = [s for s in SYMBOLS if len(self._cache.get(s) or {}) == len(ca.TIMEFRAMES)]
+        analysed = [s for s in SYMBOLS if all(tf in (self._cache.get(s) or {}) for tf in ca.TIMEFRAMES)]
         valid = sum(1 for s in analysed for tf in ca.TIMEFRAMES if ca.is_valid(self._cache[s][tf]))
-        nested = sum(1 for s in analysed for tf in ca.TIMEFRAMES
+        nested = sum(1 for s in analysed for tf in ca.CORE_TIMEFRAMES
                      if self._cache[s][tf].get("relationship") in ("CORRECTIVE", "COUNTER_CORRECTION", "NESTED_CORRECTION"))
         by_tf = {tf: sum(1 for s in analysed if ca.is_valid(self._cache[s][tf])) for tf in ca.TIMEFRAMES}
         return {"analysed": len(analysed), "validChannels": valid, "nested": nested, "validByTimeframe": by_tf}
@@ -414,8 +441,8 @@ class ChannelService:
         for s in SYMBOLS:
             ch = self._cache.get(s) or {}
             out.append({"symbol": s, "assetClass": "METAL" if s.startswith(("XAU", "XAG")) else "FX",
-                        "analysed": len(ch) == len(ca.TIMEFRAMES),
-                        "validChannels": sum(1 for c in ch.values() if ca.is_valid(c))})
+                        "analysed": all(tf in ch for tf in ca.TIMEFRAMES),
+                        "validChannels": sum(1 for tf in ca.TIMEFRAMES if ca.is_valid(ch.get(tf)))})
         return out
 
     def world_summary(self, sym: str) -> dict[str, Any]:

@@ -89,8 +89,36 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
+const slice = <T extends { time: number }>(rows: T[], from: number, count: number) => {
+  const i = rows.findIndex((r) => r.time === from);
+  return i < 0 ? [] : rows.slice(i, i + count);
+};
+
+/** Resolves the bridge's shared D1 chart series (one copy for D1/YTD/HY) back into per-context candles and lines. */
+export function expandSharedSeries(data: ChannelAnalysisSnapshot): ChannelAnalysisSnapshot {
+  const sel = data.selected;
+  if (!sel) return data;
+  const { sharedCandles = {}, ...rest } = sel;
+  const channels = { ...sel.channels };
+  for (const tf of Object.keys(channels) as ChannelTimeframe[]) {
+    const ch = channels[tf];
+    if (ch?.candlesRef) {
+      const { candlesRef, ...plain } = ch;
+      channels[tf] = { ...plain, candles: slice(sharedCandles[candlesRef.source] ?? [], candlesRef.from, candlesRef.count) };
+    }
+  }
+  for (const tf of Object.keys(channels) as ChannelTimeframe[]) {
+    const ch = channels[tf];
+    if (ch?.linesRef) {
+      const { linesRef, ...plain } = ch;
+      channels[tf] = { ...plain, lines: slice(channels[linesRef.timeframe]?.lines ?? [], linesRef.from, linesRef.count) };
+    }
+  }
+  return { ...data, selected: { ...rest, channels } };
+}
+
 export const fetchChannelSnapshot = (instrument: string) =>
-  request<ChannelAnalysisSnapshot>(`/channels/snapshot?instrument=${encodeURIComponent(instrument)}`);
+  request<ChannelAnalysisSnapshot>(`/channels/snapshot?instrument=${encodeURIComponent(instrument)}`).then(expandSharedSeries);
 
 export const fetchChannelLive = (instrument: string) =>
   request<ChannelLiveQuote>(`/channels/live?instrument=${encodeURIComponent(instrument)}`);

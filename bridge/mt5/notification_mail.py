@@ -139,12 +139,22 @@ def render(event_type: str, payload: dict[str, Any], cfg: dict[str, Any] | None 
         "ORDER_REJECTED": "Order Rejected",
         "POSITION_CLOSED": "Position Closed",
         "NOTIFICATION_TEST": "Email Notification Test",
+        "OPPORTUNITY_DISCOVERED": "Opportunity Discovered",
+        "OPPORTUNITY_CONFIRMING": "Opportunity Confirming",
+        "OPPORTUNITY_READY_FOR_RISK": "Opportunity Ready for Risk",
+        "OPPORTUNITY_AUTHORIZED": "Opportunity Authorized",
+        "OPPORTUNITY_INVALIDATED": "Opportunity Invalidated",
     }
     title = titles.get(event_type, event_type.replace("_", " ").title())
+    op_type = payload.get("opportunityType")
+    op_label = f"{op_type} {payload.get('opportunityTypeName') or ''}".strip() if op_type else None
     if event_type == "NOTIFICATION_TEST":
         subject = "PipsEngine — Email Notification Test"
+    elif event_type.startswith("OPPORTUNITY_"):
+        mode = payload.get("mode")
+        subject = (f"PipsEngine — {symbol} {op_type or ''} {title}" + (f" [{mode}]" if mode and mode != "PRODUCTION" else "")).replace("  ", " ").strip()
     elif event_type in ("P1_READY_FOR_RISK", "P2_READY_FOR_RISK"):
-        subject = f"PipsEngine — {symbol} {level} {title}".replace("  ", " ").strip()
+        subject = (f"PipsEngine — {symbol} {level} {title}" + (f" · {op_type}" if op_type else "")).replace("  ", " ").strip()
     elif event_type in ("P1_AUTHORIZED", "P2_AUTHORIZED"):
         leg = "P1" if event_type.startswith("P1") else "P2"
         subject = f"PipsEngine — {symbol} {leg} Authorized"
@@ -191,6 +201,7 @@ def render(event_type: str, payload: dict[str, Any], cfg: dict[str, Any] | None 
             ("Instrument", symbol),
             ("Direction", direction),
             ("TiT Level", level),
+            ("Opportunity", op_label),
             ("Opportunity Family", payload.get("opportunityFamily")),
             ("Break Level", payload.get("breakPrice") or payload.get("boundaryPrice")),
             ("Channel Break", payload.get("channelBreak")),
@@ -250,6 +261,26 @@ def render(event_type: str, payload: dict[str, Any], cfg: dict[str, Any] | None 
             ("Holding", payload.get("holding")),
         ]
         banner, color = "POSITION CLOSED", "#1d4e89"
+    elif event_type.startswith("OPPORTUNITY_"):
+        pairs = [
+            ("Status", title.upper() + ("" if event_type == "OPPORTUNITY_AUTHORIZED" else " — not an authorization")),
+            ("Opportunity", op_label),
+            ("Mode", payload.get("mode")),
+            ("Instrument", symbol),
+            ("Direction", direction),
+            ("TiT Level", level or None),
+            ("Lifecycle", payload.get("lifecycle")),
+            ("Confirmation", payload.get("confirmationState")),
+            ("Execution Timeframe", tf or None),
+            ("Missing Evidence", payload.get("missing")),
+            ("Invalidation", payload.get("invalidation")),
+            ("Target", payload.get("target")),
+            ("Detail", payload.get("reason")),
+            ("Stage 8", payload.get("stage8")),
+            ("Data Freshness", payload.get("freshness")),
+            ("Event Time UTC", utc),
+        ]
+        banner, color = title.upper(), "#1d4e89"
     else:
         banner, color = _direction_banner(direction if event_type == "CHANNEL_BREAK_CONFIRMED" else None)
         if event_type != "CHANNEL_BREAK_CONFIRMED":

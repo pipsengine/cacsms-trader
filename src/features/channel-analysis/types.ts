@@ -1,7 +1,9 @@
 /** Channel Analysis contract — mirrors bridge/mt5/channel_analysis.py and GET /channels/snapshot. */
-export type ChannelTimeframe = 'Y' | 'Q' | 'MN' | 'W' | 'D1' | 'H8' | 'H1';
+/** YTD and HY are derived analysis windows on closed D1 candles, not broker timeframes. */
+export type ChannelTimeframe = 'Y' | 'YTD' | 'HY' | 'Q' | 'MN' | 'W' | 'D1' | 'H8' | 'H1';
+export type HierarchyRole = 'CORE' | 'CONTEXT' | 'EXECUTION';
 export type ChannelDirection = 'BULLISH' | 'BEARISH' | 'RANGE' | 'UNKNOWN';
-export type ChannelStatus = 'NO_CHANNEL' | 'FORMING' | 'ACTIVE' | 'WEAKENING' | 'BROKEN' | 'RETESTING' | 'INVALIDATED';
+export type ChannelStatus = 'NO_CHANNEL' | 'FORMING' | 'VALIDATED' | 'ACTIVE' | 'WEAKENING' | 'BROKEN' | 'RETESTING' | 'INVALIDATED';
 export type ChannelRelationship =
   | 'PRIMARY'
   | 'ALIGNED'
@@ -137,11 +139,27 @@ export interface LiveView {
   distanceUpperAtr?: number | null;
   distanceLowerAtr?: number | null;
 }
+export interface ChannelWindow {
+  type: 'CALENDAR_YTD' | 'ROLLING_MONTHS';
+  months: number | null;
+  sourceTimeframe: string;
+  definition: string;
+  start: number;
+  end: number | null;
+  firstBarTime: number | null;
+  lastBarTime: number | null;
+  bars: number;
+  warmupBars: number;
+  label: string;
+}
 export interface ChannelSnapshot {
   instrument: string;
   timeframe: ChannelTimeframe;
   label: string;
   sourceTimeframe: string;
+  /** Older persisted snapshots predate this field and are core contexts. */
+  hierarchyRole?: HierarchyRole;
+  window?: ChannelWindow | null;
   direction: ChannelDirection;
   trend: ChannelDirection | null;
   strength: string | null;
@@ -187,6 +205,9 @@ export interface ChannelSnapshot {
   live: LiveView | null;
   candles: Candle[];
   lines: ChannelLinePoint[];
+  /** Transport only: resolved by expandSharedSeries before the snapshot reaches the store. */
+  candlesRef?: { source: string; from: number; count: number };
+  linesRef?: { timeframe: ChannelTimeframe; from: number; count: number };
 }
 export interface HierarchyEdge {
   parent: ChannelTimeframe;
@@ -195,6 +216,20 @@ export interface HierarchyEdge {
   relationship: ChannelRelationship;
   confidence: number;
   explanation: string;
+  /** False for YTD/HY: related for context, never part of the scored chain. */
+  scored?: boolean;
+}
+export interface ContextChannelSummary {
+  direction: ChannelDirection;
+  status: ChannelStatus;
+  phase: string;
+  relationship: ChannelRelationship;
+  relationshipVia: ChannelTimeframe | null;
+  confidence: number;
+  position: number | null;
+  channelId: string | null;
+  dataStatus: DataStatus;
+  window: ChannelWindow | null;
 }
 export interface KeyLevel {
   timeframe: ChannelTimeframe;
@@ -221,6 +256,10 @@ export interface StructureInterpretation {
   validTimeframes: ChannelTimeframe[];
   unresolvedTimeframes: ChannelTimeframe[];
   narrative: string;
+  scoredTimeframes?: ChannelTimeframe[];
+  contextTimeframes?: ChannelTimeframe[];
+  validContextTimeframes?: ChannelTimeframe[];
+  context?: Partial<Record<ChannelTimeframe, ContextChannelSummary>>;
 }
 export interface LifecycleRecord {
   channelId: string;
@@ -248,10 +287,12 @@ export interface InstrumentChannelState {
   runId: number;
   stateVersion: string;
   trigger: string | null;
-  channels: Record<ChannelTimeframe, ChannelSnapshot>;
+  /** A context is absent until its first run has been published (e.g. right after YTD/HY were introduced). */
+  channels: Partial<Record<ChannelTimeframe, ChannelSnapshot>>;
   hierarchy: HierarchyEdge[];
   interpretation: StructureInterpretation;
   lifecycle: Partial<Record<ChannelTimeframe, LifecycleRecord[]>>;
+  sharedCandles?: Record<string, Candle[]>;
 }
 export interface ChannelUniverseItem {
   symbol: string;
@@ -293,5 +334,6 @@ export interface ChannelAnalysisSnapshot {
   selected: InstrumentChannelState | null;
   events: ChannelAnalysisEvent[];
   latencyMs?: number;
+  timings?: { storeMs: number; barsMs: number; chartMs: number; marketMs: number; sourceReads: number; contexts: number };
   message?: string;
 }

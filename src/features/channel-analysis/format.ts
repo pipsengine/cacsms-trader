@@ -1,8 +1,11 @@
 import type { ChannelDirection, ChannelRelationship, ChannelSnapshot, ChannelStatus, ChannelTimeframe } from './types';
 
-export const TIMEFRAMES: ChannelTimeframe[] = ['Y', 'Q', 'MN', 'W', 'D1', 'H8', 'H1'];
+/** Canonical hierarchy, same order as channel_analysis.TIMEFRAMES (guarded by test_channel_windows). Never sort. */
+export const TIMEFRAMES: ChannelTimeframe[] = ['Y', 'YTD', 'HY', 'Q', 'MN', 'W', 'D1', 'H8', 'H1'];
 export const TF_LABEL: Record<ChannelTimeframe, string> = {
   Y: 'Yearly',
+  YTD: 'Year to Date',
+  HY: '6 Months',
   Q: 'Quarterly',
   MN: 'Monthly',
   W: 'Weekly',
@@ -13,6 +16,8 @@ export const TF_LABEL: Record<ChannelTimeframe, string> = {
 /** Card titles as shown on the Channel Analysis design. */
 export const TF_TITLE: Record<ChannelTimeframe, string> = {
   Y: 'Yearly (1Y)',
+  YTD: 'Year to Date',
+  HY: '6 Months',
   Q: 'Quarterly (3M)',
   MN: 'Monthly (1M)',
   W: 'Weekly (1W)',
@@ -20,9 +25,17 @@ export const TF_TITLE: Record<ChannelTimeframe, string> = {
   H8: '8 Hours',
   H1: '1 Hour',
 };
-export const GROUP_LABEL = { primary: 'Primary (Y–MN)', intermediate: 'Intermediate (W–D1)', current: 'Current (H8–H1)' };
+export const TF_HELP: Partial<Record<ChannelTimeframe, string>> = {
+  YTD: 'Channel structure from the start of the current year through the latest available market data.',
+  HY: 'Rolling six-month channel structure ending at the latest available market data.',
+};
+export const GROUP_LABEL = { primary: 'Primary (Y·Q·MN)', intermediate: 'Intermediate (W–D1)', current: 'Current (H8–H1)', context: 'Context (YTD·HY)' };
 
-export const VALID_STATUSES: ChannelStatus[] = ['ACTIVE', 'WEAKENING', 'BROKEN', 'RETESTING'];
+/** YTD/HY are strategic context: displayed and related, never counted in the scored hierarchy. */
+export const isContext = (c: ChannelSnapshot | undefined | null) => c?.hierarchyRole === 'CONTEXT';
+
+/** Same set as channel_analysis.VALID_STATUSES / vision.CONFIRMED_STATUSES (guarded by test_channel_windows). */
+export const VALID_STATUSES: ChannelStatus[] = ['VALIDATED', 'ACTIVE', 'WEAKENING', 'BROKEN', 'RETESTING'];
 export const isValid = (c: ChannelSnapshot | undefined | null) =>
   Boolean(c && VALID_STATUSES.includes(c.status) && c.direction !== 'UNKNOWN');
 
@@ -87,7 +100,7 @@ export function barTime(ms: number | null | undefined, tf?: ChannelTimeframe): s
   if (tf === 'Y') return String(d.getUTCFullYear());
   if (tf === 'Q') return `Q${Math.floor(d.getUTCMonth() / 3) + 1} ${d.getUTCFullYear()}`;
   if (tf === 'MN') return `${MON[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
-  if (tf === 'W' || tf === 'D1') return date;
+  if (tf === 'W' || tf === 'D1' || tf === 'YTD' || tf === 'HY') return date;
   return `${date} ${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')}`;
 }
 
@@ -108,7 +121,7 @@ export function statusLabel(c: ChannelSnapshot): string {
 export const geometryWord = (trend: ChannelDirection) => (trend === 'BULLISH' ? 'ascending' : trend === 'BEARISH' ? 'descending' : 'horizontal');
 
 export function statusTone(s: ChannelStatus): string {
-  if (s === 'ACTIVE') return 'good';
+  if (s === 'ACTIVE' || s === 'VALIDATED') return 'good';
   if (s === 'BROKEN' || s === 'INVALIDATED') return 'bad';
   if (s === 'WEAKENING' || s === 'RETESTING') return 'warn';
   if (s === 'FORMING') return 'info';
@@ -150,7 +163,7 @@ const REL_PHASE: Record<ChannelRelationship, string> = {
 /** Footer phase: primary keeps the engine phase; extremes read as near resistance/support; otherwise the hierarchy role. */
 export function displayPhase(c: ChannelSnapshot): string {
   if (!isValid(c)) return c.status === 'FORMING' ? 'FORMING' : 'NONE';
-  if (c.relationship === 'PRIMARY') return human(c.phase).toUpperCase();
+  if (c.relationship === 'PRIMARY' || isContext(c)) return human(c.phase).toUpperCase();
   const pos = currentView(c).position;
   if (pos != null && c.direction === 'BULLISH' && pos >= 80) return 'NEAR RESISTANCE';
   if (pos != null && c.direction === 'BEARISH' && pos <= 20) return 'NEAR SUPPORT';
@@ -180,6 +193,7 @@ const TREND_CAPTION: Record<ChannelRelationship, string> = {
 
 export function trendCaption(c: ChannelSnapshot): string {
   if (!isValid(c)) return 'No channel';
+  if (isContext(c)) return c.relationship === 'PRIMARY' ? 'Context' : TREND_CAPTION[c.relationship];
   if (c.relationship === 'PRIMARY') return 'Primary Trend';
   const pos = currentView(c).position;
   if (pos != null && c.direction === 'BULLISH' && pos >= 80) return 'Near Resistance';

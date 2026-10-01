@@ -7,6 +7,7 @@ import {
   dirClass,
   geometryWord,
   human,
+  isContext,
   isoAge,
   isValid,
   num,
@@ -70,6 +71,7 @@ export function ChannelDetailModal({ channel, state, events, onClose, onReanalys
     ['Last closed candle', barTime(c.lastCandleTime, c.timeframe)],
     ['Data', `${human(c.dataStatus)} · ${c.bars}/${c.requiredBars} bars`],
   ];
+  if (c.window) stats.push(['Window', `${c.window.label} · ${c.window.bars} ${c.window.sourceTimeframe} bars`]);
 
   return (
     <div
@@ -145,7 +147,9 @@ export function ChannelDetailModal({ channel, state, events, onClose, onReanalys
                     {parent
                       ? `${parent.timeframe} ${parent.direction.toLowerCase()} channel (${statusLabel(parent)}, ${pct(parent.confidence)})`
                       : c.relationship === 'PRIMARY'
-                        ? 'Highest valid channel in the hierarchy'
+                        ? isContext(c)
+                          ? 'No valid channel above this context (strategic context, not scored)'
+                          : 'Highest valid channel in the hierarchy'
                         : '—'}
                   </dd>
                 </div>
@@ -283,7 +287,11 @@ export function ChannelDetailModal({ channel, state, events, onClose, onReanalys
           <div role="tabpanel" className="ca-evidence">
             <p>
               {c.evidence.closedCandles} validated closed {c.timeframe} candles
-              {c.timeframe === 'Y' || c.timeframe === 'Q' ? ` (aggregated from complete ${c.sourceTimeframe} months)` : ''} · ATR{' '}
+              {c.timeframe === 'Y' || c.timeframe === 'Q' ? ` (aggregated from complete ${c.sourceTimeframe} months)` : ''}
+              {c.window
+                ? ` (${c.window.definition}: ${c.window.label}, ${c.window.bars} closed ${c.window.sourceTimeframe} candles; ATR warmed on ${c.window.warmupBars} prior bars)`
+                : ''}{' '}
+              · ATR{' '}
               {num(c.evidence.atr, d)} · {c.evidence.swings.length} confirmed swings · config {c.configVersion} · analysed{' '}
               {new Date(c.analysedAt).toLocaleString()}
             </p>

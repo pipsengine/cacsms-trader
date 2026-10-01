@@ -8,6 +8,7 @@ import {
   GROUP_LABEL,
   human,
   instrumentFlag,
+  isContext,
   isoAge,
   isValid,
   num,
@@ -34,15 +35,18 @@ export function TrendMap({ state }: { state: InstrumentChannelState }) {
         {TIMEFRAMES.map((tf, i) => {
           const c = state.channels[tf];
           const ok = isValid(c);
-          const pos = ok ? (c.live?.position ?? c.position) : null;
+          const pos = c && ok ? (c.live?.position ?? c.position) : null;
           return (
             <li key={tf} className="ca-trend-item">
-              <div className={`ca-node tf-${tf.toLowerCase()} ${ok ? dirClass(c.direction) : 'none'}`} title={c.relationshipReason || c.reason}>
+              <div
+                className={`ca-node tf-${tf.toLowerCase()} ${c && ok ? dirClass(c.direction) : 'none'}${isContext(c) ? ' context' : ''}`}
+                title={c ? c.relationshipReason || c.reason : 'Awaiting first calculation'}
+              >
                 <b className="ca-node-tf">{tf}</b>
-                <strong aria-hidden="true">{ok ? DIR_ARROW[c.direction] ?? '·' : '∅'}</strong>
-                <em>{ok ? c.direction : 'NO CHANNEL'}</em>
-                <small className="cap">{ok ? trendCaption(c) : human(c.status)}</small>
-                <small>{ok ? `Position ${pct(pos)}` : statusLabel(c)}</small>
+                <strong aria-hidden="true">{c && ok ? DIR_ARROW[c.direction] ?? '·' : '∅'}</strong>
+                <em>{c && ok ? c.direction : c ? 'NO CHANNEL' : 'LOADING'}</em>
+                <small className="cap">{c ? (ok ? trendCaption(c) : human(c.status)) : '—'}</small>
+                <small>{c ? (ok ? `Position ${pct(pos)}` : statusLabel(c)) : '—'}</small>
               </div>
               {i < TIMEFRAMES.length - 1 && (
                 <div className="ca-edge" aria-hidden="true">
@@ -97,6 +101,20 @@ function currentBlurb(state: InstrumentChannelState) {
   if (x.currentDirection === 'UNKNOWN') return 'Current leg unresolved';
   if (opposes(x.currentDirection, x.primaryDirection)) return 'Short-term pressure against the primary trend';
   return 'Current leg aligned with the higher-timeframe trend';
+}
+
+const CONTEXT_TFS: ChannelTimeframe[] = ['YTD', 'HY'];
+
+function contextBlurb(state: InstrumentChannelState) {
+  const x = state.interpretation;
+  if (!x.context) return 'Awaiting first context calculation';
+  const valid = CONTEXT_TFS.filter((tf) => isValid(state.channels[tf]));
+  if (!valid.length) return 'No validated year-to-date or six-month channel (context only, not scored)';
+  const ref = x.primaryDirection;
+  const against = valid.filter((tf) => opposes(state.channels[tf]!.direction, ref));
+  if (ref === 'UNKNOWN') return `${valid.join(' & ')} validated; primary structure unresolved (context only, not scored)`;
+  if (against.length) return `${against.join(' & ')} running against the primary trend (context only, not scored)`;
+  return `Consistent with the primary trend (context only, not scored)`;
 }
 
 function stateBlurb(x: StructureInterpretation) {
@@ -162,6 +180,21 @@ export function StructureInterpretationPanel({ state }: { state: InstrumentChann
           <b className={`ca-dir-pill ${dirClass(x.currentDirection)}`}>{x.currentDirection}</b>
           <span>{currentBlurb(state)}</span>
         </div>
+        <div className="ca-interp-row" title="YTD and HY are displayed and related to the hierarchy but carry no weight in market state or structural confidence.">
+          <span className="k">{GROUP_LABEL.context}</span>
+          <span className="ca-context-pills">
+            {CONTEXT_TFS.map((tf) => {
+              const c = state.channels[tf];
+              const dir = c && isValid(c) ? c.direction : 'UNKNOWN';
+              return (
+                <b key={tf} className={`ca-dir-pill ${dirClass(dir)}`}>
+                  {tf} {dir === 'UNKNOWN' ? (c ? (c.status === 'FORMING' ? 'FORMING' : 'NONE') : '—') : dir}
+                </b>
+              );
+            })}
+          </span>
+          <span>{contextBlurb(state)}</span>
+        </div>
         <div className="ca-interp-row">
           <span className="k">Market State</span>
           <b className={`ca-dir-pill state ${x.marketState.toLowerCase()}`}>{human(x.marketState).toUpperCase()}</b>
@@ -189,7 +222,7 @@ export function StructureInterpretationPanel({ state }: { state: InstrumentChann
 
 export function ChannelSummaryStrip({ state }: { state: InstrumentChannelState }) {
   const valid = TIMEFRAMES.filter((t) => isValid(state.channels[t])).length;
-  const forming = TIMEFRAMES.filter((t) => state.channels[t].status === 'FORMING').length;
+  const forming = TIMEFRAMES.filter((t) => state.channels[t]?.status === 'FORMING').length;
   const linked = state.hierarchy.filter((e) => e.relationship !== 'UNRESOLVED').length;
   return (
     <div className="ca-summary">
@@ -200,7 +233,9 @@ export function ChannelSummaryStrip({ state }: { state: InstrumentChannelState }
       </div>
       <div>
         <small>Valid channels</small>
-        <b>{valid}/7</b>
+        <b>
+          {valid}/{TIMEFRAMES.length}
+        </b>
         <span>{forming} forming</span>
       </div>
       <div>
@@ -210,7 +245,9 @@ export function ChannelSummaryStrip({ state }: { state: InstrumentChannelState }
       </div>
       <div>
         <small>Hierarchy</small>
-        <b>{linked}/6</b>
+        <b>
+          {linked}/{TIMEFRAMES.length - 1}
+        </b>
         <span>parent-child links</span>
       </div>
     </div>
@@ -345,8 +382,8 @@ export function ChannelMasthead({
         </div>
         <div className="ca-stat">
           <small>Channels Analysed</small>
-          <b>{valid == null ? '—' : `${valid}/7`}</b>
-          <span>{valid === 7 ? 'All timeframes' : valid == null ? 'Waiting' : `${valid} valid`}</span>
+          <b>{valid == null ? '—' : `${valid}/${TIMEFRAMES.length}`}</b>
+          <span>{valid === TIMEFRAMES.length ? 'All timeframes' : valid == null ? 'Waiting' : `${valid} valid`}</span>
         </div>
         <div className="ca-stat">
           <small>Data Freshness</small>

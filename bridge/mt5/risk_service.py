@@ -276,6 +276,39 @@ class RiskService:
         except Exception:
             traceback.print_exc()
 
+    def _framework_overlay(self, result: dict[str, Any], inp: dict[str, Any], cfg: dict[str, Any]) -> None:
+        """Publishes Stage 8 states to the opportunity framework and pre-qualifies SHADOW opportunities with the same pure
+        setup rules. Shadow results are in memory only: never persisted, never authorized, never sent to Stage 9."""
+        try:
+            import opportunity_framework as fw
+            import opportunity_service
+        except ImportError:  # pragma: no cover
+            from bridge.mt5 import opportunity_framework as fw  # type: ignore
+            from bridge.mt5 import opportunity_service  # type: ignore
+        try:
+            states: dict[str, dict[str, Any]] = {}
+            for o in result.get("opportunities") or []:
+                key = str(o.get("campaignId")) if o.get("handoffKind") == "CAMPAIGN" else str(o.get("symbol"))
+                states[key] = {"state": o.get("state"), "reason": o.get("reason"), "setupState": o.get("setupState")}
+            fw.STAGE8_STATE.clear()
+            fw.STAGE8_STATE.update(states)
+            svc = opportunity_service.CURRENT
+            handoffs = list((getattr(svc, "framework", None) or {}).get("shadowHandoffs") or [])
+            shadow: dict[str, dict[str, Any]] = {}
+            if handoffs:
+                syms = sorted({h["instrument"] for h in handoffs})
+                market = {**{s: inp["market"][s] for s in syms if s in inp["market"]}}
+                missing = [s for s in syms if s not in market]
+                if missing and self.provider:
+                    market.update(self.provider.market(missing))
+                for h in handoffs:
+                    o = risk.evaluate_campaign({**h, "executable": True}, market, cfg, inp["now"])
+                    shadow[h["opportunityId"]] = {k: o.get(k) for k in ("setupState", "setupReasonCode", "setupReason", "geometry", "score")}
+            fw.SHADOW_STAGE8.clear()
+            fw.SHADOW_STAGE8.update(shadow)
+        except Exception:
+            traceback.print_exc()
+
     def tick(self) -> dict[str, Any]:
         inp = self.inputs()
         sig = self._signatures(inp)
@@ -367,6 +400,7 @@ class RiskService:
                               "expired": res["expired"], "changed": res["changed"], "durationMs": int((time.time() - started) * 1000)})
             rs.save_meta(self.meta)
             self._prev = {o["setupKey"]: o for o in result["opportunities"]}
+            self._framework_overlay(result, inp, cfg)
             if (res["changed"] or res["created"] or res["revoked"] or res["expired"]) and self.on_change:
                 try:
                     self.on_change(res)

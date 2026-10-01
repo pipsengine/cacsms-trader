@@ -148,8 +148,46 @@ def _break_confirmations(breaks: dict[str, dict[str, dict[str, Any]]], confirmat
                 confirmations.setdefault(symbol, {})[tf] = found
 
 
+def _pair_bias() -> dict[str, Any]:
+    try:
+        from db import connect
+    except ImportError:  # pragma: no cover
+        from bridge.mt5.db import connect  # type: ignore
+    with connect() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT symbol, bias FROM dbo.app_regime_pair")
+        return {symbol: bias for symbol, bias in cur.fetchall()}
+
+
+def _breakout_rows() -> list[dict[str, Any]]:
+    """Active Breakout & Retest watches plus failed breakouts from the last day (OP-09 evidence)."""
+    try:
+        import channel_breakout
+    except ImportError:  # pragma: no cover
+        from bridge.mt5 import channel_breakout  # type: ignore
+    rows = list(channel_breakout.SCANNER.active)
+    horizon = time.time() - 86400
+    seen = {row.get("candidateId") for row in rows}
+    for row in list(channel_breakout.SCANNER.history):
+        if (row.get("breakout") or {}).get("state") != "FAILED_BREAKOUT" or float(row.get("removedAt") or 0) < horizon:
+            continue
+        if row.get("candidateId") in seen:
+            continue
+        seen.add(row.get("candidateId"))
+        rows.append(row)
+    return rows
+
+
+def _bars_since(symbol: str, tf: str, since_ts: int) -> list[tuple]:
+    return hs.candle_ohlc(symbol, tf, from_ts=int(since_ts))
+
+
 def current() -> dict[str, Any]:
     return CURRENT.snapshot() if CURRENT else {"ok": True, "summary": {}, "instruments": [], "qualified": []}
+
+
+def framework_state() -> dict[str, Any] | None:
+    return CURRENT.framework if CURRENT else None
 
 CONFIG = {"loopSec": 15, "fullEverySec": 300}
 
@@ -162,6 +200,8 @@ class OpportunityService:
         self._last_ts: dict[str, int] = {}
         self.snapshot_data: dict[str, Any] = {"summary": {}, "instruments": [], "qualified": []}
         self.meta: dict[str, Any] = {"status": "STARTING", "message": "Opportunity scan starting"}
+        self.framework: dict[str, Any] | None = None
+        self._source: Any = None
         self._thread: threading.Thread | None = None
         global CURRENT
         CURRENT = self
@@ -181,7 +221,77 @@ class OpportunityService:
             self.mark(f"CANDLE {timeframe}")
 
     def snapshot(self) -> dict[str, Any]:
-        return {"ok": True, "run": self.meta, **self.snapshot_data}
+        out = {"ok": True, "run": self.meta, **self.snapshot_data}
+        try:
+            import opportunity_framework as fw
+        except ImportError:  # pragma: no cover
+            from bridge.mt5 import opportunity_framework as fw  # type: ignore
+        out["framework"] = fw.compact(self.framework)
+        return out
+
+    def _framework(self, result: dict[str, Any], channels: dict[str, dict[str, dict[str, Any]]], directions: dict[str, Any],
+                   ranks: dict[str, Any], missed: bool) -> None:
+        """Classifies every opportunity through the central contract. Shadow routes never touch `qualified`."""
+        try:
+            import economic_store
+            import opportunity_framework as fw
+            import opportunity_framework_store as fstore
+            import opportunity_types as ot
+        except ImportError:  # pragma: no cover
+            from bridge.mt5 import economic_store  # type: ignore
+            from bridge.mt5 import opportunity_framework as fw  # type: ignore
+            from bridge.mt5 import opportunity_framework_store as fstore  # type: ignore
+            from bridge.mt5 import opportunity_types as ot  # type: ignore
+        if not fw.CONFIG["enabled"]:
+            return
+        for row in result["instruments"]:
+            for h in row.get("hypotheses") or []:
+                op = ot.legacy_type(h.get("opportunityFamily"))
+                if op:
+                    h["opportunityType"], h["opportunityTypeName"] = op, ot.TYPES[op]["name"]
+        try:
+            econ = economic_store.gate_map()
+        except Exception:
+            econ = None  # every new entry fails closed
+        try:
+            bias = _pair_bias()
+        except Exception:
+            bias = {}
+        try:
+            import confirm_store
+            stage7 = {r["symbol"]: r for r in (confirm_store.load_state().get("instruments") or []) if r.get("symbol")}
+        except Exception:
+            stage7 = {}
+        try:
+            breakouts = _breakout_rows()
+        except Exception:
+            breakouts = []
+        if self._source is None:
+            self._source = fw.LiveSource()
+        try:
+            state = fw.build(SYMBOLS, channels, result, self._source, directions=directions, ranks=ranks, breakouts=breakouts, econ=econ,
+                             bias=bias, stage7=stage7, stage8=dict(fw.STAGE8_STATE), missed=missed)
+        except Exception as exc:
+            traceback.print_exc()
+            self.framework = {**(self.framework or {}), "errors": [{"detector": "build", "error": f"{type(exc).__name__}: {exc}", "ts": time.time()}]}
+            return
+        by_campaign = {h["campaignId"]: h["opportunityId"] for h in state["hypotheses"] if h["route"].endswith(":TIT") or h["route"] == "OP-01:LEGACY_H1"}
+        for row in result["instruments"]:
+            for h in row.get("hypotheses") or []:
+                if h.get("campaignId") in by_campaign:
+                    h["opportunityId"] = by_campaign[h["campaignId"]]
+        transitions: list[dict[str, Any]] = []
+        try:
+            transitions = fstore.persist(state, SYMBOLS, bars_since=_bars_since)
+        except Exception as exc:
+            traceback.print_exc()
+            state["persistError"] = f"{type(exc).__name__}: {exc}"
+        self.framework = state
+        try:
+            import notification_service as notes
+            notes.SERVICE.observe_framework(transitions)
+        except Exception:
+            traceback.print_exc()
 
     def _loop(self) -> None:
         time.sleep(8)
@@ -293,6 +403,7 @@ class OpportunityService:
             }
         result["triggers"] = triggers
         result["audits"] = [reason for row in result["instruments"] for h in row["hypotheses"] for reason in (h.get("reasons") or [])][:40]
+        self._framework(result, channels, directions, ranks, missed)
         self.snapshot_data = result
         try:
             import notification_service as notes
