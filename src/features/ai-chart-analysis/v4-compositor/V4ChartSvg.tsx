@@ -375,20 +375,6 @@ export default function V4ChartSvg({ snapshot, timeframe, timeframeOptions, onTi
                 );
               })}
               {showOverlays
-                ? model.channelLines.map((ln, i) => (
-                    <line
-                      key={`ch-${i}`}
-                      x1={ln.x1}
-                      y1={ln.y1}
-                      x2={ln.x2}
-                      y2={ln.y2}
-                      stroke={ln.stroke}
-                      strokeWidth={ln.width}
-                      strokeDasharray={ln.dash}
-                    />
-                  ))
-                : null}
-              {showOverlays
                 ? model.stPaths.map((p, i) => (
                     <path key={`st-${i}`} d={p.d} fill="none" stroke={p.color} strokeWidth={2} />
                   ))
@@ -419,6 +405,21 @@ export default function V4ChartSvg({ snapshot, timeframe, timeframeOptions, onTi
                   </g>
                 );
               })}
+              {showOverlays
+                ? model.channelLines.map((ln, i) => (
+                    <line
+                      key={`ch-${i}`}
+                      x1={ln.x1}
+                      y1={ln.y1}
+                      x2={ln.x2}
+                      y2={ln.y2}
+                      stroke={ln.stroke}
+                      strokeWidth={ln.width}
+                      strokeDasharray={ln.dash}
+                      strokeLinecap="round"
+                    />
+                  ))
+                : null}
               {showOverlays && model.scenarioPath ? (
                 <g className="aca-scenario" aria-label="AI expected path">
                   <path

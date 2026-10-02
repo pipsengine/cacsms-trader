@@ -3,6 +3,18 @@ from __future__ import annotations
 from typing import Any
 
 # Primary chart TF → Supertrend intelligence card key
+_TF_MS: dict[str, int] = {
+    "M5": 300_000,
+    "M15": 900_000,
+    "H1": 3_600_000,
+    "H8": 28_800_000,
+    "D1": 86_400_000,
+    "W": 604_800_000,
+    "MN": 2_592_000_000,
+    "Q": 7_776_000_000,
+    "YTD": 31_536_000_000,
+}
+
 _ST_KEY_FOR_PRIMARY: dict[str, str] = {
     "YTD": "Y",
     "Q": "Q",
@@ -83,14 +95,69 @@ def _line_points(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _norm_ms(t: int | float) -> int:
+    v = int(t)
+    return v if v > 1_000_000_000_000 else v * 1000
+
+
 def _window_filter(series: list[dict[str, Any]], candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not series or not candles:
         return series
-    times = sorted(int(c["time"]) for c in candles if c.get("time") is not None)
+    times = sorted(_norm_ms(c["time"]) for c in candles if c.get("time") is not None)
     if not times:
         return series
     t0, t1 = times[0], times[-1]
-    return [p for p in series if t0 <= int(p.get("time", 0)) <= t1]
+    return [p for p in series if t0 <= _norm_ms(p.get("time", 0)) <= t1]
+
+
+def _channel_lines_for_chart(
+    ch: dict[str, Any],
+    channels: dict[str, Any],
+    candles: list[dict[str, Any]],
+    primary_tf: str,
+) -> list[dict[str, Any]]:
+    """Two endpoint rows for diagonal channel rails (full series, not window-clipped to zero)."""
+    resolved = _line_points(_resolve_lines(ch, channels))
+    if len(resolved) >= 2:
+        resolved.sort(key=lambda p: _norm_ms(p["time"]))
+        return [resolved[0], resolved[-1]]
+    step = _TF_MS.get(primary_tf, 3_600_000)
+    if len(resolved) == 1 and candles:
+        l0 = resolved[0]
+        t_end = _norm_ms(candles[-1]["time"]) + step * 14
+        return [
+            l0,
+            {
+                "time": t_end,
+                "upper": l0["upper"],
+                "lower": l0["lower"],
+                "mid": l0.get("mid"),
+            },
+        ]
+    ub, lb = ch.get("upperBoundary"), ch.get("lowerBoundary")
+    if ub is not None and lb is not None and candles:
+        t0 = _norm_ms(candles[0]["time"])
+        t1 = _norm_ms(candles[-1]["time"]) + step * 14
+        mid = ch.get("midline")
+        if mid is None:
+            try:
+                mid = (float(ub) + float(lb)) / 2
+            except (TypeError, ValueError):
+                mid = None
+        row0 = {
+            "time": t0,
+            "upper": float(ub),
+            "lower": float(lb),
+            "mid": float(mid) if mid is not None else None,
+        }
+        row1 = {
+            "time": t1,
+            "upper": float(ub),
+            "lower": float(lb),
+            "mid": float(mid) if mid is not None else None,
+        }
+        return [row0, row1]
+    return []
 
 
 def _supertrend_series(supertrend: dict[str, Any] | None, primary_tf: str) -> list[dict[str, Any]]:
@@ -144,8 +211,7 @@ def build_chart_payload(
             c["complete"] = True
     if lookback > 0 and len(candles) > lookback:
         candles = candles[-lookback:]
-    channel_lines = _line_points(_resolve_lines(ch, channels))
-    channel_lines = _window_filter(channel_lines, candles)
+    channel_lines = _channel_lines_for_chart(ch, channels, candles, primary_tf)
     st_series = _window_filter(_supertrend_series(supertrend, primary_tf), candles)
     return {
         "timeframe": key,

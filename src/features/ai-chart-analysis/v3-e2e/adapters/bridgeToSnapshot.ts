@@ -55,6 +55,70 @@ function candleAt(candles: { time: number }[], ratio: number) {
   return candles[i]!;
 }
 
+type ChartLineRow = { time: number; upper: number; lower: number; mid?: number | null };
+
+type ChartViewChannel = {
+  id?: string;
+  upperStart?: { time: number; price: number };
+  upperEnd?: { time: number; price: number };
+  lowerStart?: { time: number; price: number };
+  lowerEnd?: { time: number; price: number };
+  medianStart?: { time: number; price: number };
+  medianEnd?: { time: number; price: number };
+};
+
+function channelsFromChartView(view: { channels?: ChartViewChannel[] } | undefined, tf: string) {
+  const out: AutonomousSnapshot['chart']['channels'] = [];
+  for (const ch of view?.channels || []) {
+    if (!ch.upperStart || !ch.upperEnd || !ch.lowerStart || !ch.lowerEnd) continue;
+    const entry: AutonomousSnapshot['chart']['channels'][number] = {
+      id: ch.id || `${tf}-channel`,
+      upper: [
+        { time: toMs(ch.upperStart.time), price: ch.upperStart.price },
+        { time: toMs(ch.upperEnd.time), price: ch.upperEnd.price },
+      ],
+      lower: [
+        { time: toMs(ch.lowerStart.time), price: ch.lowerStart.price },
+        { time: toMs(ch.lowerEnd.time), price: ch.lowerEnd.price },
+      ],
+    };
+    if (ch.medianStart && ch.medianEnd) {
+      entry.median = [
+        { time: toMs(ch.medianStart.time), price: ch.medianStart.price },
+        { time: toMs(ch.medianEnd.time), price: ch.medianEnd.price },
+      ];
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+function channelsFromLineRows(lines: ChartLineRow[], lastTime: number, step: number, tf: string) {
+  if (lines.length < 1) return [] as AutonomousSnapshot['chart']['channels'];
+  const sorted = [...lines].sort((a, b) => toMs(a.time) - toMs(b.time));
+  const l0 = sorted[0]!;
+  const l1 = sorted[sorted.length - 1]!;
+  const endT = Math.max(toMs(l1.time), lastTime) + step * 14;
+  const ch: AutonomousSnapshot['chart']['channels'][number] = {
+    id: `${tf}-channel`,
+    upper: [
+      { time: toMs(l0.time), price: l0.upper },
+      { time: endT, price: l1.upper },
+    ],
+    lower: [
+      { time: toMs(l0.time), price: l0.lower },
+      { time: endT, price: l1.lower },
+    ],
+  };
+  if (l0.mid != null && l1.mid != null) {
+    ch.median = [
+      { time: toMs(l0.time), price: l0.mid },
+      { time: endT, price: l1.mid },
+    ];
+  }
+  return [ch];
+}
+
 /** Bridge `/latest` payload → v3 AutonomousSnapshot (single immutable view model). */
 export function bridgePayloadToSnapshot(
   payload: AiChartAnalysisPayload,
@@ -87,32 +151,12 @@ export function bridgePayloadToSnapshot(
   const last = candles[candles.length - 1]!;
   const hints = payload.chartLevels;
   const levels = analysis?.levels;
-  const lines = payload.chart?.channelLines || payload.chart?.lines || [];
-
-  const channels: AutonomousSnapshot['chart']['channels'] = [];
-  if (lines.length >= 2) {
-    const l0 = lines[0]!;
-    const l1 = lines[lines.length - 1]!;
-    const endT = Math.max(toMs(l1.time), last.time) + step * 14;
-    const ch: AutonomousSnapshot['chart']['channels'][number] = {
-      id: `${tf}-channel`,
-      upper: [
-        { time: toMs(l0.time), price: l0.upper },
-        { time: endT, price: l1.upper },
-      ],
-      lower: [
-        { time: toMs(l0.time), price: l0.lower },
-        { time: endT, price: l1.lower },
-      ],
-    };
-    if (l0.mid != null && l1.mid != null) {
-      ch.median = [
-        { time: toMs(l0.time), price: l0.mid },
-        { time: endT, price: l1.mid },
-      ];
-    }
-    channels.push(ch);
-  }
+  const lines = (payload.chart?.channelLines || payload.chart?.lines || []) as ChartLineRow[];
+  const chartView = payload.chartView as
+    | { channels?: ChartViewChannel[]; projectedScenario?: { time: number; price: number; label?: string }[] }
+    | undefined;
+  const fromLines = channelsFromLineRows(lines, last.time, step, tf);
+  const channels = fromLines.length > 0 ? fromLines : channelsFromChartView(chartView, tf);
 
   const zones: AutonomousSnapshot['chart']['zones'] = [];
   const supU = hints?.supplyUpper ?? levels?.supply[0];
@@ -183,8 +227,7 @@ export function bridgePayloadToSnapshot(
     });
   }
 
-  const view = payload.chartView as { projectedScenario?: { time: number; price: number; label?: string }[] } | undefined;
-  let scenario: AutonomousSnapshot['chart']['scenario'] = (view?.projectedScenario || []).map((p, i) => ({
+  let scenario: AutonomousSnapshot['chart']['scenario'] = (chartView?.projectedScenario || []).map((p, i) => ({
     id: `s-${i}`,
     time: toMs(p.time),
     price: Number(p.price),

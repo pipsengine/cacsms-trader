@@ -75,6 +75,29 @@ function timeToIndex(candles: { time: number }[], t: number): number {
   return best;
 }
 
+function channelRailSegment(
+  a: { time: number; price: number },
+  b: { time: number; price: number },
+  candles: { time: number }[],
+  n: number,
+  x: (i: number) => number,
+  y: (p: number) => number,
+  extendIdx: number,
+): { x1: number; y1: number; x2: number; y2: number } {
+  const x1 = x(timeToPlotIndex(candles, a.time, n));
+  const y1 = y(a.price);
+  let x2 = x(timeToPlotIndex(candles, b.time, n));
+  let y2 = y(b.price);
+  const xExt = x(extendIdx);
+  if (xExt > x2 + 0.5) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    y2 = Math.abs(dx) > 1e-6 ? y1 + (dy / dx) * (xExt - x1) : y2;
+    x2 = xExt;
+  }
+  return { x1, y1, x2, y2 };
+}
+
 function timeToPlotIndex(candles: { time: number }[], t: number, n: number): number {
   if (!candles.length) return 0;
   const last = candles[candles.length - 1]!;
@@ -133,44 +156,38 @@ export function buildCompositorModel(snapshot: AutonomousSnapshot): CompositorMo
   const channelLines: CompositorChannelLine[] = [];
   const channel0 = ch.channels[0];
   if (channel0) {
-    const endIdx = n + 12;
+    const extendIdx = n + 12;
     const u0 = channel0.upper[0];
     const u1 = channel0.upper[channel0.upper.length - 1];
     const l0 = channel0.lower[0];
     const l1 = channel0.lower[channel0.lower.length - 1];
     if (u0 && u1) {
+      const seg = channelRailSegment(u0, u1, candles, n, x, y, extendIdx);
       channelLines.push({
-        x1: x(timeToIndex(candles, u0.time)),
-        y1: y(u0.price),
-        x2: x(endIdx),
-        y2: y(u1.price),
-        stroke: '#c7d1da',
+        ...seg,
+        stroke: '#dce4ec',
         dash: '6 4',
-        width: 1.4,
+        width: 1.6,
       });
     }
     if (l0 && l1) {
+      const seg = channelRailSegment(l0, l1, candles, n, x, y, extendIdx);
       channelLines.push({
-        x1: x(timeToIndex(candles, l0.time)),
-        y1: y(l0.price),
-        x2: x(endIdx),
-        y2: y(l1.price),
-        stroke: '#c7d1da',
+        ...seg,
+        stroke: '#dce4ec',
         dash: '6 4',
-        width: 1.4,
+        width: 1.6,
       });
     }
     const m0 = channel0.median?.[0];
     const m1 = channel0.median?.[channel0.median.length - 1];
     if (m0 && m1) {
+      const seg = channelRailSegment(m0, m1, candles, n, x, y, extendIdx);
       channelLines.push({
-        x1: x(timeToIndex(candles, m0.time)),
-        y1: y(m0.price),
-        x2: x(endIdx),
-        y2: y(m1.price),
-        stroke: '#8095a5',
+        ...seg,
+        stroke: '#9fb0bd',
         dash: '5 5',
-        width: 1,
+        width: 1.1,
       });
     }
   }
