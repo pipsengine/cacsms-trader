@@ -13,6 +13,11 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/mt5-bridge/, ''),
       },
+      '/dev/bridge-control': {
+        target: 'http://127.0.0.1:8766',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/dev\/bridge-control/, ''),
+      },
     },
   },
 });

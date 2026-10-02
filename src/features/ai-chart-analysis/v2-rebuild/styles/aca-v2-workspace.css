@@ -1,0 +1,600 @@
+/* Scoped workspace styles from CACSMS AI Chart Analysis Full Rebuild v2 (no sidebar/topbar). */
+.aca-v2-root.content {
+  padding: 10px 20px 18px;
+  min-width: 0;
+  color: #dce8f4;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+.aca-v2-banner {
+  padding: 16px;
+  border: 1px solid #164c6e;
+  border-radius: 8px;
+  background: #041726;
+  margin: 12px;
+}
+.aca-v2-banner.err {
+  border-color: #ff4560;
+  color: #ffb8c4;
+}
+.aca-v2-toast {
+  display: block;
+  margin: -6px 0 8px 12px;
+  color: #18e7a0;
+  font-size: 11px;
+}
+.aca-v2-root .page-head {
+  height: 69px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.aca-v2-root .title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.aca-v2-root .page-head h1 {
+  font-size: 29px;
+  line-height: 1;
+  margin: 2px 0 0;
+  color: #f3f7fb;
+  letter-spacing: -0.03em;
+}
+.aca-v2-root .page-head p {
+  margin: 7px 0;
+  color: #70acd8;
+  font-size: 12px;
+}
+.aca-v2-root .beta {
+  font-size: 10px;
+  font-weight: 800;
+  color: #b6b7ff;
+  background: #5134c7;
+  border: 1px solid #775bf0;
+  border-radius: 5px;
+  padding: 4px 7px;
+}
+.aca-v2-root .engine-meta {
+  display: flex;
+  gap: 28px;
+  align-items: center;
+}
+.aca-v2-root .engine-live {
+  border: 1px solid #00a66e;
+  color: #00e49b;
+  border-radius: 20px;
+  padding: 7px 13px;
+  font-size: 10px;
+  font-weight: 800;
+}
+.aca-v2-root .engine-live i {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #00e9a0;
+  margin-right: 8px;
+  box-shadow: 0 0 8px rgba(0, 233, 160, 0.45);
+}
+.aca-v2-root .engine-meta > div {
+  border-left: 1px solid #16374e;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  font-size: 10px;
+}
+.aca-v2-root .engine-meta small {
+  color: #829aae;
+}
+.aca-v2-root .engine-meta span {
+  color: #c8d7e3;
+}
+.aca-v2-root .engine-meta b {
+  color: #8fbce2;
+  font-weight: 500;
+}
+.aca-v2-root .controlbar {
+  height: 80px;
+  border: 1px solid #164c6e;
+  border-radius: 9px;
+  background: #041726;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.aca-v2-root .field {
+  padding: 11px 9px;
+  min-width: 145px;
+}
+.aca-v2-root .field.small {
+  min-width: 115px;
+}
+.aca-v2-root .field label {
+  display: block;
+  color: #d9e5ee;
+  font-size: 10px;
+  font-weight: 650;
+  margin-bottom: 4px;
+}
+.aca-v2-root .field button,
+.aca-v2-root .field select,
+.aca-v2-root .analysis-id > div {
+  height: 34px;
+  width: 100%;
+  border: 1px solid #184664;
+  border-radius: 5px;
+  background: #08223a;
+  color: #e5edf4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+.aca-v2-root .check-area {
+  flex: 1;
+  border-left: 1px solid #17394f;
+  border-right: 1px solid #17394f;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  padding: 0 14px;
+}
+.aca-v2-root .check-area label {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.aca-v2-root .check-area input {
+  accent-color: #147fff;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+.aca-v2-root .refresh {
+  height: 38px;
+  border: 0;
+  border-radius: 6px;
+  background: #087ff1;
+  color: white;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 16px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.aca-v2-root .analysis-id {
+  min-width: 350px;
+}
+.aca-v2-root .analysis-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
+  gap: 10px;
+  min-height: 0;
+}
+.aca-v2-root .left-column {
+  min-width: 0;
+}
+.aca-v2-root .tf-strip {
+  height: 98px;
+  display: grid;
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 0;
+  border: 1px solid #174762;
+  border-radius: 8px;
+  overflow: hidden;
+  margin-bottom: 10px;
+  background: #041726;
+}
+.aca-v2-root .tf-card {
+  padding: 9px 10px;
+  border-right: 1px solid #173e57;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  cursor: pointer;
+}
+.aca-v2-root .tf-card:last-child {
+  border-right: 0;
+}
+.aca-v2-root .tf-card.selected {
+  background: #082842;
+  box-shadow: inset 0 0 0 1px #0787e8;
+}
+.aca-v2-root .tf-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 800;
+  font-size: 12px;
+  color: #e7eef4;
+}
+.aca-v2-root .tf-card strong {
+  font-size: 12px;
+}
+.aca-v2-root .tf-card span {
+  font-size: 11px;
+  color: #b5c7d4;
+}
+.aca-v2-root .tf-card b {
+  font-size: 14px;
+  color: #dce8f4;
+}
+.aca-v2-root .green {
+  color: #18e7a0 !important;
+}
+.aca-v2-root .red {
+  color: #ff4560 !important;
+}
+.aca-v2-root .chart-wrap {
+  height: 542px;
+  min-width: 0;
+}
+.aca-v2-root .chart-wrap .terminal-card {
+  height: 100% !important;
+  width: 100% !important;
+  margin: 0 !important;
+  border-radius: 9px !important;
+  overflow: hidden !important;
+}
+.aca-v2-root .chart-wrap .chart-head {
+  height: 58px !important;
+  padding: 0 12px !important;
+  gap: 12px !important;
+}
+.aca-v2-root .chart-wrap .chart-body {
+  height: 430px !important;
+}
+.aca-v2-root .chart-wrap .chart-foot {
+  height: 54px !important;
+  padding: 0 76px !important;
+}
+.aca-v2-root .analysis-panel {
+  height: 650px;
+  border: 1px solid #16445f;
+  border-radius: 9px;
+  background: #041421;
+  overflow: hidden;
+}
+.aca-v2-root .panel-tabs {
+  height: 46px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-bottom: 1px solid #173c54;
+}
+.aca-v2-root .panel-tabs button,
+.aca-v2-root .inner-tabs button {
+  border: 0;
+  background: transparent;
+  color: #a9bdd0;
+  font-size: 10px;
+  position: relative;
+  cursor: pointer;
+}
+.aca-v2-root .panel-tabs button.active,
+.aca-v2-root .inner-tabs button.active {
+  color: #dceaff;
+  font-weight: 700;
+}
+.aca-v2-root .panel-tabs button.active:after,
+.aca-v2-root .inner-tabs button.active:after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 0;
+  height: 3px;
+  background: #078cff;
+  border-radius: 4px 4px 0 0;
+}
+.aca-v2-root .analysis-scroll {
+  height: calc(100% - 46px);
+  overflow: auto;
+}
+.aca-v2-root .thesis-card {
+  margin: 12px 10px 0;
+  border: 1px solid #16425d;
+  border-radius: 8px;
+  background: linear-gradient(145deg, #071d2d, #061827);
+  overflow: hidden;
+}
+.aca-v2-root .analysis-symbol {
+  height: 45px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 13px;
+}
+.aca-v2-root .ai-mark {
+  width: 31px;
+  height: 31px;
+  border-radius: 7px;
+  background: #164663;
+  display: grid;
+  place-items: center;
+  color: #b8e8ff;
+}
+.aca-v2-root .analysis-symbol b {
+  font-size: 12px;
+}
+.aca-v2-root .setup-badge {
+  margin-left: auto;
+  border: 1px solid #009d69;
+  background: #053326;
+  color: #00e69d;
+  border-radius: 15px;
+  padding: 6px 9px;
+  font-size: 9px;
+  font-weight: 800;
+}
+.aca-v2-root .thesis-body {
+  display: flex;
+  gap: 11px;
+  padding: 6px 15px 13px;
+}
+.aca-v2-root .thesis-glyph {
+  color: #00e79d;
+}
+.aca-v2-root .thesis-body h2 {
+  font-size: 14px;
+  margin: 0 0 7px;
+}
+.aca-v2-root .thesis-body p {
+  font-size: 10px;
+  line-height: 1.65;
+  color: #b8c8d5;
+  margin: 0;
+}
+.aca-v2-root .metric-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+  padding: 0 10px 10px;
+}
+.aca-v2-root .metric-row > div {
+  min-height: 55px;
+  border: 1px solid #173b54;
+  border-radius: 6px;
+  background: #061827;
+  padding: 7px;
+}
+.aca-v2-root .metric-row small {
+  display: block;
+  color: #829bae;
+  font-size: 8px;
+  margin-bottom: 6px;
+}
+.aca-v2-root .metric-row strong {
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.aca-v2-root .metric-row .score {
+  position: relative;
+  padding-right: 42px;
+}
+.aca-v2-root .score i {
+  position: absolute;
+  right: 7px;
+  top: 10px;
+  width: 33px;
+  height: 33px;
+  border-radius: 50%;
+  background: conic-gradient(#078cff var(--score), #0d3046 0);
+  mask: radial-gradient(circle, #0000 56%, #000 58%);
+}
+.aca-v2-root .inner-tabs {
+  height: 42px;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  border-bottom: 1px solid #173b53;
+}
+.aca-v2-root .evidence-grid {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 0.85fr;
+  margin: 7px 9px;
+  border: 1px solid #173b54;
+  border-radius: 7px;
+  overflow: hidden;
+}
+.aca-v2-root .evidence-col {
+  padding: 9px;
+  border-right: 1px solid #173b54;
+  min-height: 175px;
+}
+.aca-v2-root .evidence-col:last-child {
+  border-right: 0;
+}
+.aca-v2-root .evidence-col h4 {
+  font-size: 9px;
+  margin: 0 0 9px;
+}
+.aca-v2-root .evidence-col.support h4 {
+  color: #15df98;
+}
+.aca-v2-root .evidence-col.conflict h4 {
+  color: #ff4861;
+}
+.aca-v2-root .evidence-col.missing h4 {
+  color: #ffbf19;
+}
+.aca-v2-root .evidence-row {
+  display: flex;
+  gap: 6px;
+  color: #c5d2dc;
+  font-size: 8.7px;
+  line-height: 1.35;
+  margin: 7px 0;
+}
+.aca-v2-root .evidence-icon {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.aca-v2-root .support .evidence-icon {
+  background: #0a6b4b;
+  color: #28f0ad;
+}
+.aca-v2-root .conflict .evidence-icon {
+  background: #7a2434;
+  color: #ff8a9a;
+}
+.aca-v2-root .missing .evidence-icon {
+  color: #ffbd12;
+  border: 1px solid #ffbd12;
+}
+.aca-v2-root .mini-grid {
+  display: grid;
+  grid-template-columns: 1.35fr 0.9fr 1fr;
+  gap: 5px;
+  margin: 7px 9px;
+}
+.aca-v2-root .mini-grid article {
+  border: 1px solid #173b54;
+  border-radius: 7px;
+  background: #061827;
+  padding: 9px;
+  min-height: 79px;
+}
+.aca-v2-root .mini-grid h4 {
+  font-size: 9px;
+  margin: 0 0 7px;
+}
+.aca-v2-root .mini-grid p {
+  font-size: 8.5px;
+  color: #b9c8d4;
+  line-height: 1.45;
+  margin: 0;
+}
+.aca-v2-root .mini-grid strong {
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.aca-v2-root .location-meter {
+  height: 7px;
+  border-radius: 4px;
+  background: #15384f;
+  margin-top: 9px;
+  position: relative;
+}
+.aca-v2-root .location-meter:before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 65%;
+  background: #087bca;
+  border-radius: 4px;
+}
+.aca-v2-root .location-meter i {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #13a8ff;
+  left: 62%;
+  top: -1px;
+}
+.aca-v2-root .bars {
+  font-size: 10px;
+  color: #72dcd3;
+  margin-top: 10px;
+  letter-spacing: 2px;
+}
+.aca-v2-root .dot-line {
+  margin: 6px 0 !important;
+}
+.aca-v2-root .expected {
+  margin: 7px 9px;
+  border: 1px solid #173b54;
+  border-radius: 7px;
+  background: #061827;
+  padding: 8px 10px;
+}
+.aca-v2-root .expected h4 {
+  font-size: 9px;
+  margin: 0 0 7px;
+}
+.aca-v2-root .expected h4 span {
+  font-weight: 400;
+  color: #8299aa;
+}
+.aca-v2-root .path-line {
+  display: flex;
+  justify-content: space-between;
+  position: relative;
+}
+.aca-v2-root .path-line:after {
+  content: '';
+  position: absolute;
+  left: 17px;
+  right: 17px;
+  bottom: 7px;
+  height: 2px;
+  background: #36566c;
+}
+.aca-v2-root .path-step {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  font-size: 8px;
+}
+.aca-v2-root .path-step i {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: #c8d0d8;
+  color: #14212a;
+  font-style: normal;
+  font-size: 8px;
+  font-weight: 800;
+}
+.aca-v2-root .path-step i.complete {
+  background: #20df9d;
+}
+.aca-v2-root .path-step i.current {
+  background: #aeb8c1;
+}
+.aca-v2-root .placeholder {
+  margin: 12px;
+  border: 1px solid #173b54;
+  border-radius: 7px;
+  padding: 18px;
+  color: #c5d5e1;
+}
+.aca-v2-root .placeholder b {
+  color: #fff;
+}
+.aca-v2-root .placeholder p {
+  font-size: 11px;
+  color: #8fa6b8;
+}
+@media (max-width: 1400px) {
+  .aca-v2-root .analysis-layout {
+    grid-template-columns: minmax(0, 1fr) 365px;
+  }
+  .aca-v2-root .analysis-id {
+    min-width: 280px;
+  }
+  .aca-v2-root .chart-wrap {
+    height: 520px;
+  }
+  .aca-v2-root .analysis-panel {
+    height: 628px;
+  }
+}

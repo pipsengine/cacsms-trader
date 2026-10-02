@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import calendar
 import functools
+import importlib
 import json
 import os
 import threading
@@ -976,6 +977,10 @@ def _smoke_test(body: dict[str, Any], actor: str) -> dict[str, Any]:
 
 
 def _confirm_change(symbols: list[str]) -> None:
+    try:
+        _aca_autonomous().on_confirmation_change(symbols)
+    except Exception:
+        pass
     if ORCHESTRATOR:
         ORCHESTRATOR.publish("CONFIRMATION_CHANGE", "STAGE7", stage=7, symbols=symbols)
     else:
@@ -1011,6 +1016,10 @@ VISION = vision_service.VisionService(_vision_ticks, on_run=_vision_change)
 
 
 def _channel_change(symbols: list[str], info: dict[str, Any]) -> None:
+    try:
+        _aca_autonomous().on_channel_change(symbols, info)
+    except Exception:
+        pass
     if ORCHESTRATOR:
         ORCHESTRATOR.publish("CHANNEL_CHANGE", "CHANNELS", stage=5, symbols=symbols, payload={"runId": info.get("runId")})
 
@@ -1046,7 +1055,27 @@ def _on_promotion_change(symbols: list[str], reason: str) -> None:
 SCANNER = scanner_service.ScannerService(_vision_ticks, _scanner_context, _on_promotion_change)
 
 
+def _aca_autonomous() -> Any:
+    try:
+        return importlib.import_module("ai_chart_analysis.autonomous_runner")
+    except ImportError:  # pragma: no cover
+        return importlib.import_module("bridge.mt5.ai_chart_analysis.autonomous_runner")
+
+
+def _init_autonomous_aca() -> None:
+    try:
+        runner = _aca_autonomous()
+        runner.configure(analyse=cmd_ai_chart_analysis, heartbeat=cmd_ai_chart_heartbeat)
+        runner.bootstrap_universe(list(regime.SYMBOLS))
+    except Exception as exc:  # pragma: no cover
+        print(f"[aca] autonomous runner init skipped: {exc}")
+
+
 def _on_candles(timeframe: str, symbols: list[str], kind: str = "INCREMENTAL") -> None:
+    try:
+        _aca_autonomous().on_candle_change(timeframe, symbols, kind)
+    except Exception:
+        pass
     if ORCHESTRATOR:
         bar_time = None
         if len(symbols) == 1:
@@ -1074,6 +1103,32 @@ ORCHESTRATOR = autonomy_service.AutonomousOrchestrator(
     list(regime.SYMBOLS), cmd_regime_run, SCANNER, VISION, DIRECTION, CONFIRM, RISK, EXECUTION, LEARNING,
     connected_fn=lambda: bool(_mt5_ready), channels=CHANNELS,
 )
+
+
+def cmd_ai_chart_latest(symbol: str) -> dict[str, Any]:
+    """Return the autonomous analysis view — no on-demand recompute for page loads."""
+    symbol = (symbol or "").strip().upper()
+    if symbol not in regime.SYMBOLS:
+        return {"ok": False, "message": f"Unknown symbol {symbol}"}
+    try:
+        cached = _aca_autonomous().get_cached(symbol)
+        if cached and cached.get("ok"):
+            out = dict(cached)
+            out["viewSource"] = "AUTONOMOUS_MEMORY"
+            return out
+    except Exception:
+        pass
+    try:
+        aca_store = importlib.import_module("ai_chart_analysis.analysis_store")
+    except ImportError:  # pragma: no cover
+        aca_store = importlib.import_module("bridge.mt5.ai_chart_analysis.analysis_store")
+    row = aca_store.latest_for_symbol(symbol)
+    if row:
+        row = dict(row)
+        row["ok"] = True
+        row["viewSource"] = "LIBRARY_LATEST"
+        return row
+    return {"ok": False, "symbol": symbol, "code": "NO_ANALYSIS_YET", "message": "Autonomous analysis not ready for this symbol yet"}
 
 
 def _econ_quotes(symbols: list[str]) -> dict[str, dict[str, float]]:
@@ -1485,6 +1540,115 @@ def cmd_channel_snapshot(symbol: str) -> dict[str, Any]:
     return {**base, "selected": selected, "events": events, "latencyMs": int((time.time() - started) * 1000), "timings": timings}
 
 
+_ACA_ANALYSIS_CACHE: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+
+
+def _aca_last_closed_from_channel(channel_resp: dict[str, Any]) -> dict[str, int]:
+    selected = channel_resp.get("selected") or {}
+    channels = selected.get("channels") or {}
+    out: dict[str, int] = {}
+    for ch_key, ch in channels.items():
+        if not isinstance(ch, dict):
+            continue
+        try:
+            from ai_chart_analysis.models import CHANNEL_TO_STRIP
+        except ImportError:  # pragma: no cover
+            from bridge.mt5.ai_chart_analysis.models import CHANNEL_TO_STRIP  # type: ignore
+        strip_tf = CHANNEL_TO_STRIP.get(ch_key, ch_key)
+        ts = ch.get("lastCandleTime") or ch.get("lastCandleClose")
+        if ts is None:
+            continue
+        ms = int(ts)
+        if ms < 1_000_000_000_000:
+            ms *= 1000
+        out[str(strip_tf)] = ms
+    return out
+
+
+def cmd_ai_chart_analysis(
+    symbol: str,
+    mode: str = "FULL_ANALYSIS",
+    primary_tf: str = "H1",
+    lookback: int = 80,
+    persist: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+    symbol = (symbol or "").strip().upper()
+    if symbol not in regime.SYMBOLS:
+        return {"ok": False, "message": f"Unknown symbol {symbol}"}
+    if not force and not persist and mode == "FULL_ANALYSIS" and primary_tf == "H1" and int(lookback) >= 400:
+        latest = cmd_ai_chart_latest(symbol)
+        if latest.get("ok"):
+            return latest
+    try:
+        aca = importlib.import_module("ai_chart_analysis.analysis_service")
+        orch = importlib.import_module("ai_chart_analysis.analysis_orchestrator")
+    except ImportError:  # pragma: no cover
+        aca = importlib.import_module("bridge.mt5.ai_chart_analysis.analysis_service")
+        orch = importlib.import_module("bridge.mt5.ai_chart_analysis.analysis_orchestrator")
+    fw = OPPORTUNITY.framework
+    sources = {
+        "channel": cmd_channel_snapshot(symbol),
+        "supertrend": cmd_supertrend_snapshot(symbol),
+        "framework": fw,
+        "opportunity": OPPORTUNITY.snapshot_data,
+        "confirm": confirm_store.load_detail(symbol),
+    }
+    cache_key = (symbol.upper(), mode.upper(), primary_tf.upper(), int(lookback))
+    current_lc = _aca_last_closed_from_channel(sources["channel"]) if sources["channel"].get("ok") else {}
+    prev_entry = _ACA_ANALYSIS_CACHE.get(cache_key)
+    now_ms = int(time.time() * 1000)
+
+    if not persist and not force and prev_entry and prev_entry.get("payload"):
+        ok_refresh, reason = orch.should_refresh_analysis(
+            previous_last_closed=prev_entry.get("lastClosed"),
+            current_last_closed=current_lc,
+            previous_analysis_ms=prev_entry.get("generatedAtMs"),
+            now_ms=now_ms,
+        )
+        if not ok_refresh:
+            cached = dict(prev_entry["payload"])
+            cached["servedFromCache"] = True
+            cached["refreshReason"] = reason
+            return cached
+
+    result = aca.run_analysis(
+        symbol,
+        mode=mode,
+        primary_tf=primary_tf,
+        lookback=lookback,
+        persist=persist,
+        sources=sources,
+        data_mode="LIVE",
+    )
+    if result.get("ok"):
+        _ACA_ANALYSIS_CACHE[cache_key] = {
+            "lastClosed": result.get("lastClosedCandle") or current_lc,
+            "generatedAtMs": result.get("generatedAtMs") or now_ms,
+            "payload": result,
+        }
+    return result
+
+
+def cmd_ai_chart_heartbeat(symbol: str) -> dict[str, Any]:
+    """Lightweight closed-bar fingerprint for incremental AI refresh (no full chart rebuild)."""
+    symbol = (symbol or "").strip().upper()
+    if symbol not in regime.SYMBOLS:
+        return {"ok": False, "message": f"Unknown symbol {symbol}"}
+    h = channel_store.hierarchy(symbol)
+    if not h:
+        return {"ok": False, "symbol": symbol, "message": "No channel hierarchy for symbol"}
+    channels = h.get("channels") or {}
+    last_closed = _aca_last_closed_from_channel({"ok": True, "selected": {"channels": channels}})
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "lastClosedCandle": last_closed,
+        "generatedAtMs": int(time.time() * 1000),
+        "runId": h.get("runId"),
+    }
+
+
 def _scanner_state() -> dict[str, Any]:
     state = scanner_store.load_state()
     state["service"] = {k: SCANNER.meta.get(k) for k in ("status", "message", "runAt", "runs", "errors", "lastError")}
@@ -1881,6 +2045,51 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200 if card else 404, {"ok": bool(card), "symbol": symbol, "timeframe": tf, "card": card, "settings": result.get("settings")})
                     return
                 self._json(200 if result.get("ok") else 400, result)
+                return
+            if parsed.path == "/ai/chart-analysis/latest":
+                qs = parse_qs(parsed.query)
+                symbol = (_q(qs, "symbol") or "XAUUSD").upper()
+                self._json(200, cmd_ai_chart_latest(symbol))
+                return
+            if parsed.path == "/ai/chart-analysis/heartbeat":
+                qs = parse_qs(parsed.query)
+                symbol = (_q(qs, "symbol") or "XAUUSD").upper()
+                self._json(200, cmd_ai_chart_heartbeat(symbol))
+                return
+            if parsed.path == "/ai/chart-analysis/analyse":
+                qs = parse_qs(parsed.query)
+                symbol = (_q(qs, "symbol") or "XAUUSD").upper()
+                mode = (_q(qs, "mode") or "FULL_ANALYSIS").upper()
+                primary_tf = (_q(qs, "primaryTf") or _q(qs, "primary_tf") or "H1").upper()
+                lookback = int(_q(qs, "lookback") or 80)
+                persist = (_q(qs, "persist") or "0") in ("1", "true", "yes")
+                force = (_q(qs, "force") or "0") in ("1", "true", "yes")
+                self._json(200, cmd_ai_chart_analysis(symbol, mode, primary_tf, lookback, persist, force))
+                return
+            if parsed.path == "/ai/chart-analysis/library":
+                try:
+                    aca_store = importlib.import_module("ai_chart_analysis.analysis_store")
+                except ImportError:  # pragma: no cover
+                    aca_store = importlib.import_module("bridge.mt5.ai_chart_analysis.analysis_store")
+                qs = parse_qs(parsed.query)
+                filters = {
+                    "symbol": _q(qs, "symbol"),
+                    "status": _q(qs, "status"),
+                    "direction": _q(qs, "direction"),
+                    "analysisId": _q(qs, "id"),
+                    "limit": _q(qs, "limit"),
+                    "offset": _q(qs, "offset"),
+                }
+                self._json(200, aca_store.library_query({k: v for k, v in filters.items() if v}))
+                return
+            if parsed.path == "/ai/chart-analysis/detail":
+                try:
+                    aca_store = importlib.import_module("ai_chart_analysis.analysis_store")
+                except ImportError:  # pragma: no cover
+                    aca_store = importlib.import_module("bridge.mt5.ai_chart_analysis.analysis_store")
+                aid = _q(parse_qs(parsed.query), "id") or ""
+                row = aca_store.get_run(aid) if aid else None
+                self._json(200 if row else 404, row or {"ok": False, "message": "Analysis not found"})
                 return
             if parsed.path == "/opportunity/framework":
                 import opportunity_framework
@@ -2411,6 +2620,11 @@ def main() -> None:
         execution_store.ensure_schema()
         autonomy_store.ensure_schema()
         channel_store.ensure_schema()
+        try:
+            aca_store = importlib.import_module("ai_chart_analysis.analysis_store")
+        except ImportError:  # pragma: no cover
+            aca_store = importlib.import_module("bridge.mt5.ai_chart_analysis.analysis_store")
+        aca_store.ensure_schema()
         print("[mt5-bridge] S1-S10 runtime + autonomy control-plane schema ready")
         history_ready = True
     except Exception as exc:
@@ -2468,6 +2682,8 @@ def main() -> None:
         print("[mt5-bridge] multi-resolution opportunity scan started (normal continuation + TiT L1–L4, all 29 instruments)")
         ORCHESTRATOR.start()
         print("[mt5-bridge] persistent Autonomous Orchestrator + Event Bus + World Model started")
+        _init_autonomous_aca()
+        print("[mt5-bridge] autonomous AI chart analysis runner started (market-driven, all symbols)")
     ECONOMIC.start()
     print("[mt5-bridge] Economic Intelligence engine started")
     print("[mt5-bridge] keep MetaTrader 5 running; Ctrl+C to stop")

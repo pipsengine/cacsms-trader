@@ -253,6 +253,9 @@ export type BridgeEnrichRow = {
   ok?: boolean;
   bid?: number;
   ask?: number;
+  last?: number;
+  time?: string;
+  digits?: number;
   spread?: number;
   change?: number;
   d1?: string;
@@ -263,7 +266,6 @@ export type BridgeEnrichRow = {
   confidence?: number;
   strengthDiff?: number;
   channelPos?: number;
-  time?: string;
   bars?: Record<string, number>;
   message?: string;
 };

@@ -17,6 +17,11 @@ This starts the web app and bridge together, and opens or attaches to the local 
 terminal. Set `MT5_TERMINAL_PATH` in `.env` to a specific `terminal64.exe` when
 multiple installations exist. To run only the bridge, use `npm run mt5:bridge`.
 
+Both `npm run dev` and `npm run mt5:bridge` start a local control service on
+`http://127.0.0.1:8766` so the UI can restart the bridge from **System Control** or
+**MT5 Connection → Logs & Health** (`POST /restart`). Use `npm run mt5:bridge:direct`
+only if you do not want supervisor restart control.
+
 The bridge listens on `http://127.0.0.1:8765`. Vite proxies `/mt5-bridge` to this port.
 On first start it creates and migrates `database/db_cacsms-trader.db` using SQLite.
 

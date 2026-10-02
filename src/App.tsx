@@ -22,6 +22,9 @@ import { MT5ConnectionPage } from './features/mt5-connection';
 import { ChannelAnalysisPage } from './features/channel-analysis';
 import { EconomicIntelligencePage } from './features/economic-intelligence';
 import { TradingOpportunitiesPage } from './features/trading-opportunities';
+import { AIChartAnalysisPage } from './features/ai-chart-analysis';
+import { AIChartMockPage } from './features/ai-chart-analysis/AIChartMockPage';
+import { AIAnalysisLibraryPage } from './features/ai-analysis-library/AIAnalysisLibraryPage';
 
 const slug = (label: string) => label.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
@@ -34,6 +37,8 @@ const pages: Record<string, React.ComponentType> = {
   'Historical Regime': Regime,
   'Market Scanner': Scanner,
   'Economic Intelligence': EconomicIntelligencePage,
+  'AI Chart Analysis': AIChartAnalysisPage,
+  'AI Analysis Library': AIAnalysisLibraryPage,
   'HTF Market Vision': Vision,
   'Channel Analysis': ChannelAnalysisPage,
   'Structural Direction': Direction,
@@ -53,13 +58,14 @@ function pageFromHash(): string {
   if (pages[raw]) return raw;
   if (raw === 'risk-and-authorization') return 'Opportunities & Risk';
   if (raw === 'trading-opportunities') return 'Trading Opportunities';
+  if (raw === 'ai-chart-mock') return '__ai_chart_mock__';
   return pageBySlug[raw] || 'Overview';
 }
 
 export default function App() {
   const [page, setPageState] = useState(pageFromHash);
   const [collapsed, setCollapsed] = useSidebarCollapsed();
-  const P = pages[page] || Overview;
+  const P = page === '__ai_chart_mock__' ? AIChartMockPage : pages[page] || Overview;
 
   const setPage = (next: string) => {
     const label = pages[next] ? next : 'Overview';

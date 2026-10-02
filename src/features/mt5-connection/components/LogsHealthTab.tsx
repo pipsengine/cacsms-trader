@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { MT5Snapshot } from '../types/mt5.types';
+import { BridgeRestartPanel } from '../../../components/BridgeRestartPanel';
 import { MetricCard } from './MetricCard';
 import { StatusBadge } from './StatusBadge';
 
@@ -15,6 +16,9 @@ export function LogsHealthTab({ s }: { s: MT5Snapshot }) {
         <MetricCard label="Heartbeat" value={s.health.heartbeat} />
         <MetricCard label="Reconciliation" value={s.health.reconciliation} />
       </div>
+      <section className="mt5-panel bridge-restart-panel">
+        <BridgeRestartPanel compact />
+      </section>
       <section className="mt5-panel">
         <div className="mt5-section-title">
           <div>

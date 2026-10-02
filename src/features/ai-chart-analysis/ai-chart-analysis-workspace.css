@@ -1,0 +1,212 @@
+.aca-figma.aca-figma-page {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.aca-figma .acaWorkspaceShell {
+  display: grid;
+  grid-template-columns: minmax(0, 1.9fr) minmax(390px, 0.82fr);
+  gap: 10px;
+  height: clamp(600px, calc(100vh - 280px), 720px);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.aca-figma .acaWorkspaceShell .rightAnalysis {
+  border: 1px solid #1b3047;
+  border-radius: 8px;
+  background: #091624;
+}
+
+.aca-figma .acaWorkspaceShell .leftWork,
+.aca-figma .acaWorkspaceShell .rightAnalysis {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.aca-figma .acaWorkspaceShell .leftWork .chartPanel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.aca-figma .acaWorkspaceShell .chartWrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.aca-figma .acaWorkspaceShell .chartWrap .chart {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.aca-figma .acaWorkspaceShell .rightAnalysis .aiCard {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.aca-figma .tfstrip {
+  margin-bottom: 10px;
+}
+
+.aca-figma .tfstrip .tf {
+  min-width: 0;
+}
+
+.aca-figma .tfstrip .tf strong,
+.aca-figma .tfstrip .tf small {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.aca-figma .evidenceColumns {
+  max-height: none;
+}
+
+.aca-figma .thesisHero p {
+  white-space: pre-line;
+}
+
+.aca-figma .evidenceColumns p {
+  font-size: 11px;
+  line-height: 1.35;
+  margin: 6px 0;
+}
+
+.aca-figma .evidenceMore {
+  color: #6eb6f0;
+  font-size: 11px;
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.aca-figma .rawEvidenceList {
+  max-height: 280px;
+  overflow-y: auto;
+  font-size: 11px;
+}
+
+.aca-figma .rawEvidenceList .ev {
+  padding: 6px 0;
+  border-bottom: 1px solid #152536;
+}
+
+.aca-figma .path i.done,
+.aca-figma .pathLabels span.done {
+  background: #37d69d;
+  color: #052019;
+}
+
+.aca-figma .path i.active,
+.aca-figma .pathLabels span.active {
+  background: #168ff3;
+  color: #052019;
+}
+
+.aca-figma .path span.done {
+  background: #37d69d;
+}
+
+.aca-figma .path span.active {
+  background: linear-gradient(90deg, #37d69d, #168ff3);
+}
+
+.aca-figma .metricsScoreCell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 2px;
+}
+
+.aca-figma .evidenceScoreRing {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  margin-top: 2px;
+}
+
+.aca-figma .evidenceScoreRing b {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%);
+  font-size: 11px;
+  color: #8ddcff;
+}
+
+.aca-figma .evidenceScoreRing small {
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  transform: translateX(-50%);
+  font-size: 7px;
+  color: #607791;
+}
+
+.aca-figma .thesisDetail {
+  padding: 0 10px 8px;
+  font-size: 9px;
+  line-height: 1.5;
+  color: #8fa3bd;
+  white-space: pre-line;
+  max-height: 72px;
+  overflow-y: auto;
+}
+
+.aca-figma .evidenceMoreRow {
+  grid-column: 1 / -1;
+  text-align: center;
+  background: none;
+  border: 0;
+  width: 100%;
+  padding: 4px 0 0;
+}
+
+.aca-figma .target {
+  position: absolute;
+  right: 3%;
+  z-index: 4;
+  border: 1px solid #32dd8f;
+  background: #0a2a1c;
+  color: #7dffb8;
+  padding: 2px 6px;
+  font-size: 9px;
+  pointer-events: none;
+}
+
+.aca-figma .target.t1 {
+  top: 28%;
+}
+
+.aca-figma .target.t2 {
+  top: 18%;
+}
+
+.aca-figma .chainCompact {
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+@media (max-width: 1450px) {
+  .aca-figma .acaWorkspaceShell {
+    grid-template-columns: 1fr;
+    height: auto;
+    max-height: none;
+  }
+
+  .aca-figma .acaWorkspaceShell .rightAnalysis .aiCard {
+    max-height: 520px;
+  }
+}

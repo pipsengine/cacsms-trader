@@ -87,6 +87,14 @@ main>*{min-width:0;max-width:100%}
 .table-wrap th:first-child,.table-wrap td:first-child{position:sticky;left:0;z-index:1;background:#0c1a2a}
 .table-wrap thead th:first-child{z-index:2;background:#0d1b2b}
 .table-wrap tbody tr:hover td:first-child,.table-wrap tbody tr.row-selected td:first-child{background:#10283d}
+.bridge-restart{margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
+.bridge-restart.compact h3{display:none}
+.bridge-restart-hint{font-size:12px;line-height:1.45;margin:0 0 10px}
+.bridge-restart-row{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+.bridge-restart-detail{font-size:12px;margin:8px 0 0}
+.bridge-restart-panel .bridge-restart{margin:0;padding:0;border:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin .8s linear infinite}
 @container app-main (max-width: 1080px){
   .grid-2,.grid-vision{grid-template-columns:minmax(0,1fr)}
   .grid-3,.health-grid{grid-template-columns:repeat(2,minmax(0,1fr))}

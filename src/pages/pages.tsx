@@ -19,6 +19,7 @@ import { ExecutionPositionsPage, executionStageStatus, useExecutionStore } from 
 import { PerformancePage } from '../features/performance';
 import { useAutonomyState } from '../features/workflow-engine/services/autonomyStore';
 import { EmailNotificationsPanel } from '../features/notifications/EmailNotificationsPanel';
+import { BridgeRestartPanel } from '../components/BridgeRestartPanel';
 
 const dir = (x: string) => (x === 'BULLISH' ? 'green' : x === 'BEARISH' ? 'red' : 'gray');
 const PAGE_SIZE = 15;
@@ -464,6 +465,7 @@ export function SystemControl() {
           ))}
         </div>
         {dbError && <p className="alert">{dbError}</p>}
+        <BridgeRestartPanel />
         <button className="primary" style={{ marginTop: 12 }} onClick={() => void refreshFromDb()}>
           Reload from db_Cacsms-Trader
         </button>

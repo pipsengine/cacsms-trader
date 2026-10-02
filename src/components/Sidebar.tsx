@@ -21,7 +21,9 @@ import {
   PlayCircle,
   Radar,
   ScanSearch,
+  Sparkles,
   ServerCog,
+  Library,
   ShieldAlert,
   SlidersHorizontal,
   Spline,
@@ -43,6 +45,8 @@ export const nav: NavItem[] = [
   { label: 'Historical Regime', icon: History },
   { label: 'Market Scanner', icon: Radar },
   { label: 'Economic Intelligence', icon: CalendarDays },
+  { label: 'AI Chart Analysis', icon: Sparkles },
+  { label: 'AI Analysis Library', icon: Library },
   { label: 'HTF Market Vision', icon: Telescope, section: 'MARKET VISION', sectionIcon: Aperture },
   { label: 'Channel Analysis', icon: Spline },
   { label: 'Structural Direction', icon: Waypoints },
@@ -88,7 +92,7 @@ export default function Sidebar({
           : 'ENGINE DEGRADED';
   const engineOn = bridgeUp && Boolean(auto) && autonomy?.orchestrator?.status === 'HEALTHY';
   const engineHint = !bridgeUp
-    ? 'Bridge stopped. Run npm run mt5:bridge'
+    ? 'Bridge stopped — System Control → Restart bridge, or npm run dev'
     : !auto
       ? 'Analysis continues. New orders are paused.'
       : openCount

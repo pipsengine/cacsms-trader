@@ -1,0 +1,9 @@
+export type Candle={time:number;open:number;high:number;low:number;close:number;volume:number};
+export type Point={time:number;price:number};
+export type LineSeries={id:string;points:Point[];tone:'bull'|'bear'|'neutral';width?:number;dash?:string};
+export type Zone={id:string;from:number;to:number;low:number;high:number;label:string;tone:'supply'|'demand'};
+export type Level={id:string;price:number;label:string;tone:'target'|'invalid'|'break'|'price';fromTime?:number};
+export type Marker={id:string;time:number;price:number;label:string;tone:'bos'|'choch'|'number';number?:number};
+export type Channel={upper:Point[];lower:Point[];mid?:Point[]};
+export type ScenarioPoint={time:number;price:number;label?:string};
+export type ChartModel={symbol:string;name:string;timeframe:string;ohlc:Candle;candles:Candle[];supertrend:LineSeries[];channel:Channel;zones:Zone[];levels:Level[];markers:Marker[];scenario:ScenarioPoint[]};
